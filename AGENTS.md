@@ -35,9 +35,9 @@ If two documents conflict, stop and reconcile them. Prefer the more specific doc
 
 ## Phase gate
 
-Follow the phase recorded in `docs/STATUS.md`. As of 2026-09-02 this repository is documentation-only: do not add application code, frameworks, packages, generated assets, cloud resources, or CI workflows until the owner explicitly starts implementation.
+Follow the phase recorded in `docs/STATUS.md`. On 2026-09-03 the owner explicitly started implementation of the proposal prototype. The current implementation scope is the dependency-free single HTML in `prototype/` plus its verification script and supporting documentation.
 
-Repository setup, Markdown documents, Git metadata, and GitHub project hygiene are allowed in the documentation phase.
+Do not add frameworks, packages, `node_modules`, cloud resources, external runtime assets, or CI workflows for the proposal prototype. Event-MVP application code remains gated on its separate technical decisions.
 
 ## Working agreements
 
@@ -65,7 +65,15 @@ Repository setup, Markdown documents, Git metadata, and GitHub project hygiene a
 
 ## Implementation and verification
 
-Technology choices and commands are intentionally undecided. Once implementation starts, record the canonical setup, development, lint, type-check, test, build, and end-to-end commands here and in `CONTRIBUTING.md`.
+The proposal prototype needs no setup, install, server, or build. Open `prototype/guild-market-demo.html` directly in a browser. Its canonical automated check is:
+
+```sh
+node scripts/verify-prototype.mjs
+```
+
+This checks JavaScript syntax, offline constraints, core state transitions, market-price invariants, order guards, investigation-ticket behavior, settlement, and reload recovery. PC/mobile visual checks and the complete `file://` playthrough remain manual checks in `docs/PROTOTYPE_SPEC.md`.
+
+The event-MVP technology choices and commands are intentionally undecided.
 
 When code exists:
 
