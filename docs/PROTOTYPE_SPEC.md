@@ -1,7 +1,10 @@
 # Proposal Prototype Specification
 
 最終更新：2026-09-03
-状態：Ready for implementation
+状態：Implemented / human review pending
+
+- 実装：`prototype/guild-market-demo.html`
+- 自動検証：`node scripts/verify-prototype.mjs`
 
 ## 1. 目的
 
