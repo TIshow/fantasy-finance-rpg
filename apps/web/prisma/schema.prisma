@@ -55,6 +55,8 @@ model Team {
   nickname  String
   tokenHash String   @unique @map("token_hash")
   joinedAt  DateTime @default(now()) @map("joined_at") @db.Timestamptz(3)
+  /// 最後に状態を取得した時刻（運営画面の接続状況。書き込みは5秒に1回まで）
+  lastSeenAt DateTime? @map("last_seen_at") @db.Timestamptz(3)
 
   match   Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
   account Account?

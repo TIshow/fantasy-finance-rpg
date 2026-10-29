@@ -164,11 +164,12 @@ scripts/check_docs.py             # 文書の参照チェック（uv run）
 | Next.js 16、React 19、TypeScript 5 | 画面とAPIを1つのアプリにする（kabu-leagueと同じ） | 0 | 通常のNodeサーバーとして動かせる |
 | Prisma 7＋`@prisma/adapter-pg` | スキーマ、移行、トランザクション（kabu-leagueと同じ） | 0 | SQLの移行ファイルに置き換えられる |
 | zod 4 | APIの入力検証 | 0 | 手書きの検証に置き換えられる |
-| Tailwind CSS 4 | スマートフォン向けの画面（kabu-leagueと同じ。P3で導入） | 0 | 通常のCSSに置き換えられる |
+| Tailwind CSS 4 | スマートフォン向けの画面（kabu-leagueと同じ） | 0 | 通常のCSSに置き換えられる |
+| qrcode | 運営画面の参加用QRコード（SVGをブラウザで作る。外部サービスは使わない） | 0 | ほかのQRライブラリに置き換えられる |
 | Vitest、tsx | エンジンとDBのテスト、スクリプトの実行 | 0 | — |
 | asdf（Node 24.16.0） | Nodeのバージョンを揃える（kabu-leagueと同じ） | 0 | `.tool-versions`はほかのバージョン管理でも読める |
 | uv（Python 3.12） | 文書チェックなどPythonのスクリプトを動かす。外部パッケージは使わない | 0 | 通常のPythonで動く |
-| Playwright | 複数端末のE2E（P3で導入） | 0 | — |
+| Playwright | 参加者6・運営・会場の8画面のE2E | 0 | — |
 | Docker（Postgres 17） | ローカル開発とDB統合テスト | 0 | — |
 | Supabase（Postgresのみ、東京） | 本番DB | Freeは7日間アクセスがないと停止する。Proは月25ドル〜（契約前に確認。既存の組織を流用できる可能性あり） | `pg_dump`で他のPostgresへ移せる |
 | Vercel（hnd1） | ホスティング | Hobbyは非商用に限られる。Proは1人月20ドル〜（契約前に確認。既存のチームを流用できる可能性あり） | Nodeが動く環境ならどこでも動く |
@@ -200,6 +201,7 @@ match_events(id, match_id, type, actor, public_payload, created_at)     -- 監�
 
 - 金額と口数は整数だけです。小数は保存しません。
 - `accounts.key`はエンジンの口座ID（`team:<teamId>`、`npc:<key>`、`mm`）です。
+- `teams.last_seen_at`は、最後に状態を取得した時刻です（運営画面の接続状況）。書き込みは1商会につき5秒に1回までに抑えます。
 - `matches.q`は現在のLMSRの状態です。`matches.timing`は試合ごとの時間配分で、内部テストの短縮版に使います。
 - CHECK制約とトリガーで、負の残高と負の保有を拒否します（市場係を除く）。
 - NPCの注文はシナリオの注文表から読みます。作成時の注文表とシナリオのハッシュを`matches`に保存し、変わっていたら清算を止めます。NPCの約定は`fills`に保存します（100商会×5ラウンドで最大500行）。
@@ -222,6 +224,7 @@ match_events(id, match_id, type, actor, public_payload, created_at)     -- 監�
 | POST | `/api/m/:id/tick` | 誰でも | `advanceIfDue`。期限前なら何もしない |
 | POST | `/api/m/:id/host/:action` | 運営 | start、pause、resume、extend、close-now、next、abort。`x-host-token`ヘッダーが必要 |
 | GET | `/api/m/:id/screen` | 会場画面・運営 | 公開情報だけ |
+| GET | `/api/m/:id/teams` | 運営 | 各商会の接続状況（最後に状態を取得してからの秒数）と、今のラウンドの予約数。予約の中身は返さない。`x-host-token`が必要 |
 
 - 書き込み系は`x-gm-client: 1`ヘッダーとJSONを必須にします。入力はzodで確かめます。
 - 公開時刻（`reveal_at`）の前は、公開状態にも本人の状態にも清算前の値を返します。全端末が公開時刻に取り直して、一斉に新価格を表示します。決算後は、価格の推移と本人の全約定を返します（リプレイ用の別APIは作らない）。
@@ -254,7 +257,10 @@ COMMIT
 - **参加：** 参加コード（6桁）と商会名で参加します。サーバーは32バイトの乱数トークンを発行し、試合ごとのhttpOnly・SameSite=Laxのcookieに入れます（本番ではSecureも付ける）。DBにはSHA-256のハッシュだけを保存します。開始後の参加は受け付けません（運営が許可する仕組みは、必要になったら足す）。提案会議MVPの定員は12商会です。
 - **運営：** 試合の作成時に別の32バイトの乱数トークンを発行し、運営画面のURLの`#`以降に入れます（サーバーのログや参照元に残りません）。参加コードから運営権限には届きません。これは提案会議MVPだけの暫定措置です。イベントMVPでは、Supabase Authなどで改めて判断します（O-007）。
 - 書き込み系のAPIでは独自ヘッダーとJSONを必須にします（CSRF対策）。注文の持ち主はトークンから決め、URLのIDを信用しません。
-- すべての応答に、他サイトへの埋め込みを禁じるヘッダー（`frame-ancestors 'none'`、`X-Frame-Options`）と`nosniff`、`Referrer-Policy: same-origin`を付けます（`next.config.ts`）。トークンの照合は比較時間が一定の方法で行います。
+- すべての応答にセキュリティヘッダーを付けます（`next.config.ts`）。
+  - CSPで読み込み先を自分のサイトだけに絞る。Next.jsが埋め込むインラインのスクリプトとスタイルのため`'unsafe-inline'`を許し、開発時だけ`'unsafe-eval'`も許す。外部のスクリプト・フォント・画像は使わない
+  - 他サイトへの埋め込みを禁じる（`frame-ancestors 'none'`、`X-Frame-Options`）。`nosniff`、`Referrer-Policy: same-origin`も付ける
+  - インラインのスクリプトをnonceで絞るのは、必要になったら行うトークンの照合は比較時間が一定の方法で行います。
 - 他の商会の予約や保有は誰にも返しません。会場画面に出すのは、価格、人数の集計、順位（商会名と総資産）だけです。
 - DBの接続情報はサーバーの環境変数にだけ置き、ブラウザにSupabaseのキーを渡しません。SupabaseのData APIはpublicスキーマを外部に公開するため、全テーブルでRLSを有効にし、ポリシーは置きません（全拒否）。
 - アプリのログにトークンや商会名を出しません。提案会議の試合データは、会議の30日後にスクリプトで削除します。

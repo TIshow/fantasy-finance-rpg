@@ -83,9 +83,10 @@ npm run typecheck
 npm run build
 npm run simulate     # 10,000 random games and the k table (about 70 seconds)
 npm run dev          # then: npm run match:create -- --fast, and npm run smoke for a 6-team HTTP run
+npm run test:e2e     # Playwright: 6 players, host, and venue screen play 5 rounds on a production build (about 2 minutes)
 ```
 
-Regenerate the reviewed NPC sheet only on purpose (`npm run npc:generate -- 2 20261029`), and review the diff before committing it. Check document links and section references from the repository root with `uv run scripts/check_docs.py`. Record new commands (E2E) here and in `CONTRIBUTING.md` when they are added.
+Regenerate the reviewed NPC sheet only on purpose (`npm run npc:generate -- 2 20261029`), and review the diff before committing it. Check document links and section references from the repository root with `uv run scripts/check_docs.py`. Record new commands here and in `CONTRIBUTING.md` when they are added.
 
 When code exists:
 
