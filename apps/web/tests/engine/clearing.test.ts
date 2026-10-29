@@ -78,6 +78,13 @@ describe("一斉約定（MARKET_SPEC §8 の例）", () => {
     expect(r.fills[0]).toMatchObject({ filled: 0, reason: "unfilled_budget", cashDelta: 0 });
   });
 
+  it("同じ口座・同じギルドの注文が2つあるときや、予約額が負のときは清算しない", () => {
+    const market = { guilds: ["x", "y"], b: 100, q: { x: 0, y: 0 } };
+    const buy: RoundOrder = { accountId: "p", kind: "player", guildId: "x", side: "buy", qty: 1, reserveCash: 99 };
+    expect(() => clearRound({ market, orders: [buy, { ...buy, side: "sell", reserveCash: 0 }] })).toThrow(/duplicate/);
+    expect(() => clearRound({ market, orders: [{ ...buy, reserveCash: -1 }] })).toThrow(/reserve/);
+  });
+
   it("例4 参加者0人：NPCだけで目標どおりの値動きになる", () => {
     let m = createMatch(scenario, sheet, []);
     const path = [currentPrices(m)];

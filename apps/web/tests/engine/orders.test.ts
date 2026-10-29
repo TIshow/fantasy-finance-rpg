@@ -27,6 +27,14 @@ describe("予約", () => {
     expect(validate(account(1000), { guildId: "unknown", side: "buy", qty: 1 })).toEqual({ ok: false, reason: "unknown_guild" });
   });
 
+  it("売買の向きは buy と sell だけ。受け取った余計な項目は注文に持ち込まない", () => {
+    const short = { guildId: "dragon", side: "short", qty: 1 } as unknown as RoundOrder;
+    expect(validate(account(1000, 3), short)).toEqual({ ok: false, reason: "invalid_side" });
+    const forged = { guildId: "dragon", side: "buy", qty: 1, accountId: "mm", kind: "npc", reserveCash: 0, extra: 1 };
+    const r = validate(account(1000), forged as RoundOrder);
+    expect(r.ok && r.order).toEqual({ accountId: "team:a", kind: "player", guildId: "dragon", side: "buy", qty: 1, reserveCash: 60 });
+  });
+
   it("使える現金は、他の枠の予約額を引いた残り", () => {
     const first = validate(account(1000), { guildId: "airship", side: "buy", qty: 10 });
     expect(first.ok && first.order.reserveCash).toBe(900);

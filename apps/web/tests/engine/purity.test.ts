@@ -8,7 +8,8 @@ describe("エンジンの境界", () => {
     const dir = fileURLToPath(new URL("../../src/engine/", import.meta.url));
     for (const file of readdirSync(dir).filter((f) => f.endsWith(".ts"))) {
       const source = readFileSync(dir + file, "utf8");
-      const imports = [...source.matchAll(/(?:import|export)[^"']*from\s+["']([^"']+)["']/g)].map((m) => m[1]);
+      // from "x"、副作用だけの import "x"、動的な import("x")、require("x") をすべて拾う
+      const imports = [...source.matchAll(/(?:\bfrom|\bimport\s*\(?|\brequire\s*\()\s*["']([^"']+)["']/g)].map((m) => m[1]);
       for (const spec of imports) expect(spec, `${file} imports ${spec}`).toMatch(/^\.\//);
     }
   });

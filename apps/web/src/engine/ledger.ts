@@ -10,6 +10,16 @@ function cloneAccount(a: Account): Account {
   };
 }
 
+function cloneAccounts(accounts: Accounts): Accounts {
+  return Object.fromEntries(Object.entries(accounts).map(([id, a]) => [id, cloneAccount(a)]));
+}
+
+function marketMaker(accounts: Accounts): Account {
+  const mm = accounts[MM_ACCOUNT_ID];
+  if (!mm) throw new Error("market maker account is missing");
+  return mm;
+}
+
 function position(a: Account, guildId: GuildId) {
   return (a.positions[guildId] ??= { qty: 0, costBasis: 0 });
 }
@@ -19,9 +29,8 @@ function position(a: Account, guildId: GuildId) {
  * 売却時は、売却口数に対応する平均取得原価を減らす（D-021）。
  */
 export function applyFills(accounts: Accounts, fills: readonly Fill[]): Accounts {
-  const next: Accounts = Object.fromEntries(Object.entries(accounts).map(([id, a]) => [id, cloneAccount(a)]));
-  const mm = next[MM_ACCOUNT_ID];
-  if (!mm) throw new Error("market maker account is missing");
+  const next = cloneAccounts(accounts);
+  const mm = marketMaker(next);
   for (const f of fills) {
     if (f.filled === 0) continue;
     const acct = next[f.accountId];
@@ -46,9 +55,8 @@ export function applyFills(accounts: Accounts, fills: readonly Fill[]): Accounts
 
 /** 優勝ギルドの成功証を1口100Gで精算し、すべての保有を0にする。払うのは市場係。 */
 export function settle(accounts: Accounts, winner: GuildId): { accounts: Accounts; payouts: Record<string, number> } {
-  const next: Accounts = Object.fromEntries(Object.entries(accounts).map(([id, a]) => [id, cloneAccount(a)]));
-  const mm = next[MM_ACCOUNT_ID];
-  if (!mm) throw new Error("market maker account is missing");
+  const next = cloneAccounts(accounts);
+  const mm = marketMaker(next);
   const payouts: Record<string, number> = {};
   for (const acct of Object.values(next)) {
     if (acct.kind !== "mm") {

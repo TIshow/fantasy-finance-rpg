@@ -11,7 +11,7 @@ export function reserveFor(intent: OrderIntent, prices: GuildMap<number>): numbe
   return intent.qty * reserveUnitPrice(prices[intent.guildId] ?? MAX_RESERVE_UNIT);
 }
 
-export type OrderRejection = "unknown_guild" | "invalid_qty" | "insufficient_cash" | "insufficient_holdings";
+export type OrderRejection = "unknown_guild" | "invalid_side" | "invalid_qty" | "insufficient_cash" | "insufficient_holdings";
 
 export type OrderValidation =
   | { ok: true; order: RoundOrder }
@@ -31,6 +31,7 @@ export function validateOrder(args: {
 }): OrderValidation {
   const { account, openOrders, intent, prices, guilds, orderCap } = args;
   if (!guilds.includes(intent.guildId)) return { ok: false, reason: "unknown_guild" };
+  if (intent.side !== "buy" && intent.side !== "sell") return { ok: false, reason: "invalid_side" };
   if (!Number.isInteger(intent.qty) || intent.qty < 1 || intent.qty > orderCap) {
     return { ok: false, reason: "invalid_qty" };
   }
@@ -43,8 +44,10 @@ export function validateOrder(args: {
     const held = account.positions[intent.guildId]?.qty ?? 0;
     if (intent.qty > held) return { ok: false, reason: "insufficient_holdings" };
   }
+  // 受け取った intent を展開せず、必要な項目だけを詰め直す（余計な項目を注文に持ち込まない）
+  const { guildId, side, qty } = intent;
   return {
     ok: true,
-    order: { ...intent, accountId: account.id, kind: account.kind === "npc" ? "npc" : "player", reserveCash },
+    order: { accountId: account.id, kind: account.kind === "npc" ? "npc" : "player", guildId, side, qty, reserveCash },
   };
 }

@@ -1,4 +1,5 @@
 import { PRICE_TOTAL } from "./constants";
+import { largestRemainder } from "./rounding";
 import type { GuildMap, Market } from "./types";
 
 function scaled(market: Market): number[] {
@@ -19,15 +20,7 @@ export function rawPrices(market: Market): number[] {
  * 1G未満のギルドは1Gにし、その分を最も高いギルドから引く。
  */
 export function displayPrices(market: Market): GuildMap<number> {
-  const raw = rawPrices(market);
-  const ints = raw.map((r) => Math.floor(r));
-  const rest = PRICE_TOTAL - ints.reduce((a, c) => a + c, 0);
-  const order = raw
-    .map((r, i) => ({ i, f: r - Math.floor(r) }))
-    .sort((a, b) => b.f - a.f || a.i - b.i);
-  for (let j = 0; j < rest; j++) {
-    ints[order[j]!.i]! += 1;
-  }
+  const ints = largestRemainder(rawPrices(market), PRICE_TOTAL);
   for (let i = 0; i < ints.length; i++) {
     while (ints[i]! < 1) {
       let max = 0;

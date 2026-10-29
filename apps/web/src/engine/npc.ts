@@ -2,6 +2,7 @@ import { ALGORITHM_VERSION, MAX_RESERVE_UNIT } from "./constants";
 import { hashValue } from "./hash";
 import { displayPrices } from "./lmsr";
 import { createRng, shuffle } from "./rng";
+import { largestRemainder } from "./rounding";
 import type { NpcArchetype, Scenario } from "./scenario";
 import type { GuildId, GuildMap, RoundOrder, Side } from "./types";
 
@@ -67,16 +68,10 @@ const COUNTER_RATIO = 0.15;
 
 function allocate(volume: number, participants: number, rng: () => number): number[] {
   // 各自1口以上。残りを乱数の重みで最大剰余法により配る
-  const base = Array.from({ length: participants }, () => 1);
   const rest = volume - participants;
-  const weights = base.map(() => rng() + 0.5);
+  const weights = Array.from({ length: participants }, () => rng() + 0.5);
   const total = weights.reduce((a, c) => a + c, 0);
-  const raw = weights.map((w) => (rest * w) / total);
-  const ints = raw.map(Math.floor);
-  const order = raw.map((r, i) => ({ i, f: r - Math.floor(r) })).sort((a, b) => b.f - a.f || a.i - b.i);
-  const leftover = rest - ints.reduce((a, c) => a + c, 0);
-  for (let j = 0; j < leftover; j++) ints[order[j]!.i]! += 1;
-  return base.map((v, i) => v + ints[i]!);
+  return largestRemainder(weights.map((w) => (rest * w) / total), rest).map((extra) => 1 + extra);
 }
 
 function pick<T>(pool: readonly T[], volume: number, avgSize: number, rng: () => number): T[] {
@@ -108,6 +103,7 @@ function targetQ(guilds: readonly GuildId[], prices: GuildMap<number>, b: number
 export function generateNpcSheet(scenario: Scenario, opts: { k: number; seed: number }): NpcSheet {
   const { k, seed } = opts;
   if (!Number.isInteger(k) || k < 1) throw new Error("k must be a positive integer");
+  if (!Number.isInteger(seed)) throw new Error("seed must be an integer");
   const b = 100 * k;
   const guilds = scenario.guilds.map((g) => g.id);
   const rng = createRng(seed);

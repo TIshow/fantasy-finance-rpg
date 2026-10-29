@@ -8,8 +8,42 @@ function compareOrders(a: RoundOrder, b: RoundOrder): number {
   return a.guildId < b.guildId ? -1 : a.guildId > b.guildId ? 1 : 0;
 }
 
-function emptyStats(): GuildFlowStats {
-  return { npcBuyers: 0, npcSellers: 0, playerBuyers: 0, playerSellers: 0, npcNet: 0, playerNet: 0 };
+/**
+ * 清算の前提を確かめる。1口座1ギルド1注文にしておかないと、同じ組の並び順で結果のハッシュが変わる。
+ * 予約額が負だと減らす処理が終わらないので、ここで止める。
+ */
+function assertValidOrders(market: Market, orders: readonly RoundOrder[]): void {
+  const slots = new Set<string>();
+  for (const o of orders) {
+    if (!market.guilds.includes(o.guildId)) throw new Error(`unknown guild: ${o.guildId}`);
+    if (o.side !== "buy" && o.side !== "sell") throw new Error(`invalid side: ${o.accountId}`);
+    if (!Number.isInteger(o.qty) || o.qty < 1) throw new Error(`invalid qty: ${o.accountId}`);
+    if (!Number.isFinite(o.reserveCash) || o.reserveCash < 0) throw new Error(`invalid reserve: ${o.accountId}`);
+    const slot = `${o.accountId}\u0000${o.guildId}`;
+    if (slots.has(slot)) throw new Error(`duplicate order: ${o.accountId} ${o.guildId}`);
+    slots.add(slot);
+  }
+}
+
+/** ギルドごとに、注文した人数と約定した純量をNPCとプレイヤーに分けて数える。 */
+function tallyStats(guilds: readonly string[], fills: readonly Fill[]): GuildMap<GuildFlowStats> {
+  const stats: GuildMap<GuildFlowStats> = Object.fromEntries(
+    guilds.map((g) => [g, { npcBuyers: 0, npcSellers: 0, playerBuyers: 0, playerSellers: 0, npcNet: 0, playerNet: 0 }]),
+  );
+  for (const f of fills) {
+    const s = stats[f.guildId]!;
+    const net = (f.side === "buy" ? 1 : -1) * f.filled;
+    if (f.kind === "npc") {
+      if (f.side === "buy") s.npcBuyers += 1;
+      else s.npcSellers += 1;
+      s.npcNet += net;
+    } else {
+      if (f.side === "buy") s.playerBuyers += 1;
+      else s.playerSellers += 1;
+      s.playerNet += net;
+    }
+  }
+  return stats;
 }
 
 /**
@@ -20,10 +54,7 @@ function emptyStats(): GuildFlowStats {
 export function clearRound(input: { market: Market; orders: readonly RoundOrder[] }): ClearingResult {
   const { market } = input;
   const orders = [...input.orders].sort(compareOrders);
-  for (const o of orders) {
-    if (!market.guilds.includes(o.guildId)) throw new Error(`unknown guild: ${o.guildId}`);
-    if (!Number.isInteger(o.qty) || o.qty < 1) throw new Error(`invalid qty: ${o.accountId}`);
-  }
+  assertValidOrders(market, orders);
   const inputHash = hashValue({
     algorithmVersion: ALGORITHM_VERSION,
     b: market.b,
@@ -52,21 +83,10 @@ export function clearRound(input: { market: Market; orders: readonly RoundOrder[
     for (const i of over) fill[i]! -= 1;
   }
 
-  const stats: GuildMap<GuildFlowStats> = Object.fromEntries(market.guilds.map((g) => [g, emptyStats()]));
   const fills: Fill[] = orders.map((o, i) => {
     const filled = fill[i]!;
     const price = prices[o.guildId]!;
     const sign = o.side === "buy" ? 1 : -1;
-    const s = stats[o.guildId]!;
-    if (o.kind === "npc") {
-      if (o.side === "buy") s.npcBuyers += 1;
-      else s.npcSellers += 1;
-      s.npcNet += sign * filled;
-    } else {
-      if (o.side === "buy") s.playerBuyers += 1;
-      else s.playerSellers += 1;
-      s.playerNet += sign * filled;
-    }
     return {
       accountId: o.accountId,
       kind: o.kind,
@@ -89,7 +109,7 @@ export function clearRound(input: { market: Market; orders: readonly RoundOrder[
     qAfter,
     fills,
     mmCashDelta,
-    stats,
+    stats: tallyStats(market.guilds, fills),
     iterations,
     inputHash,
     outputHash,

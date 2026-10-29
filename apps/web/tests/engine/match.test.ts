@@ -61,6 +61,12 @@ describe("調査券（D-020）", () => {
     m = clearCurrentRound(b.ok ? b.match : m, policy).match;
     expect(investigate(m, scenario, "C", "ai")).toEqual({ ok: false, reason: "unknown_team" });
   });
+
+  it("参加者IDが __proto__ でも、未使用の調査券を使用済みと誤判定しない", () => {
+    let m = createMatch(scenario, sheet, ["__proto__"]);
+    m = clearCurrentRound(clearCurrentRound(m, policy).match, policy).match;
+    expect(investigate(m, scenario, "__proto__", "official").ok).toBe(true);
+  });
 });
 
 describe("決算", () => {

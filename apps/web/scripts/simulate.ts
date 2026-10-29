@@ -1,7 +1,6 @@
 // 市場のシミュレータ。kと上限の確認、無作為な戦略での不変条件の確認を行う。
 // 使い方: npm run simulate -- [games=10000] [teams=6]
-import { generateNpcSheet, hashValue, PAYOUT_PER_SHARE } from "../src/engine";
-import { createRng } from "../src/engine/rng";
+import { createRng, generateNpcSheet, hashValue, MM_ACCOUNT_ID, PAYOUT_PER_SHARE, playerAccount } from "../src/engine";
 import { holdStrategy, playGame, randomStrategy } from "../src/sim/play";
 import { evaluateRules } from "../src/sim/rules";
 import { scenarioS01 as scenario } from "../src/scenarios/s01/scenario";
@@ -46,9 +45,9 @@ for (let i = 0; i < games; i++) {
     violations += 1;
     if (violations <= 3) console.log(`- 違反（試合${i}）: ${run.violations.slice(0, 3).join("; ")}`);
   }
-  minMmCash = Math.min(minMmCash, run.match.accounts.mm!.cash);
+  minMmCash = Math.min(minMmCash, run.match.accounts[MM_ACCOUNT_ID]!.cash);
   for (const t of teamIds) {
-    const cash = run.match.accounts[`team:${t}`]!.cash;
+    const cash = playerAccount(run.match, t)!.cash;
     maxAssets = Math.max(maxAssets, cash);
     minAssets = Math.min(minAssets, cash);
   }

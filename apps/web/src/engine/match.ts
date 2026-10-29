@@ -148,7 +148,8 @@ export type InvestigateResult = { ok: true; match: MatchState; source: Investiga
 /** 調査券はゲーム中1回だけ。窓のあるラウンドの注文受付中に使う（D-020）。 */
 export function investigate(match: MatchState, scenario: Scenario, teamId: string, sourceId: InvestigationSourceId): InvestigateResult {
   if (!match.teamIds.includes(teamId)) return { ok: false, reason: "unknown_team" };
-  if (match.investigations[teamId]) return { ok: false, reason: "already_used" };
+  // teamId が "__proto__" などでも誤判定しないよう、自身のキーだけを見る
+  if (Object.hasOwn(match.investigations, teamId)) return { ok: false, reason: "already_used" };
   const window = scenario.rounds[match.round - 1]?.investigationWindow;
   if (!window) return { ok: false, reason: "no_window" };
   const source = scenario.investigations[window].find((s) => s.id === sourceId);

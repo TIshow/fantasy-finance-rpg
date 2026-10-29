@@ -59,6 +59,9 @@ describe("状態機械", () => {
   it("早期締切・延長・中止", () => {
     let p = step(createProgress(5), { type: "start", now: 0 }).progress;
     expect(phaseAfter(p, { type: "closeNow", now: 1 }, t).ok).toBe(false);
+    for (const ms of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(phaseAfter(p, { type: "extend", now: 1, ms }, t).ok).toBe(false);
+    }
     p = step(p, { type: "extend", now: 1, ms: 5_000 }).progress;
     expect(p.phaseEndsAt).toBe(t.newsMs + 5_000);
     p = step(p, { type: "next", now: 2 }).progress;
