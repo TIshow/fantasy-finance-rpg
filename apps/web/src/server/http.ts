@@ -66,10 +66,15 @@ export async function handle(fn: () => Promise<Response>): Promise<Response> {
   }
 }
 
-export function setTeamCookie(res: NextResponse, matchId: string, token: string) {
+/**
+ * 参加者のcookie。Secure は接続がHTTPSのときだけ付ける。
+ * LANの内部テスト（http://192.168.x.x）で Secure を付けると、スマートフォンのブラウザが保存せず参加できない。
+ * 本番（Vercel）はHTTPSなので必ず付く。
+ */
+export function setTeamCookie(req: NextRequest, res: NextResponse, matchId: string, token: string) {
   res.cookies.set(teamCookieName(matchId), token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: req.nextUrl.protocol === "https:",
     sameSite: "lax",
     path: "/",
     maxAge: 60 * 60 * 12,
