@@ -48,20 +48,29 @@ flowchart TD
 DB、HTTP、時刻、乱数の取得に依存しない純関数です。時刻と乱数のシードは引数で受け取ります。
 
 ```ts
-// apps/web/src/engine
-createMatch(scenario, { teams, k }): MatchState
-phaseAfter(state, trigger, nowMs): Transition               // 状態機械
-reserveFor(market, guildId, side, qty, rules): number
-validateOrder(account, openOrders, intent, rules): Ok | Rejection
-clearRound({ market, orders, algorithmVersion }): ClearingResult  // 価格、約定、台帳差分、統計、ハッシュ
-settle(accounts, outcome, payout): SettlementResult
-deriveForecast(positions, cash): Forecast                   // D-021
-generateNpcSheet(scenario, seed): NpcSheet                  // 開発時だけ使う
+// apps/web/src/engine（index.tsから読み込む）
+// 市場と台帳（match.ts、clearing.ts、ledger.ts）
+createMatch(scenario, npcSheet, teamIds): MatchState
+placeOrder(match, scenario, teamId, intent): { ok, match, order } | { ok: false, reason }   // 1ギルド1枠、置き換え
+cancelOrder(match, teamId, guildId): MatchState
+clearCurrentRound(match, npcPolicy): { match, record }      // clearRound＋台帳＋予測（D-021）
+clearRound({ market, orders }): ClearingResult              // 価格、約定、統計、入力・出力ハッシュ
+investigate(match, scenario, teamId, source)                // 調査券（D-020）
+settleMatch(match, scenario): MatchState                    // 1口100G。2回目は何もしない
+ranking(match)、checkInvariants(match)
+// 進行（phase.ts）
+phaseAfter(progress, trigger, timing): Transition           // 遷移と、一緒に行う処理（clearRound、settle）
+acceptsOrders(progress, now, timing): boolean               // 締切＋猶予まで
+// NPC（npc.ts）
+fixedSheetPolicy(npcSheet): NpcPolicy                       // 差し替え可能な方針。最初は固定の注文表だけ
+generateNpcSheet(scenario, { k, seed }): NpcSheet           // 開発時だけ使う
 ```
 
 NPCの方針は差し替え可能な部品にします。最初の実装は、固定の注文表を読むだけです（D-026）。
 
 ### 4.2 シナリオ
+
+型は`apps/web/src/engine/scenario.ts`の`Scenario`、第1シナリオの値は`apps/web/src/scenarios/s01/`にあります。
 
 保持するもの：
 
@@ -104,9 +113,12 @@ stateDiagram-v2
   PAUSED --> ORDER_OPEN: 再開（残り時間を復元）
   PAUSED --> PUBLISHED: 再開（残り時間を復元）
   RESULT --> [*]
+  ABORTED --> [*]
 ```
 
+- 運営はRESULT以外のどの段階からも試合を中止できます（`ABORTED`。図では省略）。
 - 注文は`ORDER_OPEN`のときだけ受け付けます。
+- 実装は`apps/web/src/engine/phase.ts`の`phaseAfter`です。遷移と一緒に行う処理（清算、決算）を返し、サーバーが同じトランザクションで実行します。
 - 清算は締切処理のトランザクションの中で完結します（計算は数ミリ秒）。「締切済み」「清算中」を永続状態にしないので、失敗すればロールバックされ、次の締切処理で再試行するだけです。50組規模やNPCの計算が重くなった段階で、2段階に分けます。
 - 締切の判定には、ロック取得後のDBの`clock_timestamp()`を使います。ブラウザのタイマーは表示専用です。
 - 猶予は1秒です。締切＋1秒までに届いた注文は受け付け、締切処理は締切＋1秒以降にだけ清算します。
@@ -132,27 +144,32 @@ apps/web/                         # 独立したnpmプロジェクト。リポ�
   vercel.json                     # regions: ["hnd1"]
   compose.yaml                    # ローカルのPostgres 17
   prisma/schema.prisma, migrations/
-  src/engine/                     # 純関数。next、react、prisma、node:* の読み込みをESLintで禁止
-  src/scenarios/s01/              # 第1シナリオの定義、npc-sheet.json、内容ハッシュ
+  src/engine/                     # 純関数。同じディレクトリ以外の読み込みをテストで禁止（tests/engine/purity.test.ts）
+  src/scenarios/s01/              # 第1シナリオの定義（scenario.ts）とNPCの注文表（npc-sheet.k2.json）
+  src/sim/                        # 試合を最後まで回す補助と設計ルールの判定（テストとシミュレータで共有）
   src/server/                     # トランザクション、advanceIfDue、トークン検証
   src/app/m/[code]/               # 参加者
   src/app/host/[id]/              # 運営
   src/app/screen/[id]/            # 会場画面
   src/app/api/                    # Route Handlers
-  scripts/                        # simulate.ts、generate-npc-sheet.ts、create-match.ts
-  tests/                          # engine、db、e2e
-.tool-versions                    # nodejs 24（asdf。P1で追加）
+  scripts/                        # simulate.ts、generate-npc-sheet.ts、create-match.ts（P2）
+  tests/                          # engine（P1）、db（P2）、e2e（P3）
+.tool-versions                    # nodejs 24.16.0（asdf）
+.python-version                   # 3.12（uv）
+scripts/check_docs.py             # 文書の参照チェック（uv run）
 ```
 
 | 依存 | 目的 | 費用 | 出口 |
 | --- | --- | --- | --- |
 | Next.js 16、React 19、TypeScript 5 | 画面とAPIを1つのアプリにする（kabu-leagueと同じ） | 0 | 通常のNodeサーバーとして動かせる |
-| Prisma 7＋`@prisma/adapter-pg` | スキーマ、移行、トランザクション（kabu-leagueと同じ） | 0 | SQLの移行ファイルに置き換えられる |
-| zod | APIの入力検証 | 0 | 手書きの検証に置き換えられる |
-| Tailwind CSS 4 | スマートフォン向けの画面（kabu-leagueと同じ） | 0 | 通常のCSSに置き換えられる |
+| Prisma 7＋`@prisma/adapter-pg` | スキーマ、移行、トランザクション（kabu-leagueと同じ。P2で導入） | 0 | SQLの移行ファイルに置き換えられる |
+| zod | APIの入力検証（P2で導入） | 0 | 手書きの検証に置き換えられる |
+| Tailwind CSS 4 | スマートフォン向けの画面（kabu-leagueと同じ。P3で導入） | 0 | 通常のCSSに置き換えられる |
 | Vitest、tsx | エンジンとDBのテスト、スクリプトの実行 | 0 | — |
-| Playwright | 複数端末のE2E | 0 | — |
-| Docker（Postgres 17） | ローカル開発 | 0 | — |
+| asdf（Node 24.16.0） | Nodeのバージョンを揃える（kabu-leagueと同じ） | 0 | `.tool-versions`はほかのバージョン管理でも読める |
+| uv（Python 3.12） | 文書チェックなどPythonのスクリプトを動かす。外部パッケージは使わない | 0 | 通常のPythonで動く |
+| Playwright | 複数端末のE2E（P3で導入） | 0 | — |
+| Docker（Postgres 17） | ローカル開発（P2で導入） | 0 | — |
 | Supabase（Postgresのみ、東京） | 本番DB | Freeは7日間アクセスがないと停止する。Proは月25ドル〜（契約前に確認。既存の組織を流用できる可能性あり） | `pg_dump`で他のPostgresへ移せる |
 | Vercel（hnd1） | ホスティング | Hobbyは非商用に限られる。Proは1人月20ドル〜（契約前に確認。既存のチームを流用できる可能性あり） | Nodeが動く環境ならどこでも動く |
 
@@ -251,6 +268,5 @@ COMMIT
 - 運営者の認証（O-007）
 - データの保持期間と削除の責任（O-008）
 - イベント版の計測・分析基盤、エラー追跡
-- シナリオの正式なスキーマ（P1で決める）
 - オフラインの一人版を静的ページにするか
 - CI/CD

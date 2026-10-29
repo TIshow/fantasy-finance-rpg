@@ -69,7 +69,19 @@ The owner approved D-025 to D-027 on 2026-10-29, so `apps/web` may be created wi
 
 ## Implementation and verification
 
-No application code exists yet. When `apps/web` is created (D-027), record its setup, lint, type-check, test, build, and E2E commands here and in `CONTRIBUTING.md`.
+Use asdf for Node (`.tool-versions`, nodejs 24.16.0) and uv for Python (`uv run`, `.python-version`). Do not rely on a system Node or globally installed Python packages.
+
+Run these in `apps/web`:
+
+```sh
+npm install
+npm test             # engine invariants, clearing examples, rules A/B, state machine
+npm run typecheck
+npm run build
+npm run simulate     # 10,000 random games and the k table (about 70 seconds)
+```
+
+Regenerate the reviewed NPC sheet only on purpose (`npm run npc:generate -- 2 20261029`), and review the diff before committing it. Check document links and section references from the repository root with `uv run scripts/check_docs.py`. Record new commands (DB, E2E) here and in `CONTRIBUTING.md` when they are added.
 
 When code exists:
 
