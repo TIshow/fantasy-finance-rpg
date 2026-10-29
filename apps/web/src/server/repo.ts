@@ -62,6 +62,11 @@ export async function dbNow(tx: Tx): Promise<number> {
   return rows[0]!.now.getTime();
 }
 
+/** 進行中のラウンドが清算済みか（公開フェーズ、その一時停止中、結果発表） */
+export function isRoundCleared(m: Pick<MatchRow, "phase" | "paused_from">): boolean {
+  return m.phase === "PUBLISHED" || m.phase === "RESULT" || (m.phase === "PAUSED" && m.paused_from === "PUBLISHED");
+}
+
 export function toProgress(m: MatchRow): Progress {
   return {
     phase: m.phase,
@@ -113,7 +118,7 @@ export async function loadEngineState(tx: Tx, m: MatchRow): Promise<{ state: Mat
   }
   const { accounts, idByKey } = await loadAccounts(tx, m.id);
   const teams = await tx.team.findMany({ where: { matchId: m.id }, select: { id: true }, orderBy: { joinedAt: "asc" } });
-  const cleared = m.phase === "PUBLISHED" || m.phase === "RESULT" || (m.phase === "PAUSED" && m.paused_from === "PUBLISHED");
+  const cleared = isRoundCleared(m);
   const orders = cleared ? [] : await loadActiveOrders(tx, m.id, m.round);
   const state: MatchState = {
     scenarioId: m.scenario_id,
@@ -158,6 +163,11 @@ export async function saveAccounts(tx: Tx, before: Accounts, after: Accounts, id
     await tx.$executeRaw`INSERT INTO positions (account_id, guild_id, qty, cost_basis) VALUES ${Prisma.join(positions)}
       ON CONFLICT (account_id, guild_id) DO UPDATE SET qty = EXCLUDED.qty, cost_basis = EXCLUDED.cost_basis`;
   }
+}
+
+/** 自分の口座の行をロックする。同じ商会からの注文・取消を1つずつ処理するため。 */
+export async function lockAccount(tx: Tx, accountId: string): Promise<void> {
+  await tx.$queryRaw`SELECT id FROM accounts WHERE id = ${accountId}::uuid FOR UPDATE`;
 }
 
 export async function logEvent(tx: Tx, matchId: string, type: string, actor: string, payload: Record<string, unknown>) {

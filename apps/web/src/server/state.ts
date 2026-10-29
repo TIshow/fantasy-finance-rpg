@@ -1,8 +1,9 @@
 // 画面に返す状態。公開情報と本人だけの情報を分け、他の商会の予約や保有は誰にも返さない（ARCHITECTURE §10）。
 import { displayPrices, teamAccountId, type Forecast, type GuildFlowStats, type GuildMap } from "@/engine";
-import { prisma } from "./db/client";
+import { Prisma } from "./db/generated/client";
+import { prisma, type Tx } from "./db/client";
 import { notFound } from "./errors";
-import { dbNow, readMatch, toProgress } from "./repo";
+import { dbNow, isRoundCleared, readMatch, toProgress } from "./repo";
 import { getScenarioBundle } from "./scenarios";
 import { hashToken } from "./tokens";
 
@@ -54,14 +55,24 @@ export interface OwnState {
   assets: number;
 }
 
+/**
+ * 公開状態と本人の状態を返す。読み取りは1つのスナップショット（REPEATABLE READ）で行う。
+ * 別々に読むと、途中で清算が入ったときに清算前の試合と清算後の約定・現金が混ざり、公開時刻より前に結果が見えてしまう。
+ */
 export async function getState(matchId: string, token?: string): Promise<{ public: PublicState; own: OwnState | null }> {
-  const m = await readMatch(prisma, matchId);
+  return prisma.$transaction((tx) => readState(tx, matchId, token), {
+    isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+  });
+}
+
+async function readState(tx: Tx, matchId: string, token: string | undefined): Promise<{ public: PublicState; own: OwnState | null }> {
+  const m = await readMatch(tx, matchId);
   if (!m) throw notFound();
-  const now = await dbNow(prisma);
+  const now = await dbNow(tx);
   const { scenario, sheet } = getScenarioBundle(m.scenario_id, m.k_scale);
   const guilds = scenario.guilds.map((g) => g.id);
   const current = displayPrices({ guilds, b: sheet.b, q: m.q });
-  const clearings = await prisma.roundClearing.findMany({ where: { matchId }, orderBy: { round: "asc" } });
+  const clearings = await tx.roundClearing.findMany({ where: { matchId }, orderBy: { round: "asc" } });
   const last = clearings.at(-1) ?? null;
   const revealAt = m.reveal_at?.getTime() ?? null;
   const progress = toProgress(m);
@@ -70,12 +81,13 @@ export async function getState(matchId: string, token?: string): Promise<{ publi
   const publishing = m.phase === "PUBLISHED" || (m.phase === "PAUSED" && m.paused_from === "PUBLISHED");
   const hidden = publishing && last !== null && last.round === m.round && revealAt !== null && now < revealAt;
 
-  const teams = await prisma.team.findMany({
+  const teams = await tx.team.findMany({
     where: { matchId },
     select: { id: true, nickname: true, account: { select: { cash: true, positions: { select: { guildId: true, qty: true } } } } },
   });
   const shownPrices = hidden ? (last!.pricesBefore as GuildMap<number>) : current;
-  const showRanking = !hidden && (m.phase === "PUBLISHED" || finished || (m.phase === "PAUSED" && m.paused_from === "PUBLISHED"));
+  const cleared = isRoundCleared(m);
+  const showRanking = !hidden && cleared;
   const assetsOf = (t: (typeof teams)[number]) =>
     (t.account?.cash ?? 0) + (finished ? 0 : (t.account?.positions ?? []).reduce((s, p) => s + p.qty * (shownPrices[p.guildId] ?? 0), 0));
   const rows = teams.map((t) => ({ nickname: t.nickname, assets: assetsOf(t) })).sort((a, b) => b.assets - a.assets);
@@ -126,17 +138,17 @@ export async function getState(matchId: string, token?: string): Promise<{ publi
   };
 
   if (!token) return { public: pub, own: null };
-  const team = await prisma.team.findUnique({
+  const team = await tx.team.findUnique({
     where: { tokenHash: hashToken(token) },
     include: { account: { include: { positions: true } } },
   });
   if (!team || team.matchId !== matchId || !team.account) return { public: pub, own: null };
   const account = team.account;
-  const orders = await prisma.order.findMany({ where: { matchId, accountId: account.id, round: m.round }, orderBy: { guildId: "asc" } });
+  const orders = await tx.order.findMany({ where: { matchId, accountId: account.id, round: m.round }, orderBy: { guildId: "asc" } });
   const key = teamAccountId(team.id);
-  const fills = await prisma.fill.findMany({ where: { matchId, accountKey: key }, orderBy: [{ round: "asc" }, { guildId: "asc" }] });
+  const fills = await tx.fill.findMany({ where: { matchId, accountKey: key }, orderBy: [{ round: "asc" }, { guildId: "asc" }] });
   const lastRound = hidden ? (last?.round ?? 0) - 1 : (last?.round ?? 0);
-  const inv = await prisma.investigation.findUnique({ where: { matchId_teamId: { matchId, teamId: team.id } } });
+  const inv = await tx.investigation.findUnique({ where: { matchId_teamId: { matchId, teamId: team.id } } });
   const invSource = inv
     ? scenario.investigations[scenario.rounds[inv.round - 1]!.investigationWindow!].find((s) => s.id === inv.source) ?? null
     : null;
@@ -146,7 +158,6 @@ export async function getState(matchId: string, token?: string): Promise<{ publi
     .filter((c) => !hidden || c.round !== last?.round)
     .map((c) => ({ round: c.round, forecast: (c.forecasts as unknown as Record<string, Forecast>)[team.id]! }))
     .filter((f) => f.forecast);
-  const cleared = m.phase === "PUBLISHED" || finished || (m.phase === "PAUSED" && m.paused_from === "PUBLISHED");
   const own: OwnState = {
     teamId: team.id,
     nickname: team.nickname,

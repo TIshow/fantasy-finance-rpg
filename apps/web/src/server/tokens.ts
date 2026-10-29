@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomInt } from "node:crypto";
+import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 
 /** 32バイトの乱数トークン。DBにはハッシュだけを保存する（ARCHITECTURE §10）。 */
 export function newToken(): string {
@@ -7,6 +7,14 @@ export function newToken(): string {
 
 export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+/** トークンが保存済みのハッシュと一致するか。比較にかかる時間から一致の度合いを推測されないようにする。 */
+export function tokenMatches(token: string | undefined, storedHash: string): boolean {
+  if (!token) return false;
+  const a = Buffer.from(hashToken(token), "hex");
+  const b = Buffer.from(storedHash, "hex");
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 /** 6桁の参加コード */

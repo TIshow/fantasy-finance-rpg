@@ -20,9 +20,9 @@ import {
 import { Prisma } from "./db/generated/client";
 import { prisma, type Tx } from "./db/client";
 import { AppError, badRequest, conflict, notFound, unauthorized } from "./errors";
-import { dbNow, loadEngineState, lockMatch, logEvent, saveAccounts, toProgress, type MatchRow } from "./repo";
+import { dbNow, loadEngineState, lockAccount, lockMatch, logEvent, saveAccounts, toProgress, type MatchRow } from "./repo";
 import { getScenarioBundle } from "./scenarios";
-import { hashToken, newJoinCode, newToken } from "./tokens";
+import { hashToken, newJoinCode, newToken, tokenMatches } from "./tokens";
 
 const TX = { timeout: 15_000, maxWait: 10_000 } as const;
 
@@ -121,7 +121,7 @@ export async function joinMatch(code: string, nickname: string): Promise<{ match
       },
     });
     await tx.match.update({ where: { id: m.id }, data: { version: { increment: 1 } } });
-    await logEvent(tx, m.id, "join", `team:${team.id}`, {});
+    await logEvent(tx, m.id, "join", teamAccountId(team.id), {});
     return { matchId: m.id, teamId: team.id, token };
   }, TX);
 }
@@ -134,7 +134,7 @@ async function teamByToken(tx: Tx, matchId: string, token: string | undefined) {
 }
 
 export function verifyHostToken(m: { host_token_hash: string }, token: string | undefined) {
-  if (!token || hashToken(token) !== m.host_token_hash) throw unauthorized();
+  if (!tokenMatches(token, m.host_token_hash)) throw unauthorized();
 }
 
 // ---------------------------------------------------------------- 注文
@@ -154,11 +154,10 @@ export interface OrderView {
   status: "active" | "cancelled";
 }
 
+/** 注文受付中（締切＋猶予まで、一時停止中は不可）でなければ拒否し、試合のシナリオを返す。 */
 function assertOrderWindow(m: MatchRow, round: number, now: number) {
-  const { scenario } = getScenarioBundle(m.scenario_id, m.k_scale);
-  const timing = m.timing;
-  if (m.round !== round || !acceptsOrders(toProgress(m), now, timing)) throw conflict("order_window_closed");
-  return scenario;
+  if (m.round !== round || !acceptsOrders(toProgress(m), now, m.timing)) throw conflict("order_window_closed");
+  return getScenarioBundle(m.scenario_id, m.k_scale);
 }
 
 /**
@@ -170,9 +169,9 @@ export async function putOrder(matchId: string, token: string | undefined, round
     const m = await lockMatch(tx, matchId, "share");
     if (!m) throw notFound();
     const now = await dbNow(tx);
-    const scenario = assertOrderWindow(m, round, now);
+    const { scenario, sheet } = assertOrderWindow(m, round, now);
     const { account } = await teamByToken(tx, matchId, token);
-    await tx.$queryRaw`SELECT id FROM accounts WHERE id = ${account.id}::uuid FOR UPDATE`;
+    await lockAccount(tx, account.id);
 
     const slot = { matchId, round, accountId: account.id, guildId };
     const existing = await tx.order.findUnique({ where: { matchId_round_accountId_guildId: slot } });
@@ -197,7 +196,7 @@ export async function putOrder(matchId: string, token: string | undefined, round
       },
       openOrders: own.map((o) => ({ accountId: account.key, kind: "player", guildId: o.guildId, side: o.side as Side, qty: o.qty, reserveCash: o.reserveCash })),
       intent: { guildId, side: input.side, qty: input.qty },
-      prices: displayPrices({ guilds, b: getScenarioBundle(m.scenario_id, m.k_scale).sheet.b, q: m.q }),
+      prices: displayPrices({ guilds, b: sheet.b, q: m.q }),
       guilds,
       orderCap: scenario.orderCap,
     });
@@ -215,7 +214,7 @@ export async function cancelOrder(matchId: string, token: string | undefined, ro
     if (!m) throw notFound();
     assertOrderWindow(m, round, await dbNow(tx));
     const { account } = await teamByToken(tx, matchId, token);
-    await tx.$queryRaw`SELECT id FROM accounts WHERE id = ${account.id}::uuid FOR UPDATE`;
+    await lockAccount(tx, account.id);
     const slot = { matchId, round, accountId: account.id, guildId };
     const existing = await tx.order.findUnique({ where: { matchId_round_accountId_guildId: slot } });
     if (!existing) throw notFound("order_not_found");
@@ -247,7 +246,7 @@ export async function useInvestigation(matchId: string, token: string | undefine
   return prisma.$transaction(async (tx) => {
     const m = await lockMatch(tx, matchId, "share");
     if (!m) throw notFound();
-    const scenario = assertOrderWindow(m, m.round, await dbNow(tx));
+    const { scenario } = assertOrderWindow(m, m.round, await dbNow(tx));
     const window = scenario.rounds[m.round - 1]?.investigationWindow;
     if (!window) throw conflict("no_investigation_window");
     const found = scenario.investigations[window].find((s) => s.id === source);
@@ -257,7 +256,7 @@ export async function useInvestigation(matchId: string, token: string | undefine
       INSERT INTO investigations (match_id, team_id, round, source) VALUES (${matchId}::uuid, ${team.id}::uuid, ${m.round}, ${source})
       ON CONFLICT DO NOTHING`;
     if (inserted === 0) throw conflict("investigation_used");
-    await logEvent(tx, matchId, "investigate", `team:${team.id}`, { round: m.round, source });
+    await logEvent(tx, matchId, "investigate", teamAccountId(team.id), { round: m.round, source });
     return { round: m.round, source: found };
   }, TX);
 }
