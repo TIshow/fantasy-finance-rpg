@@ -10,23 +10,19 @@
 
 ## 現在地
 
-- フェーズ：銀行提案用プロトタイプの実装・検証
-- 基準日：2026-09-03
-- 実装：5〜10分の単一HTMLプロトタイプを実装済み
+- フェーズ：提案会議MVP（人工市場のライブ対戦）の設計承認待ち
+- 基準日：2026-10-29
+- 実装：なし（旧単一HTMLデモは2026-10-29に廃止。git履歴の`5d9ac6c`で参照できます）
 - パッケージ／依存関係：未導入
-- 次の成果物：内部プレイテスト結果と銀行提案用デモ台本
+- 次の成果物：共通ゲームエンジンとシミュレータ（D-025〜D-027の承認後）
 
 最新状態と次の作業は、必ず [`docs/STATUS.md`](docs/STATUS.md) を確認してください。
 
-## プロトタイプを試す
+## 人工市場と一斉約定
 
-[`prototype/guild-market-demo.html`](prototype/guild-market-demo.html)をローカルへ取得し、ブラウザで直接開きます。インストール、ビルド、サーバー、ネット接続は不要です。
+GUILD MARKETの市場には、プレイヤーのほかに約100のNPC商会（王国の商会100）が参加します。各ラウンドでは注文を予約し、締切ごとに全員の注文が一斉に約定して、新しい価格が全端末に同時に公開されます。ニュースを読むだけでなく、ほかの商会の動きを読むことがゲームの中心です。
 
-```sh
-node scripts/verify-prototype.mjs
-```
-
-上記コマンドで、価格合計、状態遷移、注文制約、調査券、決算、再読み込み復帰、外部依存がないことを検証できます。
+最初の目標は、銀行への提案会議で5〜6人が各自のスマートフォンからQRで参加し、約5分の対戦を体験できる提案会議MVPです（[`docs/MEETING_MVP_SPEC.md`](docs/MEETING_MVP_SPEC.md)）。
 
 ## プロダクトの構造
 
@@ -46,9 +42,11 @@ node scripts/verify-prototype.mjs
 | [`docs/PROJECT_CHARTER.md`](docs/PROJECT_CHARTER.md) | 目的、対象、原則、スコープ |
 | [`docs/PRODUCT_STRATEGY.md`](docs/PRODUCT_STRATEGY.md) | 銀行イベントから学校・toCへ進む仮説 |
 | [`docs/GAME_DESIGN.md`](docs/GAME_DESIGN.md) | ゲームルール、世界観、体験設計 |
-| [`docs/PROTOTYPE_SPEC.md`](docs/PROTOTYPE_SPEC.md) | 1日で作る提案用プロトタイプの仕様 |
+| [`docs/MARKET_SPEC.md`](docs/MARKET_SPEC.md) | 人工市場と一斉約定の規則、NPC、不変条件 |
+| [`docs/SCENARIO_01.md`](docs/SCENARIO_01.md) | 第1シナリオの本文と値 |
+| [`docs/MEETING_MVP_SPEC.md`](docs/MEETING_MVP_SPEC.md) | 提案会議MVPの範囲、画面、受け入れ条件、計画 |
 | [`docs/EVENT_MVP_PRD.md`](docs/EVENT_MVP_PRD.md) | 90分イベントMVPのプロダクト要件 |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 論理構成、状態、設計制約、未決事項 |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | エンジン、状態機械、同期、技術構成、データ、API |
 | [`docs/DATA_AND_EVALUATION.md`](docs/DATA_AND_EVALUATION.md) | KPI、イベントログ、教育効果、プライバシー |
 | [`docs/AI_WORKFLOW.md`](docs/AI_WORKFLOW.md) | Codex／Claude Code／人間の共同開発手順 |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | フェーズ、ゲート、成果物 |

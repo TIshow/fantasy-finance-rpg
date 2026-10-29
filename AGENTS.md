@@ -6,6 +6,8 @@ Build GUILD MARKET as one prediction game that supports live events, schools, fa
 
 `read information -> forecast -> trade -> observe -> revise -> reflect`
 
+The market is an artificial market: players trade alongside about 100 NPC merchants, and every order placed during a round clears together at the round's deadline (D-024).
+
 Do not turn it into a kingdom-management game, construction game, combat RPG, or feature-heavy finance simulator.
 
 ## Start every session here
@@ -23,9 +25,11 @@ Do not treat chat history, agent memory, or an old plan as the source of truth w
 - Product purpose and scope: `docs/PROJECT_CHARTER.md`
 - Business and rollout hypotheses: `docs/PRODUCT_STRATEGY.md`
 - Rules and player experience: `docs/GAME_DESIGN.md`
-- Proposal demo scope: `docs/PROTOTYPE_SPEC.md`
+- Market engine rules (clearing, NPC market, invariants): `docs/MARKET_SPEC.md`
+- First scenario content: `docs/SCENARIO_01.md`
+- Proposal-meeting MVP scope: `docs/MEETING_MVP_SPEC.md`
 - Event product requirements: `docs/EVENT_MVP_PRD.md`
-- System boundaries and state model: `docs/ARCHITECTURE.md`
+- System boundaries, state model, and stack: `docs/ARCHITECTURE.md`
 - Metrics and data policy: `docs/DATA_AND_EVALUATION.md`
 - AI/human collaboration workflow: `docs/AI_WORKFLOW.md`
 - Accepted and proposed decisions: `docs/DECISIONS.md`
@@ -35,9 +39,9 @@ If two documents conflict, stop and reconcile them. Prefer the more specific doc
 
 ## Phase gate
 
-Follow the phase recorded in `docs/STATUS.md`. On 2026-09-03 the owner explicitly started implementation of the proposal prototype. The current implementation scope is the dependency-free single HTML in `prototype/` plus its verification script and supporting documentation.
+Follow the phase recorded in `docs/STATUS.md`. On 2026-10-29 the owner switched GUILD MARKET to the artificial-market, batch-clearing design and retired the single-HTML prototype (D-024). The proposal-meeting MVP and the bank-event MVP are one app built on one game engine.
 
-Do not add frameworks, packages, `node_modules`, cloud resources, external runtime assets, or CI workflows for the proposal prototype. Event-MVP application code remains gated on its separate technical decisions.
+Do not create `apps/web`, install packages, or add `node_modules` until the owner approves D-025 to D-027. Do not create cloud resources or sign up for paid plans without separate owner approval. Do not add CI workflows without a recorded decision.
 
 ## Working agreements
 
@@ -65,18 +69,12 @@ Do not add frameworks, packages, `node_modules`, cloud resources, external runti
 
 ## Implementation and verification
 
-The proposal prototype needs no setup, install, server, or build. Open `prototype/guild-market-demo.html` directly in a browser. Its canonical automated check is:
-
-```sh
-node scripts/verify-prototype.mjs
-```
-
-This checks JavaScript syntax, offline constraints, core state transitions, market-price invariants, order guards, investigation-ticket behavior, settlement, and reload recovery. PC/mobile visual checks and the complete `file://` playthrough remain manual checks in `docs/PROTOTYPE_SPEC.md`.
-
-The event-MVP technology choices and commands are intentionally undecided.
+No application code exists yet. When `apps/web` is created (D-027), record its setup, lint, type-check, test, build, and E2E commands here and in `CONTRIBUTING.md`.
 
 When code exists:
 
+- keep `src/engine` pure: no imports from Next.js, React, Prisma, or `node:*`;
+- test the market invariants in `docs/MARKET_SPEC.md`;
 - write or update tests with behavior changes;
 - run the smallest relevant checks first, then the required project checks;
 - make server-authoritative checks for orders, balances, market state, and settlement;
@@ -93,8 +91,9 @@ When code exists:
 
 ## Code review rules
 
-- Flag any path that accepts an order after the market is frozen.
-- Flag non-idempotent order submission or settlement.
+- Flag any path that accepts or changes an order after the order deadline (plus grace) or while the match is paused.
+- Flag non-idempotent order submission, round clearing, or settlement.
+- Flag clearing results that depend on order arrival sequence or client clocks.
 - Flag client-authoritative balances, prices, permissions, or event state.
 - Flag collection or logging of unnecessary child/parent personal data.
 - Flag runtime AI-generated event facts that can change the reviewed scenario outcome.
