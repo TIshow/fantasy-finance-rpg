@@ -1,0 +1,188 @@
+// GUILD MARKET — Prisma schema
+// 正本は docs/ARCHITECTURE.md §8。金額と口数は整数だけを保存する。
+// 負の残高・保有を拒否するCHECK制約とRLSは、マイグレーションのSQLに直接書いている。
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/server/db/generated"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Match {
+  id                String    @id @default(uuid()) @db.Uuid
+  joinCode          String    @unique @map("join_code")
+  scenarioId        String    @map("scenario_id")
+  scenarioHash      String    @map("scenario_hash")
+  sheetHash         String    @map("sheet_hash")
+  algorithmVersion  String    @map("algorithm_version")
+  kScale            Int       @map("k_scale")
+  /// LOBBY | NEWS | ORDER_OPEN | PUBLISHED | PAUSED | RESULT | ABORTED
+  phase             String
+  mode              String    @default("auto")
+  round             Int       @default(0)
+  totalRounds       Int       @map("total_rounds")
+  phaseEndsAt       DateTime? @map("phase_ends_at") @db.Timestamptz(3)
+  pausedFrom        String?   @map("paused_from")
+  pausedRemainingMs Int?      @map("paused_remaining_ms")
+  revealAt          DateTime? @map("reveal_at") @db.Timestamptz(3)
+  /// 試合ごとの時間配分（シナリオの既定値を上書きできる）
+  timing            Json
+  /// 現在のLMSRの状態（ギルドごとの累積口数）
+  q                 Json
+  capacity          Int       @default(12)
+  version           Int       @default(1)
+  hostTokenHash     String    @map("host_token_hash")
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  settledAt         DateTime? @map("settled_at") @db.Timestamptz(3)
+
+  teams          Team[]
+  accounts       Account[]
+  orders         Order[]
+  roundClearings RoundClearing[]
+  fills          Fill[]
+  investigations Investigation[]
+  events         MatchEvent[]
+
+  @@map("matches")
+}
+
+model Team {
+  id        String   @id @default(uuid()) @db.Uuid
+  matchId   String   @map("match_id") @db.Uuid
+  nickname  String
+  tokenHash String   @unique @map("token_hash")
+  joinedAt  DateTime @default(now()) @map("joined_at") @db.Timestamptz(3)
+
+  match   Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  account Account?
+
+  @@unique([matchId, nickname])
+  @@map("teams")
+}
+
+model Account {
+  id      String  @id @default(uuid()) @db.Uuid
+  matchId String  @map("match_id") @db.Uuid
+  /// エンジンの口座ID（team:<teamId> / npc:<key> / mm）
+  key     String
+  /// player | npc | mm
+  kind    String
+  teamId  String? @unique @map("team_id") @db.Uuid
+  cash    Int
+
+  match     Match      @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  team      Team?      @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  positions Position[]
+  orders    Order[]
+
+  @@unique([matchId, key])
+  @@map("accounts")
+}
+
+model Position {
+  accountId String @map("account_id") @db.Uuid
+  guildId   String @map("guild_id")
+  qty       Int
+  costBasis Int    @map("cost_basis")
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@id([accountId, guildId])
+  @@map("positions")
+}
+
+/// プレイヤーの予約（NPCの注文はシナリオの注文表から読む）。1ラウンド1ギルド1枠。
+model Order {
+  id          String   @id @default(uuid()) @db.Uuid
+  matchId     String   @map("match_id") @db.Uuid
+  round       Int
+  accountId   String   @map("account_id") @db.Uuid
+  guildId     String   @map("guild_id")
+  side        String
+  qty         Int
+  reserveCash Int      @map("reserve_cash")
+  /// 枠ごとの版番号。古い画面からの上書きを拒否し、再送を見分ける
+  revision    Int
+  /// active | cancelled
+  status      String
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  match   Match   @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@unique([matchId, round, accountId, guildId])
+  @@map("orders")
+}
+
+/// 清算結果。主キーで、1ラウンドにつき1回しか登録できない。
+model RoundClearing {
+  matchId          String   @map("match_id") @db.Uuid
+  round            Int
+  algorithmVersion String   @map("algorithm_version")
+  pricesBefore     Json     @map("prices_before")
+  prices           Json
+  qAfter           Json     @map("q_after")
+  stats            Json
+  forecasts        Json
+  inputHash        String   @map("input_hash")
+  outputHash       String   @map("output_hash")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@id([matchId, round])
+  @@map("round_clearings")
+}
+
+model Fill {
+  id         String @id @default(uuid()) @db.Uuid
+  matchId    String @map("match_id") @db.Uuid
+  round      Int
+  accountKey String @map("account_key")
+  kind       String
+  guildId    String @map("guild_id")
+  side       String
+  requested  Int
+  filled     Int
+  price      Int
+  cashDelta  Int    @map("cash_delta")
+  reason     String
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@index([matchId, round])
+  @@index([matchId, accountKey])
+  @@map("fills")
+}
+
+/// 調査券。主キーで、1試合につき1チーム1回。
+model Investigation {
+  matchId String   @map("match_id") @db.Uuid
+  teamId  String   @map("team_id") @db.Uuid
+  round   Int
+  source  String
+  usedAt  DateTime @default(now()) @map("used_at") @db.Timestamptz(3)
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@id([matchId, teamId])
+  @@map("investigations")
+}
+
+/// 監査とリプレイのためのログ（誰が、いつ、何を）。トークンや個人情報は入れない。
+model MatchEvent {
+  id        BigInt   @id @default(autoincrement())
+  matchId   String   @map("match_id") @db.Uuid
+  type      String
+  actor     String
+  payload   Json     @map("public_payload")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  match Match @relation(fields: [matchId], references: [id], onDelete: Cascade)
+
+  @@index([matchId, id])
+  @@map("match_events")
+}

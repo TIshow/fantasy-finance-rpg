@@ -1,0 +1,35 @@
+/* 最小限の見た目（P2の動作確認用）。画面の作り込みはP3で行う。 */
+:root {
+  --bg: #0d1530;
+  --panel: #16224a;
+  --line: #2a3a6e;
+  --text: #eef2ff;
+  --muted: #a9b4d6;
+  --gold: #e8c15a;
+  --buy: #3fbf7f;
+  --sell: #e5534b;
+  --info: #5aa7ff;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif; }
+main { max-width: 960px; margin: 0 auto; padding: 16px; }
+h1, h2, h3 { margin: 0 0 8px; }
+h1 { color: var(--gold); font-size: 22px; }
+h2 { font-size: 18px; }
+section, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin: 0 0 12px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; }
+.muted { color: var(--muted); font-size: 14px; }
+.big { font-size: 28px; font-weight: 700; }
+.up { color: var(--buy); }
+.down { color: var(--sell); }
+button { min-height: 44px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line); background: #22306a; color: var(--text); font-size: 16px; cursor: pointer; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.buy { background: #1f5e43; }
+button.sell { background: #6b2a2a; }
+button.sel { outline: 2px solid var(--gold); }
+input { min-height: 44px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line); background: #0b1126; color: var(--text); font-size: 16px; }
+table { width: 100%; border-collapse: collapse; }
+td, th { padding: 6px 4px; border-bottom: 1px solid var(--line); text-align: left; }
+.error { color: #ffb4b4; }
+.sticky { position: sticky; top: 0; z-index: 1; }
