@@ -41,7 +41,7 @@ If two documents conflict, stop and reconcile them. Prefer the more specific doc
 
 Follow the phase recorded in `docs/STATUS.md`. On 2026-10-29 the owner switched GUILD MARKET to the artificial-market, batch-clearing design and retired the single-HTML prototype (D-024). The proposal-meeting MVP and the bank-event MVP are one app built on one game engine.
 
-Do not create `apps/web`, install packages, or add `node_modules` until the owner approves D-025 to D-027. Do not create cloud resources or sign up for paid plans without separate owner approval. Do not add CI workflows without a recorded decision.
+The owner approved D-025 to D-027 on 2026-10-29, so `apps/web` may be created with the dependencies listed in `docs/ARCHITECTURE.md`; document any other dependency before adding it. Do not create cloud resources or sign up for paid plans without separate owner approval. Do not add CI workflows without a recorded decision.
 
 ## Working agreements
 
