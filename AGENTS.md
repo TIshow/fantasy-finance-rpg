@@ -71,17 +71,21 @@ The owner approved D-025 to D-027 on 2026-10-29, so `apps/web` may be created wi
 
 Use asdf for Node (`.tool-versions`, nodejs 24.16.0) and uv for Python (`uv run`, `.python-version`). Do not rely on a system Node or globally installed Python packages.
 
-Run these in `apps/web`:
+Run these in `apps/web` (copy `.env.example` to `.env` first):
 
 ```sh
 npm install
-npm test             # engine invariants, clearing examples, rules A/B, state machine
+npm run db:up        # local Postgres 17 in Docker on port 5433 (also creates the test database)
+npm run db:migrate   # apply Prisma migrations
+npm test             # engine: invariants, clearing examples, rules A/B, state machine
+npm run test:db      # DB integration: concurrency, deadlines, idempotency, rollback, reveal timing
 npm run typecheck
 npm run build
 npm run simulate     # 10,000 random games and the k table (about 70 seconds)
+npm run dev          # then: npm run match:create -- --fast, and npm run smoke for a 6-team HTTP run
 ```
 
-Regenerate the reviewed NPC sheet only on purpose (`npm run npc:generate -- 2 20261029`), and review the diff before committing it. Check document links and section references from the repository root with `uv run scripts/check_docs.py`. Record new commands (DB, E2E) here and in `CONTRIBUTING.md` when they are added.
+Regenerate the reviewed NPC sheet only on purpose (`npm run npc:generate -- 2 20261029`), and review the diff before committing it. Check document links and section references from the repository root with `uv run scripts/check_docs.py`. Record new commands (E2E) here and in `CONTRIBUTING.md` when they are added.
 
 When code exists:
 

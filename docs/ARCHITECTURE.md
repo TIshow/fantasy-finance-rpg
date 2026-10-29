@@ -142,18 +142,18 @@ stateDiagram-v2
 apps/web/                         # 独立したnpmプロジェクト。リポジトリのルートには依存を置かない
   package.json                    # Node 24、npm（kabu-leagueに合わせる）
   vercel.json                     # regions: ["hnd1"]
-  compose.yaml                    # ローカルのPostgres 17
+  compose.yaml                    # ローカルのPostgres 17（ホストの5433番。テスト用DBも作る）
   prisma/schema.prisma, migrations/
   src/engine/                     # 純関数。同じディレクトリ以外の読み込みをテストで禁止（tests/engine/purity.test.ts）
   src/scenarios/s01/              # 第1シナリオの定義（scenario.ts）とNPCの注文表（npc-sheet.k2.json）
   src/sim/                        # 試合を最後まで回す補助と設計ルールの判定（テストとシミュレータで共有）
-  src/server/                     # トランザクション、advanceIfDue、トークン検証
+  src/server/                     # トランザクション（service.ts）、画面に返す状態（state.ts）、DBとエンジンの変換（repo.ts）
   src/app/m/[code]/               # 参加者
   src/app/host/[id]/              # 運営
   src/app/screen/[id]/            # 会場画面
   src/app/api/                    # Route Handlers
-  scripts/                        # simulate.ts、generate-npc-sheet.ts、create-match.ts（P2）
-  tests/                          # engine（P1）、db（P2）、e2e（P3）
+  scripts/                        # simulate.ts、generate-npc-sheet.ts、create-match.ts、smoke.ts
+  tests/                          # engine、db（実際のPostgresを使う）、e2e（P3）
 .tool-versions                    # nodejs 24.16.0（asdf）
 .python-version                   # 3.12（uv）
 scripts/check_docs.py             # 文書の参照チェック（uv run）
@@ -162,14 +162,14 @@ scripts/check_docs.py             # 文書の参照チェック（uv run）
 | 依存 | 目的 | 費用 | 出口 |
 | --- | --- | --- | --- |
 | Next.js 16、React 19、TypeScript 5 | 画面とAPIを1つのアプリにする（kabu-leagueと同じ） | 0 | 通常のNodeサーバーとして動かせる |
-| Prisma 7＋`@prisma/adapter-pg` | スキーマ、移行、トランザクション（kabu-leagueと同じ。P2で導入） | 0 | SQLの移行ファイルに置き換えられる |
-| zod | APIの入力検証（P2で導入） | 0 | 手書きの検証に置き換えられる |
+| Prisma 7＋`@prisma/adapter-pg` | スキーマ、移行、トランザクション（kabu-leagueと同じ） | 0 | SQLの移行ファイルに置き換えられる |
+| zod 4 | APIの入力検証 | 0 | 手書きの検証に置き換えられる |
 | Tailwind CSS 4 | スマートフォン向けの画面（kabu-leagueと同じ。P3で導入） | 0 | 通常のCSSに置き換えられる |
 | Vitest、tsx | エンジンとDBのテスト、スクリプトの実行 | 0 | — |
 | asdf（Node 24.16.0） | Nodeのバージョンを揃える（kabu-leagueと同じ） | 0 | `.tool-versions`はほかのバージョン管理でも読める |
 | uv（Python 3.12） | 文書チェックなどPythonのスクリプトを動かす。外部パッケージは使わない | 0 | 通常のPythonで動く |
 | Playwright | 複数端末のE2E（P3で導入） | 0 | — |
-| Docker（Postgres 17） | ローカル開発（P2で導入） | 0 | — |
+| Docker（Postgres 17） | ローカル開発とDB統合テスト | 0 | — |
 | Supabase（Postgresのみ、東京） | 本番DB | Freeは7日間アクセスがないと停止する。Proは月25ドル〜（契約前に確認。既存の組織を流用できる可能性あり） | `pg_dump`で他のPostgresへ移せる |
 | Vercel（hnd1） | ホスティング | Hobbyは非商用に限られる。Proは1人月20ドル〜（契約前に確認。既存のチームを流用できる可能性あり） | Nodeが動く環境ならどこでも動く |
 
@@ -180,59 +180,69 @@ scripts/check_docs.py             # 文書の参照チェック（uv run）
 
 ## 8. データモデル
 
+正本は`apps/web/prisma/schema.prisma`とマイグレーション（`apps/web/prisma/migrations/`）です。
+
 ```text
-matches(id, join_code, scenario_id, scenario_hash, algorithm_version, k_scale,
-        phase, round_seq, phase_ends_at, paused_remaining_ms, reveal_at, version,
-        host_token_hash, created_at, settled_at)
-teams(id, match_id, nickname, token_hash, joined_at)                    UNIQUE(match_id, nickname)
-accounts(id, match_id, kind[player|npc|mm], team_id, npc_key, cash)      CHECK(kind='mm' OR cash >= 0)
-positions(account_id, guild_id, qty, cost_basis)                        PK(account_id, guild_id)
-orders(id, match_id, round_seq, account_id, guild_id, side, qty, reserve_cash, revision, status, updated_at)
-                                                                        UNIQUE(match_id, round_seq, account_id, guild_id)
-round_clearings(match_id, round_seq, q_after, prices, stats, input_hash, output_hash, created_at)
-                                                                        PK(match_id, round_seq)
-fills(id, match_id, round_seq, account_id, guild_id, side, requested, filled, price, cash_delta, reason)
-investigations(match_id, team_id, round_seq, source)                    UNIQUE(match_id, team_id)
+matches(id, join_code, scenario_id, scenario_hash, sheet_hash, algorithm_version, k_scale,
+        phase, mode, round, total_rounds, phase_ends_at, paused_from, paused_remaining_ms, reveal_at,
+        timing, q, capacity, version, host_token_hash, created_at, settled_at)
+teams(id, match_id, nickname, token_hash, joined_at)                    UNIQUE(match_id, nickname)、UNIQUE(token_hash)
+accounts(id, match_id, key, kind[player|npc|mm], team_id, cash)         UNIQUE(match_id, key)、CHECK(kind='mm' OR cash >= 0)
+positions(account_id, guild_id, qty, cost_basis)                        PK(account_id, guild_id)、市場係以外は qty >= 0（トリガー）
+orders(id, match_id, round, account_id, guild_id, side, qty, reserve_cash, revision, status[active|cancelled], updated_at)
+                                                                        UNIQUE(match_id, round, account_id, guild_id)
+round_clearings(match_id, round, algorithm_version, prices_before, prices, q_after, stats, forecasts,
+                input_hash, output_hash, created_at)                    PK(match_id, round)
+fills(id, match_id, round, account_key, kind, guild_id, side, requested, filled, price, cash_delta, reason)
+investigations(match_id, team_id, round, source, used_at)              PK(match_id, team_id)
 match_events(id, match_id, type, actor, public_payload, created_at)     -- 監査とリプレイ
 ```
 
 - 金額と口数は整数だけです。小数は保存しません。
-- CHECK制約で負の残高と負の保有を拒否します（市場係を除く）。
-- NPCの注文はシナリオの注文表から読みます。清算の入力ハッシュには注文表も含めます。NPCの約定は`fills`に保存します（100商会×5ラウンドで最大500行）。
+- `accounts.key`はエンジンの口座ID（`team:<teamId>`、`npc:<key>`、`mm`）です。
+- `matches.q`は現在のLMSRの状態です。`matches.timing`は試合ごとの時間配分で、内部テストの短縮版に使います。
+- CHECK制約とトリガーで、負の残高と負の保有を拒否します（市場係を除く）。
+- NPCの注文はシナリオの注文表から読みます。作成時の注文表とシナリオのハッシュを`matches`に保存し、変わっていたら清算を止めます。NPCの約定は`fills`に保存します（100商会×5ラウンドで最大500行）。
+- 予約は取り消しても行を残し（`status = cancelled`）、版番号を進めます。古い画面からの上書きと再送を見分けるためです。
 - 取得原価（`cost_basis`）は現在保有分のコストです。売却時は売却口数に対応する平均原価を減らします（D-021）。
-- 予測スナップショット（D-021）は`fills`と`positions`から再計算できます。表示用に`round_clearings.stats`へ持ちます。
+- 予測スナップショット（D-021）は、清算のたびに`round_clearings.forecasts`へ保存します。
+- 全テーブルでRLSを有効にし、ポリシーは置きません（§10）。
 - 個人情報は商会名だけです。トークンはハッシュだけを保存します。
 
 ## 9. APIとトランザクション
 
 | メソッド | パス | 呼ぶ人 | 内容 |
 | --- | --- | --- | --- |
-| POST | `/api/join` | 参加者 | `{code, nickname}`。httpOnly cookieを発行 |
-| GET | `/api/m/:id/state?since=` | 全員 | 公開状態と本人の資産・予約。変化がなければ空 |
+| GET | `/api/code/:code` | 参加者 | 参加コードから試合IDを引く |
+| POST | `/api/join` | 参加者 | `{code, nickname}`。httpOnly cookie（試合ごと）を発行 |
+| GET | `/api/m/:id/state?since=` | 全員 | 公開状態と本人の資産・予約・約定。本人の情報がなく版番号も同じなら中身を省く |
 | PUT | `/api/m/:id/r/:seq/orders/:guildId` | 参加者 | `{side, qty, baseRevision}`。枠単位で冪等 |
-| DELETE | 同上 | 参加者 | 予約の取消 |
+| DELETE | 同上 | 参加者 | `{baseRevision}`。予約の取消 |
 | POST | `/api/m/:id/investigate` | 参加者 | `{source}`。1試合で1回 |
 | POST | `/api/m/:id/tick` | 誰でも | `advanceIfDue`。期限前なら何もしない |
-| POST | `/api/m/:id/host/:action` | 運営 | start、pause、resume、extend、close-now、next、abort |
-| GET | `/api/m/:id/screen` | 会場画面 | 公開情報だけ |
-| GET | `/api/m/:id/replay` | 全員 | 決算後だけ |
+| POST | `/api/m/:id/host/:action` | 運営 | start、pause、resume、extend、close-now、next、abort。`x-host-token`ヘッダーが必要 |
+| GET | `/api/m/:id/screen` | 会場画面・運営 | 公開情報だけ |
 
-試合の作成は`scripts/create-match.ts`（CLI）で行い、管理画面は作りません。
+- 書き込み系は`x-gm-client: 1`ヘッダーとJSONを必須にします。入力はzodで確かめます。
+- 公開時刻（`reveal_at`）の前は、公開状態にも本人の状態にも清算前の値を返します。全端末が公開時刻に取り直して、一斉に新価格を表示します。決算後は、価格の推移と本人の全約定を返します（リプレイ用の別APIは作らない）。
+- 試合の作成は`scripts/create-match.ts`（CLI）で行い、管理画面は作りません。
+- 実装は`apps/web/src/server/`（`service.ts`、`state.ts`、`repo.ts`、`http.ts`）と`apps/web/src/app/api/`です。
 
 ```text
 注文（PUT）
 BEGIN
   SELECT … FROM matches WHERE id = $1 FOR SHARE        -- 締切処理（FOR UPDATE）と直列化
-  phase = ORDER_OPEN、round_seq一致、clock_timestamp() < phase_ends_at + 1秒 を確認
+  phase = ORDER_OPEN、round一致、clock_timestamp() < phase_ends_at + 猶予 を確認（手動モードは期限なし）
   SELECT … FROM accounts WHERE id = $2 FOR UPDATE      -- 同じ商会の同時注文を直列化
-  自由現金 = cash − 他の枠の予約合計、自由保有 = qty − 他の売り予約
+  baseRevision が今の版なら更新。1つ前で内容が同じなら再送として今の結果を返す。それ以外は409
+  自由現金 = cash − 他の枠の予約合計、売れる口数 = 保有口数
   検証 → orders を upsert（revision + 1）
 COMMIT
 
 締切処理（tick）
 BEGIN
   SELECT … FROM matches WHERE id = $1 FOR UPDATE
-  期限前、一時停止中、処理済みなら何もせずCOMMIT
+  phaseAfter() で遷移を決める。期限前、一時停止中、結果発表後なら何もせずCOMMIT
   ORDER_OPENなら：予約とNPC注文表で clearRound() → fills、positions、accounts、round_clearings を書き、
                    phase = PUBLISHED、reveal_at、version + 1
   最終ラウンドのPUBLISHEDなら：settle() → settled_at を記録
@@ -241,9 +251,10 @@ COMMIT
 
 ## 10. 認証・セキュリティ・プライバシー
 
-- **参加：** 参加コード（6桁）と商会名で参加します。サーバーは32バイトの乱数トークンを発行し、httpOnly・Secure・SameSite=Laxのcookieに入れます。DBにはSHA-256のハッシュだけを保存します。開始後の参加は運営が許可した場合だけで、提案会議MVPの定員は12商会です。
+- **参加：** 参加コード（6桁）と商会名で参加します。サーバーは32バイトの乱数トークンを発行し、試合ごとのhttpOnly・SameSite=Laxのcookieに入れます（本番ではSecureも付ける）。DBにはSHA-256のハッシュだけを保存します。開始後の参加は受け付けません（運営が許可する仕組みは、必要になったら足す）。提案会議MVPの定員は12商会です。
 - **運営：** 試合の作成時に別の32バイトの乱数トークンを発行し、運営画面のURLの`#`以降に入れます（サーバーのログや参照元に残りません）。参加コードから運営権限には届きません。これは提案会議MVPだけの暫定措置です。イベントMVPでは、Supabase Authなどで改めて判断します（O-007）。
 - 書き込み系のAPIでは独自ヘッダーとJSONを必須にします（CSRF対策）。注文の持ち主はトークンから決め、URLのIDを信用しません。
+- すべての応答に、他サイトへの埋め込みを禁じるヘッダー（`frame-ancestors 'none'`、`X-Frame-Options`）と`nosniff`、`Referrer-Policy: same-origin`を付けます（`next.config.ts`）。トークンの照合は比較時間が一定の方法で行います。
 - 他の商会の予約や保有は誰にも返しません。会場画面に出すのは、価格、人数の集計、順位（商会名と総資産）だけです。
 - DBの接続情報はサーバーの環境変数にだけ置き、ブラウザにSupabaseのキーを渡しません。SupabaseのData APIはpublicスキーマを外部に公開するため、全テーブルでRLSを有効にし、ポリシーは置きません（全拒否）。
 - アプリのログにトークンや商会名を出しません。提案会議の試合データは、会議の30日後にスクリプトで削除します。

@@ -59,14 +59,19 @@ D-025〜D-027は2026-10-29に承認済みです。`apps/web`にゲームエン�
 
 Nodeはasdf（`.tool-versions`）、Pythonはuv（`uv run`）で動かします。
 
-`apps/web`で実行します。
+`apps/web`で実行します（最初に`.env.example`を`.env`へコピーします）。
 
 ```sh
 npm install
+npm run db:up
+npm run db:migrate
 npm test
+npm run test:db
 npm run typecheck
 npm run build
 npm run simulate
 ```
 
-文書のリンクと「§」の参照は、リポジトリのルートで`uv run scripts/check_docs.py`を実行して確かめます。DBとE2Eのコマンドは、P2・P3で追加したときにここと`AGENTS.md`へ追記します。
+ローカルで遊ぶときは`npm run dev`を起動し、`npm run match:create -- --fast`で試合を作ります。表示された参加者・会場・運営のURLを開きます。`npm run smoke`は、6商会がHTTP経由で5ラウンドを完走するかを確かめます。
+
+文書のリンクと「§」の参照は、リポジトリのルートで`uv run scripts/check_docs.py`を実行して確かめます。E2Eのコマンドは、P3で追加したときにここと`AGENTS.md`へ追記します。

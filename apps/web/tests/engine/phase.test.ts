@@ -71,6 +71,14 @@ describe("状態機械", () => {
     expect(phaseAfter(p, { type: "abort", now: 5 }, t).ok).toBe(false);
   });
 
+  it("ロビー・一時停止・結果発表・中止では、期限の時刻が残っていてもtickは何もしない", () => {
+    const base = createProgress(5);
+    for (const phase of ["LOBBY", "PAUSED", "RESULT", "ABORTED"] as const) {
+      const r = step({ ...base, phase, phaseEndsAt: 0 }, { type: "tick", now: 10 ** 9 });
+      expect(r.changed).toBe(false);
+    }
+  });
+
   it("手動モードでは期限で進まず、「次へ」だけで進む", () => {
     let p = step(createProgress(5, "manual"), { type: "start", now: 0 }).progress;
     expect(step(p, { type: "tick", now: 10 ** 9 }).changed).toBe(false);

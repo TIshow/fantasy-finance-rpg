@@ -56,6 +56,8 @@ function advance(p: Progress, now: number, timing: Timing): Transition {
   }
 }
 
+const isActive = (phase: Phase): phase is ActivePhase => phase === "NEWS" || phase === "ORDER_OPEN" || phase === "PUBLISHED";
+
 /** 期限が来ているか。注文受付は締切＋猶予まで続く。 */
 export function isDue(p: Progress, now: number, timing: Timing): boolean {
   if (p.phaseEndsAt === null) return false;
@@ -72,7 +74,7 @@ export function phaseAfter(p: Progress, trigger: Trigger, timing: Timing): Trans
       return moved({ ...p, phase: "NEWS", round: 1, phaseEndsAt: now + timing.newsMs });
     case "tick":
       // 誰が何回呼んでもよい。期限前や一時停止中は何もしない。
-      if (p.mode === "manual" || !isDue(p, now, timing)) return unchanged(p);
+      if (p.mode === "manual" || !isActive(p.phase) || !isDue(p, now, timing)) return unchanged(p);
       return advance(p, now, timing);
     case "next":
       return advance(p, now, timing);
