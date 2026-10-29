@@ -1,0 +1,2603 @@
+{
+  "scenarioId": "s01-meeting-5r",
+  "scenarioVersion": 1,
+  "algorithmVersion": "batch-lmsr-uniform-v1",
+  "k": 2,
+  "b": 200,
+  "seed": 20261029,
+  "q0": {
+    "airship": 308,
+    "alchemy": 347,
+    "dragon": 269,
+    "academy": 184
+  },
+  "npcs": [
+    {
+      "key": "n001",
+      "name": "王都商会",
+      "archetype": "trend",
+      "cash": 792,
+      "positions": {
+        "airship": 6,
+        "alchemy": 0,
+        "dragon": 6,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n002",
+      "name": "北門商会",
+      "archetype": "trend",
+      "cash": 891,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n003",
+      "name": "城下町商会",
+      "archetype": "trend",
+      "cash": 0,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 7,
+        "academy": 6
+      }
+    },
+    {
+      "key": "n004",
+      "name": "港町商会",
+      "archetype": "trend",
+      "cash": 693,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 5,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n005",
+      "name": "東門商会",
+      "archetype": "trend",
+      "cash": 1683,
+      "positions": {
+        "airship": 0,
+        "alchemy": 1,
+        "dragon": 0,
+        "academy": 4
+      }
+    },
+    {
+      "key": "n006",
+      "name": "西門商会",
+      "archetype": "trend",
+      "cash": 396,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 8
+      }
+    },
+    {
+      "key": "n007",
+      "name": "南門商会",
+      "archetype": "trend",
+      "cash": 396,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 12,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n008",
+      "name": "山麓商会",
+      "archetype": "trend",
+      "cash": 0,
+      "positions": {
+        "airship": 6,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n009",
+      "name": "湖畔商会",
+      "archetype": "trend",
+      "cash": 990,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n010",
+      "name": "星見商会",
+      "archetype": "trend",
+      "cash": 396,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 5,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n011",
+      "name": "王都組合",
+      "archetype": "trend",
+      "cash": 792,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 7,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n012",
+      "name": "北門組合",
+      "archetype": "trend",
+      "cash": 0,
+      "positions": {
+        "airship": 0,
+        "alchemy": 6,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n013",
+      "name": "城下町組合",
+      "archetype": "trend",
+      "cash": 594,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n014",
+      "name": "港町組合",
+      "archetype": "trend",
+      "cash": 594,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 8,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n015",
+      "name": "東門組合",
+      "archetype": "trend",
+      "cash": 594,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 6,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n016",
+      "name": "西門組合",
+      "archetype": "trend",
+      "cash": 594,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n017",
+      "name": "南門組合",
+      "archetype": "trend",
+      "cash": 396,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 8,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n018",
+      "name": "山麓組合",
+      "archetype": "trend",
+      "cash": 0,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 6,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n019",
+      "name": "湖畔組合",
+      "archetype": "trend",
+      "cash": 396,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n020",
+      "name": "星見組合",
+      "archetype": "trend",
+      "cash": 0,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n021",
+      "name": "王都商店",
+      "archetype": "trend",
+      "cash": 495,
+      "positions": {
+        "airship": 4,
+        "alchemy": 0,
+        "dragon": 4,
+        "academy": 7
+      }
+    },
+    {
+      "key": "n022",
+      "name": "北門商店",
+      "archetype": "trend",
+      "cash": 0,
+      "positions": {
+        "airship": 0,
+        "alchemy": 4,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n023",
+      "name": "城下町商店",
+      "archetype": "trend",
+      "cash": 0,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 5,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n024",
+      "name": "港町商店",
+      "archetype": "trend",
+      "cash": 693,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 11,
+        "academy": 8
+      }
+    },
+    {
+      "key": "n025",
+      "name": "東門商店",
+      "archetype": "trend",
+      "cash": 0,
+      "positions": {
+        "airship": 4,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n026",
+      "name": "西門商店",
+      "archetype": "news",
+      "cash": 495,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 4,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n027",
+      "name": "南門商店",
+      "archetype": "news",
+      "cash": 1386,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 3,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n028",
+      "name": "山麓商店",
+      "archetype": "news",
+      "cash": 1980,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 1,
+        "academy": 4
+      }
+    },
+    {
+      "key": "n029",
+      "name": "湖畔商店",
+      "archetype": "news",
+      "cash": 792,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n030",
+      "name": "星見商店",
+      "archetype": "news",
+      "cash": 990,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n031",
+      "name": "王都交易所",
+      "archetype": "news",
+      "cash": 0,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n032",
+      "name": "北門交易所",
+      "archetype": "news",
+      "cash": 396,
+      "positions": {
+        "airship": 0,
+        "alchemy": 6,
+        "dragon": 5,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n033",
+      "name": "城下町交易所",
+      "archetype": "news",
+      "cash": 396,
+      "positions": {
+        "airship": 6,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 4
+      }
+    },
+    {
+      "key": "n034",
+      "name": "港町交易所",
+      "archetype": "news",
+      "cash": 396,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 5,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n035",
+      "name": "東門交易所",
+      "archetype": "news",
+      "cash": 495,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n036",
+      "name": "西門交易所",
+      "archetype": "news",
+      "cash": 693,
+      "positions": {
+        "airship": 0,
+        "alchemy": 7,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n037",
+      "name": "南門交易所",
+      "archetype": "news",
+      "cash": 891,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 14,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n038",
+      "name": "山麓交易所",
+      "archetype": "news",
+      "cash": 2574,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n039",
+      "name": "湖畔交易所",
+      "archetype": "news",
+      "cash": 1287,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n040",
+      "name": "星見交易所",
+      "archetype": "news",
+      "cash": 594,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n041",
+      "name": "王都問屋",
+      "archetype": "news",
+      "cash": 1287,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n042",
+      "name": "北門問屋",
+      "archetype": "news",
+      "cash": 1188,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 5,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n043",
+      "name": "城下町問屋",
+      "archetype": "news",
+      "cash": 693,
+      "positions": {
+        "airship": 0,
+        "alchemy": 4,
+        "dragon": 7,
+        "academy": 7
+      }
+    },
+    {
+      "key": "n044",
+      "name": "港町問屋",
+      "archetype": "news",
+      "cash": 0,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 7,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n045",
+      "name": "東門問屋",
+      "archetype": "news",
+      "cash": 0,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 4,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n046",
+      "name": "西門問屋",
+      "archetype": "news",
+      "cash": 792,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 6,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n047",
+      "name": "南門問屋",
+      "archetype": "news",
+      "cash": 693,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 4,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n048",
+      "name": "山麓問屋",
+      "archetype": "news",
+      "cash": 495,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 6,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n049",
+      "name": "湖畔問屋",
+      "archetype": "news",
+      "cash": 1386,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 7,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n050",
+      "name": "星見問屋",
+      "archetype": "news",
+      "cash": 792,
+      "positions": {
+        "airship": 0,
+        "alchemy": 6,
+        "dragon": 14,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n051",
+      "name": "王都商人団",
+      "archetype": "contrarian",
+      "cash": 0,
+      "positions": {
+        "airship": 4,
+        "alchemy": 0,
+        "dragon": 4,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n052",
+      "name": "北門商人団",
+      "archetype": "contrarian",
+      "cash": 297,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 5,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n053",
+      "name": "城下町商人団",
+      "archetype": "contrarian",
+      "cash": 396,
+      "positions": {
+        "airship": 0,
+        "alchemy": 2,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n054",
+      "name": "港町商人団",
+      "archetype": "contrarian",
+      "cash": 990,
+      "positions": {
+        "airship": 1,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n055",
+      "name": "東門商人団",
+      "archetype": "contrarian",
+      "cash": 594,
+      "positions": {
+        "airship": 1,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 4
+      }
+    },
+    {
+      "key": "n056",
+      "name": "西門商人団",
+      "archetype": "contrarian",
+      "cash": 594,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 2
+      }
+    },
+    {
+      "key": "n057",
+      "name": "南門商人団",
+      "archetype": "contrarian",
+      "cash": 396,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n058",
+      "name": "山麓商人団",
+      "archetype": "contrarian",
+      "cash": 495,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n059",
+      "name": "湖畔商人団",
+      "archetype": "contrarian",
+      "cash": 297,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 3,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n060",
+      "name": "星見商人団",
+      "archetype": "contrarian",
+      "cash": 396,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n061",
+      "name": "王都両替商",
+      "archetype": "contrarian",
+      "cash": 1287,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 1,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n062",
+      "name": "北門両替商",
+      "archetype": "contrarian",
+      "cash": 396,
+      "positions": {
+        "airship": 0,
+        "alchemy": 4,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n063",
+      "name": "城下町両替商",
+      "archetype": "contrarian",
+      "cash": 297,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 3
+      }
+    },
+    {
+      "key": "n064",
+      "name": "港町両替商",
+      "archetype": "contrarian",
+      "cash": 0,
+      "positions": {
+        "airship": 3,
+        "alchemy": 0,
+        "dragon": 3,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n065",
+      "name": "東門両替商",
+      "archetype": "contrarian",
+      "cash": 297,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 3,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n066",
+      "name": "西門両替商",
+      "archetype": "short",
+      "cash": 792,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n067",
+      "name": "南門両替商",
+      "archetype": "short",
+      "cash": 792,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n068",
+      "name": "山麓両替商",
+      "archetype": "short",
+      "cash": 594,
+      "positions": {
+        "airship": 4,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n069",
+      "name": "湖畔両替商",
+      "archetype": "short",
+      "cash": 1089,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 1,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n070",
+      "name": "星見両替商",
+      "archetype": "short",
+      "cash": 495,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 4
+      }
+    },
+    {
+      "key": "n071",
+      "name": "王都運送組合",
+      "archetype": "short",
+      "cash": 0,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n072",
+      "name": "北門運送組合",
+      "archetype": "short",
+      "cash": 693,
+      "positions": {
+        "airship": 0,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n073",
+      "name": "城下町運送組合",
+      "archetype": "short",
+      "cash": 792,
+      "positions": {
+        "airship": 7,
+        "alchemy": 0,
+        "dragon": 10,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n074",
+      "name": "港町運送組合",
+      "archetype": "short",
+      "cash": 495,
+      "positions": {
+        "airship": 0,
+        "alchemy": 5,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n075",
+      "name": "東門運送組合",
+      "archetype": "short",
+      "cash": 0,
+      "positions": {
+        "airship": 5,
+        "alchemy": 6,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n076",
+      "name": "西門運送組合",
+      "archetype": "short",
+      "cash": 693,
+      "positions": {
+        "airship": 0,
+        "alchemy": 6,
+        "dragon": 7,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n077",
+      "name": "南門運送組合",
+      "archetype": "short",
+      "cash": 1683,
+      "positions": {
+        "airship": 1,
+        "alchemy": 0,
+        "dragon": 0,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n078",
+      "name": "山麓運送組合",
+      "archetype": "short",
+      "cash": 594,
+      "positions": {
+        "airship": 6,
+        "alchemy": 6,
+        "dragon": 8,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n079",
+      "name": "湖畔運送組合",
+      "archetype": "short",
+      "cash": 495,
+      "positions": {
+        "airship": 6,
+        "alchemy": 0,
+        "dragon": 4,
+        "academy": 0
+      }
+    },
+    {
+      "key": "n080",
+      "name": "星見運送組合",
+      "archetype": "short",
+      "cash": 297,
+      "positions": {
+        "airship": 0,
+        "alchemy": 5,
+        "dragon": 6,
+        "academy": 7
+      }
+    },
+    {
+      "key": "n081",
+      "name": "王都商館",
+      "archetype": "long",
+      "cash": 594,
+      "positions": {
+        "airship": 12,
+        "alchemy": 20,
+        "dragon": 7,
+        "academy": 6
+      }
+    },
+    {
+      "key": "n082",
+      "name": "北門商館",
+      "archetype": "long",
+      "cash": 792,
+      "positions": {
+        "airship": 16,
+        "alchemy": 14,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n083",
+      "name": "城下町商館",
+      "archetype": "long",
+      "cash": 495,
+      "positions": {
+        "airship": 12,
+        "alchemy": 14,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n084",
+      "name": "港町商館",
+      "archetype": "long",
+      "cash": 0,
+      "positions": {
+        "airship": 12,
+        "alchemy": 14,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n085",
+      "name": "東門商館",
+      "archetype": "long",
+      "cash": 396,
+      "positions": {
+        "airship": 18,
+        "alchemy": 14,
+        "dragon": 0,
+        "academy": 9
+      }
+    },
+    {
+      "key": "n086",
+      "name": "西門商館",
+      "archetype": "long",
+      "cash": 1188,
+      "positions": {
+        "airship": 12,
+        "alchemy": 14,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n087",
+      "name": "南門商館",
+      "archetype": "long",
+      "cash": 594,
+      "positions": {
+        "airship": 11,
+        "alchemy": 14,
+        "dragon": 0,
+        "academy": 11
+      }
+    },
+    {
+      "key": "n088",
+      "name": "山麓商館",
+      "archetype": "long",
+      "cash": 2178,
+      "positions": {
+        "airship": 11,
+        "alchemy": 14,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n089",
+      "name": "湖畔商館",
+      "archetype": "long",
+      "cash": 693,
+      "positions": {
+        "airship": 11,
+        "alchemy": 14,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n090",
+      "name": "星見商館",
+      "archetype": "long",
+      "cash": 693,
+      "positions": {
+        "airship": 11,
+        "alchemy": 14,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n091",
+      "name": "王都倉庫",
+      "archetype": "long",
+      "cash": 594,
+      "positions": {
+        "airship": 11,
+        "alchemy": 13,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n092",
+      "name": "北門倉庫",
+      "archetype": "long",
+      "cash": 594,
+      "positions": {
+        "airship": 11,
+        "alchemy": 13,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n093",
+      "name": "城下町倉庫",
+      "archetype": "long",
+      "cash": 396,
+      "positions": {
+        "airship": 11,
+        "alchemy": 13,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n094",
+      "name": "港町倉庫",
+      "archetype": "long",
+      "cash": 0,
+      "positions": {
+        "airship": 11,
+        "alchemy": 13,
+        "dragon": 4,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n095",
+      "name": "東門倉庫",
+      "archetype": "long",
+      "cash": 792,
+      "positions": {
+        "airship": 11,
+        "alchemy": 13,
+        "dragon": 6,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n096",
+      "name": "西門倉庫",
+      "archetype": "long",
+      "cash": 0,
+      "positions": {
+        "airship": 11,
+        "alchemy": 13,
+        "dragon": 8,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n097",
+      "name": "南門倉庫",
+      "archetype": "long",
+      "cash": 0,
+      "positions": {
+        "airship": 11,
+        "alchemy": 16,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n098",
+      "name": "山麓倉庫",
+      "archetype": "long",
+      "cash": 0,
+      "positions": {
+        "airship": 11,
+        "alchemy": 13,
+        "dragon": 0,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n099",
+      "name": "湖畔倉庫",
+      "archetype": "long",
+      "cash": 0,
+      "positions": {
+        "airship": 19,
+        "alchemy": 13,
+        "dragon": 7,
+        "academy": 5
+      }
+    },
+    {
+      "key": "n100",
+      "name": "星見倉庫",
+      "archetype": "long",
+      "cash": 1980,
+      "positions": {
+        "airship": 11,
+        "alchemy": 13,
+        "dragon": 0,
+        "academy": 5
+      }
+    }
+  ],
+  "rounds": [
+    [
+      {
+        "npcKey": "n041",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n077",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n054",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 1
+      },
+      {
+        "npcKey": "n027",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n003",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n055",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 1
+      }
+    ],
+    [
+      {
+        "npcKey": "n078",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n025",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n033",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n054",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 2
+      },
+      {
+        "npcKey": "n075",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n074",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n022",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n012",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n056",
+        "guildId": "alchemy",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n038",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n030",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n069",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n074",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n072",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n027",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n100",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n002",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n028",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n086",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n035",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n082",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n064",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n052",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n059",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n085",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n087",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n005",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n033",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n021",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n024",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 8
+      },
+      {
+        "npcKey": "n043",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n028",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n006",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 8
+      },
+      {
+        "npcKey": "n061",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n054",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 4
+      }
+    ],
+    [
+      {
+        "npcKey": "n041",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n028",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n049",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n036",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n087",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n038",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n088",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n013",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n004",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n064",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n051",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n005",
+        "guildId": "alchemy",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n039",
+        "guildId": "alchemy",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n100",
+        "guildId": "alchemy",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n077",
+        "guildId": "alchemy",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n085",
+        "guildId": "alchemy",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n037",
+        "guildId": "alchemy",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n038",
+        "guildId": "alchemy",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n088",
+        "guildId": "alchemy",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n062",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n053",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 2
+      },
+      {
+        "npcKey": "n049",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n046",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n004",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n094",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n045",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n043",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n072",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n047",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n015",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n095",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n023",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n028",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n037",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n010",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n014",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 8
+      },
+      {
+        "npcKey": "n042",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n048",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n044",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n069",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 8
+      },
+      {
+        "npcKey": "n073",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n001",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n026",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n050",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n076",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n078",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 8
+      },
+      {
+        "npcKey": "n011",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n002",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n099",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n032",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n080",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n007",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n096",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 8
+      },
+      {
+        "npcKey": "n024",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n017",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 8
+      },
+      {
+        "npcKey": "n034",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n038",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n082",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n021",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n079",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n058",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n059",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n054",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n056",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n060",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n061",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n052",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n057",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n079",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n005",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n088",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n009",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n027",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n029",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n081",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n077",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n050",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n007",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n042",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n016",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n073",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n083",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n063",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n055",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n054",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 4
+      }
+    ],
+    [
+      {
+        "npcKey": "n010",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n080",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n055",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 1
+      },
+      {
+        "npcKey": "n018",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n050",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n024",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n073",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n037",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n081",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n007",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n100",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n055",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 2
+      },
+      {
+        "npcKey": "n053",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n037",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n048",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n028",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n056",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 2
+      }
+    ],
+    [
+      {
+        "npcKey": "n082",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n008",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n001",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n079",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n085",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n075",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n021",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n099",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 8
+      },
+      {
+        "npcKey": "n068",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n041",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n077",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n073",
+        "guildId": "airship",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n063",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n061",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n065",
+        "guildId": "airship",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n078",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n032",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n081",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n050",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n036",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n076",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n043",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n005",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n080",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n097",
+        "guildId": "alchemy",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n062",
+        "guildId": "alchemy",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n061",
+        "guildId": "alchemy",
+        "side": "buy",
+        "qty": 3
+      },
+      {
+        "npcKey": "n039",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n019",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n014",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n092",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n095",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n067",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n041",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n070",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n093",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n009",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n086",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n034",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n089",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n069",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n066",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n024",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n076",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n011",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n088",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n078",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n032",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n006",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n033",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n017",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n002",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n043",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n042",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n046",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n028",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n038",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n027",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 4
+      },
+      {
+        "npcKey": "n026",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n100",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n091",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n021",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n015",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n090",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n005",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n049",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n001",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 8
+      },
+      {
+        "npcKey": "n047",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 7
+      },
+      {
+        "npcKey": "n030",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 5
+      },
+      {
+        "npcKey": "n068",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n040",
+        "guildId": "dragon",
+        "side": "buy",
+        "qty": 6
+      },
+      {
+        "npcKey": "n060",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n058",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n061",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n051",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n052",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n054",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n055",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n057",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n065",
+        "guildId": "dragon",
+        "side": "sell",
+        "qty": 3
+      },
+      {
+        "npcKey": "n080",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 7
+      },
+      {
+        "npcKey": "n070",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n003",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 6
+      },
+      {
+        "npcKey": "n042",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 4
+      },
+      {
+        "npcKey": "n075",
+        "guildId": "academy",
+        "side": "sell",
+        "qty": 5
+      },
+      {
+        "npcKey": "n055",
+        "guildId": "academy",
+        "side": "buy",
+        "qty": 3
+      }
+    ]
+  ],
+  "hash": "7d6d6bed70b818e2"
+}
