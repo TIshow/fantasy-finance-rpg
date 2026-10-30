@@ -320,7 +320,7 @@
 | O-009 | ゲスっちとの最初の連携範囲 | 銀行提案後 |
 | O-010 | 銀行ブランド、監修、免責表示 | 主催者決定後 |
 | O-011 | 提案会議の日程と最大人数 | P1の着手前（範囲と日程の逆算に使う） |
-| O-012 | クラウドの契約形態（kabu-leagueのSupabase組織・Vercelチームの流用、独自ドメイン） | P4の前 |
+| O-012 | クラウドの契約形態（Supabase組織TiShowは無料プランで、動かせるプロジェクトの枠2つが埋まっている。Vercelチームtishow's projects、独自ドメイン） | 保留（2026-10-30、オーナー判断で当面ローカル）。P4の前 |
 | O-013 | NPCを参加者の注文に反応するAIにするか（[#7](https://github.com/TIshow/fantasy-finance-rpg/issues/7)） | 提案会議の後（一人版の設計時） |
 | O-014 | 参加者が増えたときのライブ価格（連続約定）モード（[#6](https://github.com/TIshow/fantasy-finance-rpg/issues/6)） | 参加規模の拡大を検討するとき |
 

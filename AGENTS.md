@@ -84,7 +84,10 @@ npm run build
 npm run simulate     # 10,000 random games and the k table (about 70 seconds)
 npm run dev          # then: npm run match:create -- --fast, and npm run smoke for a 6-team HTTP run
 npm run test:e2e     # Playwright: 6 players, host, and venue screen play 5 rounds on a production build (about 2 minutes)
+npm run purge        # list matches older than 30 days; add -- --yes to delete them
 ```
+
+Production setup steps (Supabase Tokyo, Vercel hnd1, `.env.prod`, `db:deploy:prod`, `match:create:prod`, `purge:prod`) are in `docs/MEETING_MVP_SPEC.md` §13. Never commit `.env.prod` or paste the host URL with its `#` token into logs or chat.
 
 Regenerate the reviewed NPC sheet only on purpose (`npm run npc:generate -- 2 20261029`), and review the diff before committing it. Check document links and section references from the repository root with `uv run scripts/check_docs.py`. Record new commands here and in `CONTRIBUTING.md` when they are added.
 

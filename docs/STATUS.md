@@ -6,7 +6,7 @@
 
 ## 現在のフェーズ
 
-**Phase 0：提案会議MVP — P3（画面とE2E）完了。残りは実機の内部テストとP4（本番環境）**
+**Phase 0：提案会議MVP — P3完了、P4は準備だけ完了（クラウドは保留、当面ローカル）**
 
 2026-10-29、オーナーの判断で、GUILD MARKETを人工市場・一斉約定のゲームとして作り直すことにしました（D-024）。プレイヤーと約100のNPC商会が同じ市場で売買し、注文はラウンドの締切ごとに一斉に約定します。
 
@@ -99,12 +99,15 @@
 
 ## 次の作業
 
-最優先：オーナーが実機5〜6台で内部テストを行う（`MEETING_MVP_SPEC.md` §12）。並行して、提案会議の日程と最大人数（O-011）と、クラウドの契約形態（O-012）を確認する。
+最優先：オーナーが実機5〜6台で内部テストを行う（`MEETING_MVP_SPEC.md` §12）。並行して、提案会議の日程と最大人数（O-011）を確認する。
+
+2026-10-30、オーナー判断で、クラウド（Supabase、Vercel）の作成はいったん保留し、当面はローカル（MacとLAN）で進める（O-012）。本番環境の立ち上げに要るファイルと手順は用意した（`MEETING_MVP_SPEC.md` §13）。
 
 次の順に進めます。
 
 1. 内部テストの気づきを直す（文言、時間配分、分かりにくい操作）
-2. P4：クラウドの契約形態（O-012）と費用の承認を得てから、本番環境（Supabase東京、Vercel hnd1）を作る。4G回線でリハーサルを2回行い、録画を残す
+2. P4：クラウドの契約形態（O-012）と費用の承認を得てから、§13の手順で本番環境（Supabase東京、Vercel hnd1）を作る。4G回線でリハーサルを2回行い、録画を残す
+   - Supabaseの組織TiShowは無料プランで、動かせるプロジェクトの枠（2つ）がBeatBubbleとf-sportsで埋まっている。新規に作るなら、どちらかを一時停止するかProにする
 
 ## 優先度の高い未決事項
 
@@ -357,3 +360,28 @@
   - DBテストを4件足した（17件）：中止しても公開時刻まで隠す、途中順位とリプレイ用の集計、運営専用APIの拒否と件数だけの応答、接続時刻の書き込みの間引き
   - 文書：cookieのSecureの判定、公開待ちの応答、ARCHITECTUREの改行抜け。本番のリハーサルでSecureを確かめる手順を足した
 - 次の一手：内部テストの気づきを直してから、P4（本番環境とリハーサル）
+
+### 2026-10-30 — P4の準備（クラウドは保留）
+
+- 目的：クラウドの契約が決まったらすぐ本番を立ち上げられるよう、ファイルと手順をそろえる。クラウドは作らない
+- 完了：
+  - `apps/web/vercel.json`：東京リージョン（hnd1）に固定した
+  - 接続先の使い分け：アプリの実行時はトランザクションモード（6543番、`DATABASE_URL`）、マイグレーションはセッションモード（5432番、`DIRECT_URL`）。`prisma.config.ts`は`DIRECT_URL`を優先する。`.env.example`に本番の書き方を説明した（値は書かない）
+  - `GET /api/health`：DBにつながるかだけを返す（当日の朝の確認用）
+  - 試合データの削除：`src/server/maintenance.ts`の`purgeMatches`と`scripts/purge-matches.ts`。既定は確認だけで、`--yes`で削除する
+  - コマンド：`db:deploy`、`db:deploy:prod`、`match:create:prod`、`purge`、`purge:prod`。本番用は`.env.prod`（コミットしない）を読む
+  - 手順書：`MEETING_MVP_SPEC.md` §13（本番環境の立ち上げ）と§9（当日の朝の確認）
+- 変更ファイル：`apps/web/`（`vercel.json`、`prisma.config.ts`、`.env.example`、`package.json`、`src/server/maintenance.ts`、`src/app/api/health/`、`scripts/purge-matches.ts`、`tests/db/maintenance.test.ts`）、`AGENTS.md`、`CONTRIBUTING.md`、`docs/ARCHITECTURE.md`、`docs/MEETING_MVP_SPEC.md`、`docs/DECISIONS.md`、`docs/STATUS.md`
+- 検証：
+  - `npm run test:db`：20件成功（削除の3件を追加）
+  - 本番用のビルドで`/api/health`が`{"ok":true,"db":true}`を返した。本番のCSPに`'unsafe-eval'`が入っていない
+  - `db:deploy:prod`が`.env.prod`の値をローカルの`.env`より優先することを、テスト用DBに向けた一時ファイルで確かめた（一時ファイルは削除済み）
+- 決定：クラウドの作成はいったん保留し、当面はローカルで進める（オーナー判断。O-012）
+- 未解決：実機での内部テスト、提案会議の日程と人数（O-011）、クラウドの契約形態（O-012）
+- 追記（サブエージェントのレビュー）：`.claude/agents/code-reviewer.md`の指示でレビューし、次を直した
+  - 中：`prisma.config.ts`で`DIRECT_URL`を優先したため、環境に`DIRECT_URL`があると、テスト用DBへの切り替え（`DATABASE_URL`）が無視された。本番に当たるおそれがあった
+    - CLIは`DATABASE_URL`だけを見る形に戻した
+    - 本番のマイグレーションは`scripts/db-deploy-prod.ts`が行う。`.env.prod`の`DIRECT_URL`だけを使い、ない場合と6543番の場合は中止する
+  - 低：削除のコマンドは、`--days <日数>`と`--yes`以外の引数（`--days=7`など）を拒否する。手順書を「30日を過ぎたあと、一覧に会議の試合が入っていることを確かめてから削除」にした
+  - 低：DBテストを足した（21件）。日数の境界、調査券と保有の連鎖削除、`/api/health`の応答。手順書の`/api/health`の本文をそろえた
+- 次の一手：内部テストの気づきを直す。クラウドの契約が決まったら§13の手順で本番を立ち上げる
