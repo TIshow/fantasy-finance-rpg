@@ -39,3 +39,8 @@ export async function ledger(matchId: string) {
   const negative = accounts.filter((a) => a.kind !== "mm" && (a.cash < 0 || a.positions.some((p) => p.qty < 0)));
   return { totalCash, byGuild, negative: negative.length };
 }
+
+/** 公開時刻を過ぎたことにする（公開待ちの2秒を待たない） */
+export async function passReveal(matchId: string) {
+  await prisma.$executeRaw`UPDATE matches SET reveal_at = clock_timestamp() - interval '1 second' WHERE id = ${matchId}::uuid`;
+}

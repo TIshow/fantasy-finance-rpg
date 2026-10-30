@@ -8,7 +8,7 @@ export async function POST(req: NextRequest) {
     const body = await readJson(req, joinBody);
     const { matchId, teamId, token } = await joinMatch(body.code, body.nickname);
     const res = json({ matchId, teamId });
-    setTeamCookie(res, matchId, token);
+    setTeamCookie(req, res, matchId, token);
     return res;
   });
 }
