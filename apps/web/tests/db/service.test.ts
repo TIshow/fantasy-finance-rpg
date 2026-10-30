@@ -4,9 +4,9 @@ import { scenarioS01 } from "@/scenarios/s01/scenario";
 import { prisma } from "@/server/db/client";
 import { AppError } from "@/server/errors";
 import { advance, cancelOrder, joinMatch, putOrder, testHooks, useInvestigation } from "@/server/service";
-import { getState } from "@/server/state";
+import { getHostStatus, getState } from "@/server/state";
 import { playGame } from "@/sim/play";
-import { forceAdvance, host, ledger, newMatch, setDeadline } from "./helpers";
+import { forceAdvance, host, ledger, newMatch, passReveal, setDeadline } from "./helpers";
 
 afterAll(async () => {
   await prisma.$disconnect();
@@ -72,8 +72,10 @@ describe("1試合を最後まで（DB）", () => {
     const mm = await prisma.account.findFirstOrThrow({ where: { matchId: m.matchId, kind: "mm" } });
     expect(mm.cash).toBeGreaterThanOrEqual(0);
 
+    await passReveal(m.matchId); // テストでは公開待ちの2秒を待たずに決算へ進めたため
     const state = await getState(m.matchId, m.tokens[0]);
     expect(state.public.scenario.winner).toBe("dragon");
+    expect(state.public.flowHistory).toHaveLength(5);
     expect(state.public.ranking).toHaveLength(6);
     expect(state.own!.allFills!.length).toBeGreaterThan(0);
   });
@@ -213,6 +215,25 @@ describe("締切処理と決算", () => {
 });
 
 describe("公開の同時性", () => {
+  it("公開待ちのあいだに中止しても、公開時刻までは結果を隠す", async () => {
+    const m = await newMatch(1);
+    await host(m.matchId, m.hostToken, "start");
+    await forceAdvance(m.matchId);
+    await putOrder(m.matchId, m.tokens[0], 1, "dragon", { side: "buy", qty: 10, baseRevision: 0 });
+    await forceAdvance(m.matchId);
+    expect((await host(m.matchId, m.hostToken, "abort")).phase).toBe("ABORTED");
+    const aborted = await getState(m.matchId, m.tokens[0]);
+    expect(aborted.public.prices).toEqual(scenarioS01.initialPrices);
+    expect(aborted.public.lastClearing).toBeNull();
+    expect(aborted.public.ranking).toBeNull();
+    expect(aborted.own!.positions.dragon!.qty).toBe(0);
+    expect(aborted.own!.lastFills).toHaveLength(0);
+    await passReveal(m.matchId);
+    const later = await getState(m.matchId, m.tokens[0]);
+    expect(later.own!.positions.dragon!.qty).toBe(10);
+    expect(later.public.ranking).toHaveLength(1);
+  });
+
   it("公開時刻の前は新価格も自分の約定も見せず、過ぎたら一斉に見せる", async () => {
     const m = await newMatch(1);
     await host(m.matchId, m.hostToken, "start");
@@ -228,10 +249,12 @@ describe("公開の同時性", () => {
     expect(before.own!.cash).toBe(1000);
     expect(before.own!.positions.dragon!.qty).toBe(0);
     expect(before.own!.lastFills).toHaveLength(0);
-    await prisma.$executeRaw`UPDATE matches SET reveal_at = clock_timestamp() - interval '1 second' WHERE id = ${m.matchId}::uuid`;
+    expect(JSON.stringify(before)).not.toContain('"filled"'); // 約定は応答のどこにも入らない
+    await passReveal(m.matchId);
     const after = await getState(m.matchId, m.tokens[0]);
     expect(after.public.pendingReveal).toBeNull();
-    expect(after.public.prices).toEqual(before.public.pendingReveal!.prices);
+    const clearing = await prisma.roundClearing.findUniqueOrThrow({ where: { matchId_round: { matchId: m.matchId, round: 1 } } });
+    expect(after.public.prices).toEqual(clearing.prices);
     expect(after.own!.positions.dragon!.qty).toBe(10);
     expect(after.own!.lastFills[0]).toMatchObject({ guildId: "dragon", filled: 10 });
     expect(after.public.ranking).toHaveLength(1);
@@ -266,5 +289,58 @@ describe("参加と調査券", () => {
     expect(results.sort()).toEqual(["investigation_used", "ok"]);
     const state = await getState(m.matchId, m.tokens[0]);
     expect(state.own!.investigation!.round).toBe(3);
+  });
+});
+
+describe("途中順位とリプレイ", () => {
+  it("一度公開したあとは、次のラウンドのニュースや受付中にも順位を見せる。リプレイ用の集計は決算後だけ", async () => {
+    const m = await newMatch(2);
+    await host(m.matchId, m.hostToken, "start");
+    await forceAdvance(m.matchId);
+    expect((await getState(m.matchId)).public.ranking).toBeNull();
+    await forceAdvance(m.matchId); // R1公開
+    await passReveal(m.matchId);
+    await forceAdvance(m.matchId); // R2ニュース
+    let s = await getState(m.matchId);
+    expect(s.public.phase).toBe("NEWS");
+    expect(s.public.ranking).toHaveLength(2);
+    expect(s.public.flowHistory).toBeNull();
+    await forceAdvance(m.matchId); // R2受付
+    s = await getState(m.matchId);
+    expect(s.public.ranking).toHaveLength(2);
+    expect(s.public.flowHistory).toBeNull();
+  });
+});
+
+describe("運営の接続状況", () => {
+  it("運営のトークンがないと拒否し、予約は件数だけを返す", async () => {
+    const m = await newMatch(2);
+    expect(await code(getHostStatus(m.matchId, undefined))).toBe("unauthorized");
+    expect(await code(getHostStatus(m.matchId, "wrong"))).toBe("unauthorized");
+    await host(m.matchId, m.hostToken, "start");
+    await forceAdvance(m.matchId);
+    await putOrder(m.matchId, m.tokens[0], 1, "dragon", { side: "buy", qty: 7, baseRevision: 0 });
+    await putOrder(m.matchId, m.tokens[0], 1, "airship", { side: "buy", qty: 1, baseRevision: 0 });
+    const status = await getHostStatus(m.matchId, m.hostToken);
+    expect(status.teams.map((t) => t.ordersThisRound)).toEqual([2, 0]);
+    for (const t of status.teams) expect(Object.keys(t).sort()).toEqual(["nickname", "ordersThisRound", "secondsSinceSeen"]);
+    expect(JSON.stringify(status)).not.toMatch(/dragon|airship|buy|"qty"/);
+  });
+
+  it("接続時刻の書き込みは、1商会につき5秒に1回まで", async () => {
+    const m = await newMatch(1);
+    const seen = async () => (await prisma.team.findUniqueOrThrow({ where: { id: m.teamIds[0]! } })).lastSeenAt;
+    expect(await seen()).toBeNull();
+    await getState(m.matchId, m.tokens[0]);
+    const first = await seen();
+    expect(first).not.toBeNull();
+    await getState(m.matchId, m.tokens[0]);
+    expect(await seen()).toEqual(first);
+    await prisma.$executeRaw`UPDATE teams SET last_seen_at = clock_timestamp() - interval '10 seconds' WHERE id = ${m.teamIds[0]}::uuid`;
+    const old = await seen();
+    await getState(m.matchId, m.tokens[0]);
+    expect((await seen())!.getTime()).toBeGreaterThan(old!.getTime());
+    const status = await getHostStatus(m.matchId, m.hostToken);
+    expect(status.teams[0]!.secondsSinceSeen).toBeLessThanOrEqual(1);
   });
 });

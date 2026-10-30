@@ -36,8 +36,8 @@ export interface PublicState {
   news: { act: string; title: string; text: string; details: { label: string; text: string }[]; investigationWindow: number | null } | null;
   /** 現在の表示価格（公開時刻前は、まだ前回の価格） */
   prices: GuildMap<number>;
-  /** 清算済みで公開待ちのときの新価格 */
-  pendingReveal: { prices: GuildMap<number>; revealAt: number } | null;
+  /** 清算済みで公開待ちのときの公開時刻。新価格は公開時刻まで返さない */
+  pendingReveal: { revealAt: number } | null;
   lastClearing: { round: number; pricesBefore: GuildMap<number>; prices: GuildMap<number>; stats: GuildMap<GuildFlowStats>; npcCount: number } | null;
   priceHistory: GuildMap<number>[];
   /** 決算後だけ：ラウンドごとの約定の純量（NPCと参加者を分ける。リプレイ用） */
@@ -83,9 +83,8 @@ async function readState(tx: Tx, matchId: string, token: string | undefined): Pr
   const revealAt = m.reveal_at?.getTime() ?? null;
   const progress = toProgress(m);
   const finished = m.phase === "RESULT";
-  // 公開待ちは、清算直後の公開フェーズの間だけ（結果発表や次のラウンドに進んだら必ず見せる）
-  const publishing = m.phase === "PUBLISHED" || (m.phase === "PAUSED" && m.paused_from === "PUBLISHED");
-  const hidden = publishing && last !== null && last.round === m.round && revealAt !== null && now < revealAt;
+  // 公開時刻の前は、試合の段階によらず（中止や一時停止をしても）最後の清算の結果を隠す
+  const hidden = last !== null && last.round === m.round && revealAt !== null && now < revealAt;
 
   const teams = await tx.team.findMany({
     where: { matchId },
@@ -131,7 +130,7 @@ async function readState(tx: Tx, matchId: string, token: string | undefined): Pr
         ? { act: round.act, title: round.title, text: round.news, details: round.details ?? [], investigationWindow: round.investigationWindow ?? null }
         : null,
     prices: shownPrices,
-    pendingReveal: hidden ? { prices: current, revealAt: revealAt! } : null,
+    pendingReveal: hidden ? { revealAt: revealAt! } : null,
     lastClearing:
       last && !hidden
         ? {

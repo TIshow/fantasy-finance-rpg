@@ -13,6 +13,8 @@ export function Host({ matchId }: { matchId: string }) {
   const [token, setToken] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [status, setStatus] = useState<HostStatus | null>(null);
+  // 接続状況の取得のエラーは、運営操作のエラーと分けて持つ。次に成功したら消す
+  const [statusErr, setStatusErr] = useState<string | null>(null);
   const [qr, setQr] = useState<string | null>(null);
   const { snap, refresh } = useMatch(`/api/m/${matchId}/screen`);
   const seconds = useCountdown(snap);
@@ -31,9 +33,12 @@ export function Host({ matchId }: { matchId: string }) {
     const load = async () => {
       try {
         const s = await api<HostStatus>(`/api/m/${matchId}/teams`, { hostToken: token });
-        if (!stopped) setStatus(s);
+        if (!stopped) {
+          setStatus(s);
+          setStatusErr(null);
+        }
       } catch (e) {
-        if (!stopped) setErr(e instanceof ApiError ? e.code : "network");
+        if (!stopped) setStatusErr(e instanceof ApiError ? e.code : "network");
       }
     };
     load();
@@ -115,6 +120,7 @@ export function Host({ matchId }: { matchId: string }) {
               </li>
             ))}
           </ul>
+          {statusErr && <p className="mt-2 text-sm text-sell">接続状況を取得できませんでした（{ERROR_LABEL[statusErr] ?? statusErr}）。自動で取り直します。</p>}
           <p className="mt-2 text-xs text-mute">緑：10秒以内、黄：30秒以内、赤：それ以上。表示が古い端末は、ページを再読み込みしてもらいます。</p>
         </Card>
       </aside>
