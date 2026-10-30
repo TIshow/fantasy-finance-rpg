@@ -175,7 +175,8 @@ scripts/check_docs.py             # 文書の参照チェック（uv run）
 | Vercel（hnd1） | ホスティング | Hobbyは非商用に限られる。Proは1人月20ドル〜（契約前に確認。既存のチームを流用できる可能性あり） | Nodeが動く環境ならどこでも動く |
 
 - SupabaseはPostgresとしてだけ使い、RealtimeやAuthに依存しません。そのため、ほかのPostgresへ移しやすい構成です。
-- Vercelの既定リージョン（米国東部）では、Supabase東京との往復が1クエリ150ms前後かかり、注文1件のトランザクションが1秒を超えかねません。kabu-leagueと同じく`hnd1`に固定します。
+- Vercelの既定リージョン（米国東部）では、Supabase東京との往復が1クエリ150ms前後かかり、注文1件のトランザクションが1秒を超えかねません。kabu-leagueと同じく`hnd1`に固定します（`apps/web/vercel.json`）。
+- Supabaseへの接続は2つを使い分けます。アプリの実行時はトランザクションモード（6543番、`DATABASE_URL`）、マイグレーションはセッションモード（5432番）です。本番のマイグレーションは`npm run db:deploy:prod`だけが、`.env.prod`の`DIRECT_URL`を使って行います。PrismaのCLIはふだん`DATABASE_URL`だけを見るので、テスト用DBへの切り替えが`DIRECT_URL`に上書きされることはありません。セッションモードは接続を握り続けるため、サーバーレスでは接続が枯渇します（kabu-leagueで本番に起きた）。1インスタンスあたりの接続数は`DATABASE_POOL_MAX`（既定3）で絞ります。直結ホスト（`db.<ref>.supabase.co`）はIPv6専用なので使いません。
 - 定期実行（Cron）は使いません。進行は`advanceIfDue`という1つの関数に集め、誰が何回呼んでも冪等にします。Cronは長時間の一人版で、この関数を呼ぶ役として足すだけです。
 - CIは追加しません（必要になれば別途判断します）。
 
@@ -224,6 +225,7 @@ match_events(id, match_id, type, actor, public_payload, created_at)     -- 監�
 | POST | `/api/m/:id/tick` | 誰でも | `advanceIfDue`。期限前なら何もしない |
 | POST | `/api/m/:id/host/:action` | 運営 | start、pause、resume、extend、close-now、next、abort。`x-host-token`ヘッダーが必要 |
 | GET | `/api/m/:id/screen` | 会場画面・運営 | 公開情報だけ |
+| GET | `/api/health` | 運営（当日の朝の確認） | DBにつながるかだけを返す。接続先などは出さない |
 | GET | `/api/m/:id/teams` | 運営 | 各商会の接続状況（最後に状態を取得してからの秒数）と、今のラウンドの予約数。予約の中身は返さない。`x-host-token`が必要 |
 
 - 書き込み系は`x-gm-client: 1`ヘッダーとJSONを必須にします。入力はzodで確かめます。
@@ -264,7 +266,7 @@ COMMIT
 - トークンの照合は、比較時間が一定の方法で行います。
 - 他の商会の予約や保有は誰にも返しません。会場画面に出すのは、価格、人数の集計、順位（商会名と総資産）だけです。
 - DBの接続情報はサーバーの環境変数にだけ置き、ブラウザにSupabaseのキーを渡しません。SupabaseのData APIはpublicスキーマを外部に公開するため、全テーブルでRLSを有効にし、ポリシーは置きません（全拒否）。
-- アプリのログにトークンや商会名を出しません。提案会議の試合データは、会議の30日後にスクリプトで削除します。
+- アプリのログにトークンや商会名を出しません。提案会議の試合データは、会議の30日後に`npm run purge:prod -- --days 30 --yes`で削除します。チーム、口座、注文、約定、ログも外部キーでまとめて消えます。`--yes`を付けないと、対象の一覧を出すだけです。
 - 提案会議MVPでは児童のデータを扱いません。イベントで使う前に、データ管理責任と保持期間を決めます（O-008）。
 
 ## 11. 監視と障害対応

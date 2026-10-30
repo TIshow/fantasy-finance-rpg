@@ -23,7 +23,12 @@
     "postinstall": "prisma generate",
     "smoke": "tsx --env-file=.env scripts/smoke.ts",
     "test:e2e": "playwright test",
-    "start:lan": "next build && next start -H 0.0.0.0 -p 3000"
+    "start:lan": "next build && next start -H 0.0.0.0 -p 3000",
+    "db:deploy": "prisma migrate deploy",
+    "match:create:prod": "tsx --env-file=.env.prod scripts/create-match.ts",
+    "purge": "tsx --env-file=.env scripts/purge-matches.ts",
+    "purge:prod": "tsx --env-file=.env.prod scripts/purge-matches.ts",
+    "db:deploy:prod": "tsx scripts/db-deploy-prod.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.10.1",
