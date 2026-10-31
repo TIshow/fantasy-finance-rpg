@@ -47,7 +47,18 @@ npm run build
 npm run dev
 ```
 
-今回のGitHub上の整理ではコードを実行していないため、型チェック・ビルドの実行結果は未確認。次回の作業開始時に検証する。
+### 2026-10-31 — マージ前レビューとローカル検証
+
+- `origin/main...pivot/ai-investor-spectator-cleanup`の削除・残存ファイル・文書を確認。旧ゲームの撤去はD-029と一致し、誤削除は見つからなかった。
+- 保存ブランチと`origin/main`は、どちらも上記の保存コミットと一致することを確認。元の作業フォルダにある`feat/v2-market`の未コミット変更を保全するため、専用worktreeで検証した。保存ブランチに未コミットのv2変更は含まれない。
+- 修正：`npm ci`がロックファイル不整合で失敗したため、`npm install --package-lock-only --ignore-scripts`でTailwindが要求するlightningcss 1.32.0・PostCSS 8.5.32とプラットフォーム別の推移依存を補正した。`package.json`と直接依存の固定バージョンは変更していない。
+- 修正：ホスティング未決定という方針に合わせて旧Vercel東京リージョン設定を削除。削除済みPrisma生成先のgitignore設定と、旧運営画面を前提とするCSPコメントも整理した。
+- 検証環境：asdf管理のNode.js 24.16.0 / npm 11.13.0（子プロセスも同じNodeを使用）。DB・環境変数ファイルなし。
+- 成功：修復後の`npm ci`、`npm run typecheck`、`npm run build`、`npm ls --depth=0`、`git diff --check`。文書10ファイルの22文書参照も確認した。
+- 起動確認：`npm run start -- --hostname 127.0.0.1 --port 3217`と`npm run dev -- --hostname 127.0.0.1 --port 3218`でトップページがHTTP 200。ブラウザで本番ビルドの見出し・説明・スタイルを確認した。
+- 本番HTTP確認：JS/CSSアセット7件が200。CSP（`unsafe-eval`なし）、X-Frame-Options、X-Content-Type-Optionsを確認。旧API・参加者・運営・会場の代表ルート6件は404。
+- 残るリスク：`npm audit`はNext.js 16.2.7（Critical）、PostCSS 8.4.31（High）、sharp 0.34.5（High）の3パッケージを報告した。いずれも`main`から引き継いだ版であり、整理による新規導入ではない。npm提示の修正先はNext.js 16.4.3で、基盤のバージョン更新は今回の整理修正に混ぜず、公開前に別PRで更新・再検証する必要がある。
+- 未検証：macOS以外でのインストール・実行、本番デプロイ、新製品の機能（未実装）。新機能、依存追加、クラウド作成、`main`へのマージは行っていない。
 
 ## 厳守
 
