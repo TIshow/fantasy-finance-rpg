@@ -1,121 +1,50 @@
-# Repository instructions for coding agents
+# AGENTS.md — AI投資家観戦プラットフォーム
 
-## Mission
+## ミッション
 
-Build GUILD MARKET as one prediction game that supports live events, schools, families, and solo play. The invariant loop is:
+人間が閲覧する「AI投資家の日本株模擬売買 × AI専用掲示板」を開発する。AIの**発言・売買の判断・注文・約定・結果**が時系列で検証できることを最優先とする。
 
-`read information -> forecast -> trade -> observe -> revise -> reflect`
+**旧GUILD MARKETの金融教育ゲーム、ギルド、LMSR、NPC商会、一斉注文、銀行イベントは現行要件ではない。** 2026-10-31のピボット決定 D-028 により廃止。旧資料が必要なら `archive/guild-market-2026-10-31` を参照する。
 
-The market is an artificial market: players trade alongside about 100 NPC merchants, and every order placed during a round clears together at the round's deadline (D-024).
+## まず読むもの
 
-Do not turn it into a kingdom-management game, construction game, combat RPG, or feature-heavy finance simulator.
+1. `docs/STATUS.md`
+2. `docs/PROJECT_CHARTER.md`
+3. `docs/MVP_SCOPE.md`
+4. `docs/DECISIONS.md`
+5. `docs/ARCHITECTURE.md`
 
-## Start every session here
+チャット履歴や古い計画より、現在のリポジトリの正本を優先する。
 
-1. Read `docs/STATUS.md` for the current phase, completed work, and next action.
-2. Read `docs/PROJECT_CHARTER.md` for product intent and boundaries.
-3. Read the specification relevant to the requested work.
-4. Check `docs/DECISIONS.md` before changing an accepted decision.
-5. Inspect git status and preserve unrelated user changes.
+## 設計の不変条件
 
-Do not treat chat history, agent memory, or an old plan as the source of truth when the repository documents say otherwise.
+- 実資金での注文はしない。証券口座APIに接続しない。
+- 初期の人間ユーザーは閲覧専用。AIだけが投稿・注文する。
+- AIが事後の結果を事前の予測として公開できないよう、情報の取得時刻、発言、注文確定、約定の順序と版を保存する。
+- 取引・残高・評価は決定論的コードで計算する。LLMの自然文を財務会計の正本としない。
+- 市場データの第三者向け公開・配信は、必要な権利を確認するまで開始しない。
+- IR関係者から非公開の重要情報を受け取らない。スポンサー／タイアップと独立分析を分離する。
+- 自律投稿には出典、監査ログ、訂正・停止手段を用意し、実在企業に関する捏造を事実として公開しない。
+- 秘密情報・個人情報をコードやログに記録しない。
+- 本番クラウド、有料プラン、外部データ契約は別途承認を受ける。
 
-## Sources of truth
+## 開発・レビュー規律
 
-- Product purpose and scope: `docs/PROJECT_CHARTER.md`
-- Business and rollout hypotheses: `docs/PRODUCT_STRATEGY.md`
-- Rules and player experience: `docs/GAME_DESIGN.md`
-- Market engine rules (clearing, NPC market, invariants): `docs/MARKET_SPEC.md`
-- First scenario content: `docs/SCENARIO_01.md`
-- Proposal-meeting MVP scope: `docs/MEETING_MVP_SPEC.md`
-- Event product requirements: `docs/EVENT_MVP_PRD.md`
-- System boundaries, state model, and stack: `docs/ARCHITECTURE.md`
-- Metrics and data policy: `docs/DATA_AND_EVALUATION.md`
-- AI/human collaboration workflow: `docs/AI_WORKFLOW.md`
-- Accepted and proposed decisions: `docs/DECISIONS.md`
-- Current work and handoff: `docs/STATUS.md`
+- **1PR＝1つの目的。** 通常の追加・修正はできるだけ300行程度以内に分ける。1,000行超の実装差分を常態化させない。旧製品の一括撤去は一度限りの例外。
+- 大規模なリファクタリングと新機能実装を混ぜない。
+- 依存追加・データ提供元・LLMの選択は、費用・権利・撤退方法を記録し決定してから行う。
+- 仕様や重要判断の変更は`docs/DECISIONS.md`へ記録する。
+- 重要な作業後に`docs/STATUS.md`を更新し、実施したテストと未検証事項を明記する。
+- 既存の変更を保護し、安易な強制push・履歴改変をしない。
 
-If two documents conflict, stop and reconcile them. Prefer the more specific document only when it is newer and the change is recorded in `docs/DECISIONS.md`.
-
-## Phase gate
-
-Follow the phase recorded in `docs/STATUS.md`. On 2026-10-29 the owner switched GUILD MARKET to the artificial-market, batch-clearing design and retired the single-HTML prototype (D-024). The proposal-meeting MVP and the bank-event MVP are one app built on one game engine.
-
-The owner approved D-025 to D-027 on 2026-10-29, so `apps/web` may be created with the dependencies listed in `docs/ARCHITECTURE.md`; document any other dependency before adding it. Do not create cloud resources or sign up for paid plans without separate owner approval. Do not add CI workflows without a recorded decision.
-
-## Working agreements
-
-- Make the smallest coherent change that satisfies the task.
-- Do not invent missing product requirements. Record material uncertainty under `docs/DECISIONS.md` and surface it.
-- Keep core rules independent from scenario content.
-- Treat live-event operation and solo auto-play as two modes of the same product.
-- Keep the market usable with one player; multiplayer participation must enhance the experience, not be required for basic functionality.
-- Keep production event outcomes fixed by reviewed scenario data. Trades must not change which guild succeeds.
-- Do not use runtime generative AI in the initial event MVP. AI reports are reviewed scenario content.
-- Prefer configuration and explicit state transitions over hidden timing or UI-only state.
-- Preserve an operator override and an auditable log for event-critical actions.
-- Never commit secrets, credentials, production data, or personally identifiable child/parent data.
-- Minimize data collection. Use pseudonymous event/team identifiers by default.
-- Do not add a dependency, hosted service, or paid integration without documenting its purpose, cost model, and exit path.
-
-## Documentation discipline
-
-- Update the relevant specification when behavior changes.
-- Add or amend an entry in `docs/DECISIONS.md` for consequential product or architecture decisions.
-- Update `docs/STATUS.md` after a substantive completed change, before handing work to another person or agent.
-- Mark assumptions and proposals explicitly; do not present them as accepted decisions.
-- Link instead of copying long passages between documents.
-- Keep this file concise and stable. Put detailed reference material in `docs/`.
-
-## Implementation and verification
-
-Use asdf for Node (`.tool-versions`, nodejs 24.16.0) and uv for Python (`uv run`, `.python-version`). Do not rely on a system Node or globally installed Python packages.
-
-Run these in `apps/web` (copy `.env.example` to `.env` first):
+## コマンド
 
 ```sh
-npm install
-npm run db:up        # local Postgres 17 in Docker on port 5433 (also creates the test database)
-npm run db:migrate   # apply Prisma migrations
-npm test             # engine: invariants, clearing examples, rules A/B, state machine
-npm run test:db      # DB integration: concurrency, deadlines, idempotency, rollback, reveal timing
+cd apps/web
+npm ci
 npm run typecheck
 npm run build
-npm run simulate     # 10,000 random games and the k table (about 70 seconds)
-npm run dev          # then: npm run match:create -- --fast, and npm run smoke for a 6-team HTTP run
-npm run test:e2e     # Playwright: 6 players, host, and venue screen play 5 rounds on a production build (about 2 minutes)
-npm run purge        # list matches older than 30 days; add -- --yes to delete them
+npm run dev
 ```
 
-Production setup steps (Supabase Tokyo, Vercel hnd1, `.env.prod`, `db:deploy:prod`, `match:create:prod`, `purge:prod`) are in `docs/MEETING_MVP_SPEC.md` §13. Never commit `.env.prod` or paste the host URL with its `#` token into logs or chat.
-
-Regenerate the reviewed NPC sheet only on purpose (`npm run npc:generate -- 2 20261029`), and review the diff before committing it. Check document links and section references from the repository root with `uv run scripts/check_docs.py`. Record new commands here and in `CONTRIBUTING.md` when they are added.
-
-When code exists:
-
-- keep `src/engine` pure: no imports from Next.js, React, Prisma, or `node:*`;
-- test the market invariants in `docs/MARKET_SPEC.md`;
-- write or update tests with behavior changes;
-- run the smallest relevant checks first, then the required project checks;
-- make server-authoritative checks for orders, balances, market state, and settlement;
-- design reconnect and duplicate-order behavior explicitly;
-- test participant, operator, and venue-screen state synchronization;
-- report checks that could not be run.
-
-## Git and review
-
-- Use short-lived branches and focused pull requests after the initial repository bootstrap.
-- Keep commits scoped and explain why the change exists.
-- Do not rewrite shared history or delete material data without explicit approval.
-- A change is not complete until code, tests, relevant docs, and `docs/STATUS.md` agree.
-
-## Code review rules
-
-- Flag any path that accepts or changes an order after the order deadline (plus grace) or while the match is paused.
-- Flag non-idempotent order submission, round clearing, or settlement.
-- Flag clearing results that depend on order arrival sequence or client clocks.
-- Flag client-authoritative balances, prices, permissions, or event state.
-- Flag collection or logging of unnecessary child/parent personal data.
-- Flag runtime AI-generated event facts that can change the reviewed scenario outcome.
-- Flag coupling of scenario text/assets to market-engine code.
-- Flag changes that make multiplayer participation mandatory for solo play.
+旧ゲーム固有のテスト・マイグレーションは削除済み。新製品のテストを機能と一緒に追加する。
