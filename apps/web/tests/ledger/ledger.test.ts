@@ -5,16 +5,16 @@ import { INITIAL_CASH, type Account, type Order, type OrderSheet } from "../../s
 
 const yen = (n: number) => Math.round(n * 10);
 const universe = new Set(["AAA", "BBB", "CCC"]);
-const DATE = "2026-11-04";
+const DATE = "2026-11-11";
 const beforeCutoff = cutoffOf(DATE) - 60_000;
 
 const sheet = (orders: Order[], committedAt = beforeCutoff): OrderSheet => ({ agentId: "ai-1", tradingDate: DATE, committedAt, orders });
 const holding = (symbol: string, qty: number, cost: number, cash = INITIAL_CASH): Account => ({ cash, holdings: { [symbol]: { qty, cost } } });
-const check = (s: OrderSheet, account = newAccount(), alreadyCommitted = false) => validateSheet(s, { universe, alreadyCommitted, account, holidays: new Set(), accountAsOf: "2026-11-03" });
+const check = (s: OrderSheet, account = newAccount(), alreadyCommitted = false) => validateSheet(s, { universe, alreadyCommitted, account, holidays: new Set(), accountAsOf: "2026-11-10" });
 
 describe("注文の締め（§1）", () => {
   it("約定日の 8:30（日本時間）は、前日の 23:30 UTC", () => {
-    expect(new Date(cutoffOf(DATE)).toISOString()).toBe("2026-11-03T23:30:00.000Z");
+    expect(new Date(cutoffOf(DATE)).toISOString()).toBe("2026-11-10T23:30:00.000Z");
   });
 
   it("月や年をまたぐ締めも正しく、存在しない日付は例外にする", () => {
