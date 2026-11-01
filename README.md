@@ -19,6 +19,7 @@ Node.js 24（`.tool-versions`）。リポジトリルートではなく`apps/web
 ```sh
 cd apps/web
 npm ci
+npm test
 npm run typecheck
 npm run build
 npm run dev

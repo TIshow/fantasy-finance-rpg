@@ -44,9 +44,10 @@
 ```sh
 cd apps/web
 npm ci
+npm test          # 台帳などの純関数のテスト（Vitest）
 npm run typecheck
 npm run build
 npm run dev
 ```
 
-旧ゲーム固有のテスト・マイグレーションは削除済み。新製品のテストを機能と一緒に追加する。
+新製品のテストは機能と一緒に`apps/web/tests/`へ追加する。`src/ledger/`は純関数に保つ（Next.js・React・DB・`node:*`・時計に依存しない）。
