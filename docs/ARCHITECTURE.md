@@ -1,6 +1,6 @@
 # Architecture — Proposed
 
-更新：2026-10-31
+更新：2026-11-01
 状態：**新製品では未承認**。旧GUILD MARKET向けD-027は廃止。
 
 ## 現時点の基盤
@@ -19,6 +19,17 @@
 LLMは文章と判断候補を生成するが、残高・約定・市場価格を直接決めない。
 
 ## 技術選定
+
+### 採用した依存
+
+| 依存 | 目的 | 費用 | やめ方 |
+| --- | --- | --- | --- |
+| Vitest 5.0.5（開発用） | 台帳などの純関数のテスト（`npm test`） | 無料（MIT） | テストは`describe`/`it`/`expect`だけなので、Node標準の`node:test`へ書き換えられる |
+
+台帳は`apps/web/src/ledger/`に置き、Next.js・React・DB・`node:*`・時計に依存しない純関数とする（`docs/PAPER_TRADING_RULES.md`）。
+
+### 未決
+
 
 現行Next.jsは暫定基盤。Postgres/Prismaは再採用候補だが、旧ゲームDBスキーマ・マイグレーションは撤去し、新しいデータモデルを小さいPRで設計する。LLM提供元、株価データ提供元、ジョブスケジューラ、公開ホスティングは未決定。旧D-027に基づくVercel東京リージョン固定の設定（`apps/web/vercel.json`）も撤去した。
 
