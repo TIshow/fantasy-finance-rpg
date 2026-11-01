@@ -13,6 +13,7 @@
 3. `docs/MVP_SCOPE.md`
 4. `docs/DECISIONS.md`
 5. `docs/ARCHITECTURE.md`
+6. 模擬売買や台帳に関わる作業では `docs/PAPER_TRADING_RULES.md`
 
 チャット履歴や古い計画より、現在のリポジトリの正本を優先する。
 
