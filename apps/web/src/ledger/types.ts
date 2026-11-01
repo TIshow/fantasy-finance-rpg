@@ -39,6 +39,8 @@ export interface OrderSheet {
 export type RejectReason =
   | "invalid_sheet"
   | "after_cutoff"
+  | "wrong_trading_date"
+  | "account_not_ready"
   | "already_committed"
   | "invalid_order"
   | "unknown_symbol"

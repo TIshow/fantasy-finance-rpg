@@ -1,17 +1,11 @@
 // 模擬売買の台帳（docs/PAPER_TRADING_RULES.md）。純関数だけで、外部や時計に依存しない。
+import { cutoffOf, isValidDate, previousBusinessDay, tradingDateFor } from "./calendar";
 import { INITIAL_CASH, LOT, type Account, type Deciyen, type Fill, type Order, type OrderSheet, type RejectReason } from "./types";
+
+export { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusinessDay, tradingDateFor } from "./calendar";
 
 export function newAccount(): Account {
   return { cash: INITIAL_CASH, holdings: {} };
-}
-
-/** 約定日の注文の締め：その日の 8:30（日本時間）を UNIXミリ秒で返す（§1） */
-export function cutoffOf(tradingDate: string): number {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(tradingDate);
-  const [y, mo, d] = [Number(m?.[1]), Number(m?.[2]), Number(m?.[3])];
-  const day = new Date(Date.UTC(y, mo - 1, d));
-  if (!m || day.getUTCFullYear() !== y || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d) throw new Error(`invalid trading date: ${tradingDate}`);
-  return Date.UTC(y, mo - 1, d, 8 - 9, 30);
 }
 
 export interface CommitContext {
@@ -19,6 +13,10 @@ export interface CommitContext {
   /** その日、そのAIがすでに注文票を確定しているか */
   alreadyCommitted: boolean;
   account: Account;
+  /** 東証の祝日（YYYY-MM-DD）。土日と12月31日〜1月3日は含めなくてよい */
+  holidays: ReadonlySet<string>;
+  /** account に反映済みの、最後の引け後処理（評価と分割・配当の反映）の営業日 */
+  accountAsOf: string;
 }
 
 /**
@@ -26,8 +24,12 @@ export interface CommitContext {
  * 1つでも満たさなければ、注文票ごと受け付けない。
  */
 export function validateSheet(sheet: OrderSheet, ctx: CommitContext): { ok: true } | { ok: false; reason: RejectReason } {
-  if (!Number.isSafeInteger(sheet.committedAt) || !Array.isArray(sheet.orders)) return { ok: false, reason: "invalid_sheet" };
+  if (!Number.isSafeInteger(sheet.committedAt) || !isValidDate(sheet.tradingDate) || !Array.isArray(sheet.orders)) return { ok: false, reason: "invalid_sheet" };
   if (sheet.committedAt >= cutoffOf(sheet.tradingDate)) return { ok: false, reason: "after_cutoff" };
+  // 約定日は、確定時刻から見て締めがまだ来ていない最初の営業日だけ
+  if (sheet.tradingDate !== tradingDateFor(sheet.committedAt, ctx.holidays)) return { ok: false, reason: "wrong_trading_date" };
+  // 前営業日の引け後処理が済んだ口座でだけ確定できる。確定から約定までに保有が変わらないようにするため
+  if (ctx.accountAsOf !== previousBusinessDay(sheet.tradingDate, ctx.holidays)) return { ok: false, reason: "account_not_ready" };
   if (ctx.alreadyCommitted) return { ok: false, reason: "already_committed" };
   const selling = new Map<string, number>();
   for (const o of sheet.orders) {
