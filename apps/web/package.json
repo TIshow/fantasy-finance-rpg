@@ -1,5 +1,5 @@
 {
-  "name": "guild-market-web",
+  "name": "ai-investor-arena-web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,48 +10,19 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run --project engine",
-    "test:watch": "vitest",
-    "npc:generate": "tsx scripts/generate-npc-sheet.ts",
-    "simulate": "tsx scripts/simulate.ts",
-    "test:db": "vitest run --project db",
-    "db:up": "docker compose up -d",
-    "db:migrate": "prisma migrate dev",
-    "db:generate": "prisma generate",
-    "match:create": "tsx --env-file=.env scripts/create-match.ts",
-    "postinstall": "prisma generate",
-    "smoke": "tsx --env-file=.env scripts/smoke.ts",
-    "test:e2e": "playwright test",
-    "start:lan": "next build && next start -H 0.0.0.0 -p 3000",
-    "db:deploy": "prisma migrate deploy",
-    "match:create:prod": "tsx --env-file=.env.prod scripts/create-match.ts",
-    "purge": "tsx --env-file=.env scripts/purge-matches.ts",
-    "purge:prod": "tsx --env-file=.env.prod scripts/purge-matches.ts",
-    "db:deploy:prod": "tsx scripts/db-deploy-prod.ts"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@prisma/adapter-pg": "^7.10.1",
-    "@prisma/client": "^7.10.1",
     "next": "16.2.7",
-    "qrcode": "^1.5.4",
     "react": "19.2.4",
-    "react-dom": "19.2.4",
-    "zod": "^4.6.7"
+    "react-dom": "19.2.4"
   },
   "devDependencies": {
-    "@playwright/test": "^1.64.1",
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^24",
-    "@types/pg": "^8.23.1",
-    "@types/qrcode": "^1.5.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "pg": "^8.23.1",
-    "prisma": "^7.10.1",
     "tailwindcss": "^4.3.3",
-    "tsx": "^4.22.4",
-    "typescript": "^5",
-    "vitest": "^4.1.8"
+    "typescript": "^5"
   }
 }

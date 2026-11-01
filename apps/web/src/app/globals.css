@@ -1,41 +1,7 @@
 @import "tailwindcss";
 
-/* 夜の王国取引所（MEETING_MVP_SPEC §6）。賭博の画面には見せない。 */
-@theme {
-  --color-night: #0b1330;
-  --color-panel: #15214a;
-  --color-panel-2: #1c2a5c;
-  --color-line: #2a3a6e;
-  --color-ink: #eef2ff;
-  --color-mute: #a9b4d6;
-  --color-gold: #e8c15a;
-  --color-buy: #3fbf7f;
-  --color-sell: #e5534b;
-  --color-info: #5aa7ff;
-  --font-sans: system-ui, -apple-system, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", sans-serif;
-}
-
-html {
-  color-scheme: dark;
-}
-
 body {
-  background: var(--color-night);
-  color: var(--color-ink);
-  font-family: var(--font-sans);
-  -webkit-text-size-adjust: 100%;
-}
-
-/* 公開の瞬間：新しい価格を一度だけ光らせる（点滅や長い演出はしない） */
-@keyframes reveal {
-  0% { background-color: rgb(232 193 90 / 0.45); transform: scale(1.04); }
-  100% { background-color: transparent; transform: scale(1); }
-}
-.reveal {
-  animation: reveal 900ms ease-out 1;
-  border-radius: 0.5rem;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .reveal { animation: none; }
+  background: #f8fafc;
+  color: #0f172a;
+  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
 }

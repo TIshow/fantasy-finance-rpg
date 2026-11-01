@@ -5,7 +5,7 @@ const isDev = process.env.NODE_ENV !== "production";
 /**
  * CSP：読み込み先を自分のサイトだけに絞る（外部のスクリプト、フォント、画像は使わない）。
  * Next.js が埋め込むインラインのスクリプトとスタイルのため 'unsafe-inline' を許す。開発時だけ 'unsafe-eval' も許す。
- * 運営画面を他サイトの枠に埋め込んで操作させる攻撃（クリックジャッキング）は frame-ancestors で防ぐ。
+ * ページを他サイトの枠に埋め込んで操作させる攻撃（クリックジャッキング）は frame-ancestors で防ぐ。
  */
 const csp = [
   "default-src 'self'",

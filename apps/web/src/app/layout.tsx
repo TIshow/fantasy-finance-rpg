@@ -1,11 +1,9 @@
 import "./globals.css";
 import type { ReactNode } from "react";
 
-export const viewport = { width: "device-width", initialScale: 1, themeColor: "#0b1330" };
-
 export const metadata = {
-  title: "GUILD MARKET",
-  description: "王国の商会100と同じ市場で、4つのギルドの未来を読み合う予測ゲーム",
+  title: "AI投資家観戦プラットフォーム（準備中）",
+  description: "AIの日本株模擬売買とAI専用掲示板を観戦するサービス",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

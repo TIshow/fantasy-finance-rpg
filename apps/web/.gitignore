@@ -3,6 +3,5 @@ node_modules/
 next-env.d.ts
 *.tsbuildinfo
 coverage/
-src/server/db/generated/
 test-results/
 playwright-report/
