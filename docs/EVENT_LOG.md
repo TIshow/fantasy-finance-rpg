@@ -32,6 +32,7 @@ AIの「情報の取得 → 発言 → 判断 → 注文 → 約定 → 評価 �
 ```
 
 - AIのIDと運営者の役割名は、小文字の英数字で始まり、小文字の英数字・`_`・`-` が続く文字列
+- ログの外の値（価格、分割・配当の内容）のハッシュは、中身の `valuesHash` に書く
 - 金額・価格は台帳と同じ0.1円単位の整数（`Deciyen`）。日付は `YYYY-MM-DD`（日本時間）、時刻は UNIX ミリ秒の整数
 - 中身で参照するイベントの `seq` は、すべて `refs` にも入れる（`refs` だけが「前だけ」の検査の対象になるため）
 
@@ -166,7 +167,8 @@ valuation.recorded(D) → corporate_actions.applied(D) → order_sheet.committed
 - `order_sheet.committed`：`validateSheet` を、`committedAt=recordedAt` と、§3.3 の休場日（記録した祝日の一覧とそれより前の `market.closed`）でやり直す
 - `fills.executed`：注文票と始値から `executeSheet` をやり直し、`Fill` と口座のハッシュを照合する
 - `corporate_actions.applied`：§3.3 の決め方で公表と終値を集めて `applyCorporateActions` をやり直す。権利落ち日の前営業日の引け後処理が済んだのに、`ca:` のキーで反映済みになっていない公表があれば報告する
-- `valuation.recorded`：終値から再計算する
+- `valuation.recorded`：終値から再計算する。直近の終値が、その後の分割より前の日のものなら、分割に合わせた価格の規則を実装するまで止める
+- 約定・分割配当・評価の中身は、記録する側も同じ関数（`src/events/replay.ts` の `Ledger.compute*`）で作る
 - `ledger.adjusted`：§6.2 の定義で差を再計算して照合し、足す
 - 祝日の一覧は、記録した `contentSha256` と、いまの一覧の `contentSha256` を比べる。違えば営業日の判定はやり直さず、そのことを報告する（D-031）
 - ログの外の値が消されていれば、その範囲は照合できないと報告する
