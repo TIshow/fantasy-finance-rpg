@@ -57,6 +57,7 @@ function formatProblems(e: Record<string, unknown>, x: Expected, usedKeys: Reado
  * 最後のイベント（なければ null）のあとに続くイベントを作る。形式が合わないか、中身が正規化できなければ例外。
  * 返すイベントは draft の写しで、凍結してある（作ったあとに draft を変えても、ハッシュとずれない）
  */
+// usedKeys：それまでのログで使われた一意キー。追記の処理（§8の3）はログ全体の集合を渡す。省略すると、このイベントの中の重複だけを確かめる
 export async function sealEvent(last: LogEvent | null, draft: EventDraft, usedKeys: ReadonlySet<string> = new Set()): Promise<LogEvent> {
   const unsealed = {
     seq: last ? last.seq + 1 : 1,

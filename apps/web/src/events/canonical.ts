@@ -8,6 +8,7 @@ const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
 /** 正規化できない値。ハッシュの計算そのものの失敗（Web Crypto がないなど）と区別する */
 export class CanonicalizeError extends Error {}
 
+/** 入れ子の上限。正規化する値の一番外を0段と数える（イベントなら payload の中身は1段目から。docs/EVENT_LOG.md §5.1） */
 const MAX_DEPTH = 64;
 
 export function checkText(s: string, where: string): void {
@@ -35,8 +36,11 @@ function write(v: unknown, where: string, depth: number): string {
     const parts: string[] = [];
     // map は穴を飛ばすので使わない。穴は undefined と同じく拒否する
     for (let i = 0; i < v.length; i++) {
-      if (!(i in v) || v[i] === undefined) throw new CanonicalizeError(`hole or undefined at ${where}[${i}]`);
-      parts.push(write(v[i], `${where}[${i}]`, depth + 1));
+      const d = Object.getOwnPropertyDescriptor(v, i);
+      if (!d) throw new CanonicalizeError(`hole at ${where}[${i}]`);
+      if (!("value" in d)) throw new CanonicalizeError(`accessor at ${where}[${i}]`);
+      if (d.value === undefined) throw new CanonicalizeError(`undefined at ${where}[${i}]`);
+      parts.push(write(d.value, `${where}[${i}]`, depth + 1));
     }
     return `[${parts.join(",")}]`;
   }
