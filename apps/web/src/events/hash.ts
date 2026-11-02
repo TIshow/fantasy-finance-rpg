@@ -24,9 +24,12 @@ export async function accountHash(account: Account): Promise<string> {
   return sha256Hex(utf8(ACCOUNT_PREFIX + canonicalize(account)));
 }
 
-/** ログの外に置く本文のハッシュ：SHA-256(乱数 ‖ 本文)（§5.2）。本文は NFC の文字列か、RFC 8785 で正規化する値 */
+/**
+ * ログの外に置く本文のハッシュ：SHA-256(乱数 ‖ 本文)（§5.2）。本文は NFC の文字列か、RFC 8785 で正規化する値。
+ * 文字列の "123" と値の 123 は同じハッシュになる。どちらとして保存したかは、イベントの種類と項目で決まる
+ */
 export async function bodyHash(salt: Uint8Array, body: string | { value: unknown }): Promise<string> {
-  if (salt.length !== SALT_BYTES) throw new Error(`salt must be ${SALT_BYTES} bytes`);
+  if (!(salt instanceof Uint8Array) || salt.length !== SALT_BYTES) throw new Error(`salt must be ${SALT_BYTES} bytes`);
   let text: string;
   if (typeof body === "string") {
     checkText(body, "body");

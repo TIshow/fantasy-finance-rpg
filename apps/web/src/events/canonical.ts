@@ -5,19 +5,25 @@
 /** 対になっていないサロゲート（u フラグでは、対になったものは1文字として扱われ一致しない） */
 const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
 
+/** 正規化できない値。ハッシュの計算そのものの失敗（Web Crypto がないなど）と区別する */
+export class CanonicalizeError extends Error {}
+
+const MAX_DEPTH = 64;
+
 export function checkText(s: string, where: string): void {
-  if (LONE_SURROGATE.test(s)) throw new Error(`lone surrogate at ${where}`);
-  if (s !== s.normalize("NFC")) throw new Error(`not NFC at ${where}`);
+  if (LONE_SURROGATE.test(s)) throw new CanonicalizeError(`lone surrogate at ${where}`);
+  if (s !== s.normalize("NFC")) throw new CanonicalizeError(`not NFC at ${where}`);
 }
 
 export function canonicalize(value: unknown): string {
-  return write(value, "$");
+  return write(value, "$", 0);
 }
 
-function write(v: unknown, where: string): string {
+function write(v: unknown, where: string, depth: number): string {
+  if (depth > MAX_DEPTH) throw new CanonicalizeError(`nested deeper than ${MAX_DEPTH} at ${where}`);
   if (v === null || v === true || v === false) return String(v);
   if (typeof v === "number") {
-    if (!Number.isSafeInteger(v)) throw new Error(`not a safe integer at ${where}: ${v}`);
+    if (!Number.isSafeInteger(v)) throw new CanonicalizeError(`not a safe integer at ${where}: ${v}`);
     return String(v === 0 ? 0 : v); // -0 は 0 にする（RFC 8785 と同じ）
   }
   if (typeof v === "string") {
@@ -25,19 +31,29 @@ function write(v: unknown, where: string): string {
     // RFC 8785 の文字列の書き方は、ECMAScript の JSON.stringify と同じ
     return JSON.stringify(v);
   }
-  if (Array.isArray(v)) return `[${v.map((x, i) => write(x, `${where}[${i}]`)).join(",")}]`;
+  if (Array.isArray(v)) {
+    const parts: string[] = [];
+    // map は穴を飛ばすので使わない。穴は undefined と同じく拒否する
+    for (let i = 0; i < v.length; i++) {
+      if (!(i in v) || v[i] === undefined) throw new CanonicalizeError(`hole or undefined at ${where}[${i}]`);
+      parts.push(write(v[i], `${where}[${i}]`, depth + 1));
+    }
+    return `[${parts.join(",")}]`;
+  }
   if (typeof v === "object") {
     const proto = Object.getPrototypeOf(v);
-    if (proto !== Object.prototype && proto !== null) throw new Error(`not a plain object at ${where}`);
+    if (proto !== Object.prototype && proto !== null) throw new CanonicalizeError(`not a plain object at ${where}`);
     // RFC 8785 はキーを UTF-16 の符号単位の順に並べる。Array.prototype.sort の既定の比較と同じ
     const keys = Object.keys(v).sort();
     const parts = keys.map((k) => {
       checkText(k, `${where} key`);
-      const x = (v as Record<string, unknown>)[k];
-      if (x === undefined) throw new Error(`undefined at ${where}.${k} (omit the key instead)`);
-      return `${JSON.stringify(k)}:${write(x, `${where}.${k}`)}`;
+      // getter は計算のたびに値が変わりうるので拒否する
+      const d = Object.getOwnPropertyDescriptor(v, k);
+      if (!d || !("value" in d)) throw new CanonicalizeError(`accessor at ${where}.${k}`);
+      if (d.value === undefined) throw new CanonicalizeError(`undefined at ${where}.${k} (omit the key instead)`);
+      return `${JSON.stringify(k)}:${write(d.value, `${where}.${k}`, depth + 1)}`;
     });
     return `{${parts.join(",")}}`;
   }
-  throw new Error(`unsupported value at ${where}: ${typeof v}`);
+  throw new CanonicalizeError(`unsupported value at ${where}: ${typeof v}`);
 }
