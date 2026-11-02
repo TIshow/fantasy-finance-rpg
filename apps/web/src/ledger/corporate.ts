@@ -79,8 +79,11 @@ export function applyCorporateActions(
     let costOut = 0;
     let close: Deciyen | null = null;
     if (rem > 0) {
-      close = closes[s.symbol] ?? null;
-      if (close === null) throw new Error(`missing close for ${s.symbol}`);
+      // Object.prototype と同名の銘柄（toString など）を拾わないよう、自分の項目だけを読む。終値は記録に残るので、正の整数でなければ止める
+      const c: unknown = Object.hasOwn(closes, s.symbol) ? closes[s.symbol] : undefined;
+      if (c === undefined || c === null) throw new Error(`missing close for ${s.symbol}`);
+      if (typeof c !== "number" || !Number.isSafeInteger(c) || c <= 0) throw new Error(`invalid close for ${s.symbol}: ${String(c)}`);
+      close = c;
       cashInLieu = Math.round((close * rem) / s.to);
       costOut = qtyAfter === 0 ? h.cost : Math.round((h.cost * rem) / (h.qty * s.to));
       h.cost -= costOut;

@@ -127,6 +127,12 @@ describe("株式分割（§5）", () => {
   it("端数を現金にするのに終値がない、比率が不正、同じ日に同じ銘柄の分割が2つ、は例外にする", () => {
     const acc = holding("AAA", 225, yen(675_000));
     expect(() => applyCorporateActions(acc, "2026-11-10", split(2, 3), {})).toThrow("missing close for AAA");
+    expect(() => applyCorporateActions(acc, "2026-11-10", split(2, 3), { AAA: null as unknown as number })).toThrow("missing close for AAA");
+    for (const close of [-yen(1_500), 0, Number.NaN, 1.5]) {
+      expect(() => applyCorporateActions(acc, "2026-11-10", split(2, 3), { AAA: close })).toThrow("invalid close for AAA");
+    }
+    const proto = { cash: INITIAL_CASH, holdings: { toString: { qty: 225, cost: yen(675_000) } } };
+    expect(() => applyCorporateActions(proto, "2026-11-10", { splits: [{ symbol: "toString", exDate: "2026-11-10", from: 2, to: 3 }], dividends: [] }, {})).toThrow("missing close for toString");
     expect(() => applyCorporateActions(acc, "2026-11-10", split(0, 3), {})).toThrow("invalid split");
     expect(() => applyCorporateActions(acc, "2026-11-10", split(1, 1_000_000), {})).toThrow("invalid split");
     const twice = { splits: [...split(1, 2).splits, ...split(1, 2).splits], dividends: [] };
@@ -177,7 +183,7 @@ describe("配当（§5）", () => {
 });
 
 describe("反映した内容だけで口座をたどり直せる（docs/EVENT_LOG.md §3.3）", () => {
-  // 反映前の口座に、イベントの並びだけを当てる（終値や公表の内容は使わない）
+  // 反映前の口座に、イベントの並びだけを当てる（終値や公表の内容は使わない）。記録した数どうしが食い違わないことも確かめる
   function replay(before: Account, events: CorporateEvent[]): Account {
     let cash = before.cash;
     const holdings = Object.fromEntries(Object.entries(before.holdings).map(([k, h]) => [k, { ...h }]));
@@ -190,6 +196,10 @@ describe("反映した内容だけで口座をたどり直せる（docs/EVENT_LO
       const h = holdings[e.symbol]!;
       expect(h.qty).toBe(e.qtyBefore);
       expect(e.qtyAfter).toBe(Math.floor((e.qtyBefore * e.to) / e.from));
+      const rem = e.qtyBefore * e.to - e.qtyAfter * e.from;
+      expect(e.close === null).toBe(rem === 0);
+      expect(e.cashInLieu).toBe(e.close === null ? 0 : Math.round((e.close * rem) / e.to));
+      expect(e.costOut).toBe(rem === 0 ? 0 : e.qtyAfter === 0 ? h.cost : Math.round((h.cost * rem) / (e.qtyBefore * e.to)));
       cash += e.cashInLieu;
       h.cost -= e.costOut;
       if (e.qtyAfter === 0) delete holdings[e.symbol];
@@ -209,9 +219,15 @@ describe("反映した内容だけで口座をたどり直せる（docs/EVENT_LO
         { symbol: "BBB", exDate: "2026-11-10", from: 10, to: 1 },
         { symbol: "CCC", exDate: "2026-11-10", from: 1, to: 2 },
       ],
-      dividends: [{ symbol: "AAA", exDate: "2026-11-10", perShare: yen(12.5) }],
+      dividends: [
+        { symbol: "AAA", exDate: "2026-11-10", perShare: yen(12.5) },
+        { symbol: "AAA", exDate: "2026-11-10", perShare: yen(3) },
+        { symbol: "ZZZ", exDate: "2026-11-10", perShare: yen(9) }, // 持っていない銘柄は記録しない
+      ],
     };
+    actions.splits.push({ symbol: "YYY", exDate: "2026-11-10", from: 1, to: 2 });
     const { account, events } = applyCorporateActions(before, "2026-11-10", actions, { AAA: yen(1_500), BBB: yen(800) });
+    expect(events.map((e) => `${e.kind}:${e.symbol}`)).toEqual(["dividend:AAA", "dividend:AAA", "split:AAA", "split:BBB", "split:CCC"]);
     expect(replay(before, events)).toEqual(account);
   });
 });
