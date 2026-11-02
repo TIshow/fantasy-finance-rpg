@@ -158,6 +158,29 @@ describe("照合で止まるもの", () => {
     }
   });
 
+  it("作り直した連鎖でも、偽の拒否、形の崩れた注文票、口座のハッシュの食い違いは止まる", async () => {
+    const { store, log } = await world();
+    const at = log.events.at(-1)!.recordedAt + 1;
+    const base = { recordedAt: at, keys: [], refs: [] };
+    // 停止していないAIを、停止中として拒否した記録
+    const fakeReject = await forge(log.events, { ...base, type: "order_sheet.rejected", actor: "system", payload: { agentId: "alpha", tradingDate: "2026-11-11", reason: "suspended" } });
+    await expect(replay(fakeReject, store, CTX)).rejects.toThrow("rejection reason suspended does not match invalid_sheet");
+    const run = log.events.find((e) => e.type === "agent.run")!.seq;
+    const nullOrder = await forge(log.events, { ...base, type: "order_sheet.committed", actor: "agent:alpha", keys: ["sheet:alpha:2026-11-11"], refs: [run], payload: { agentId: "alpha", tradingDate: "2026-11-11", orders: [null], runSeq: run, inputSeqs: [], holidaysSha256: CTX.holidaysSha256 } });
+    await expect(replay(nullOrder, store, CTX)).rejects.toThrow("(order_sheet.committed): invalid_order");
+    // 中身と口座のハッシュの両方を偽って連鎖を作り直しても、台帳の再計算と合わない
+    const i = log.events.findIndex((e) => e.type === "fills.executed");
+    const head = log.events.slice(0, i);
+    const f = log.events[i]!;
+    const tampered = await forge(head, { type: f.type, recordedAt: f.recordedAt, actor: f.actor, keys: f.keys, refs: f.refs, payload: { ...(f.payload as object), accountHash: "f".repeat(64) } });
+    await expect(replay(tampered, store, CTX)).rejects.toThrow("(fills.executed): recorded");
+  });
+
+  it("祝日の一覧が記録と違えば、営業日の判定をやり直さずに止まる", async () => {
+    const { store, log } = await world();
+    await expect(replay(log.events, store, { ...CTX, holidaysSha256: "b".repeat(64) })).rejects.toThrow("differs from the current one");
+  });
+
   it("ログの外の値が書き換わっていたり、無かったり、形が違えば止まる", async () => {
     const { store, log } = await world();
     const [hash, v] = [...store.map.entries()][0]!;
@@ -174,6 +197,7 @@ describe("照合で止まるもの", () => {
     await expect(ledger.apply(e(2, "prices.close", { date: "2026-11-10", valuesHash: bad }))).rejects.toThrow("wrong shape");
     // 一度失敗した台帳は、それ以降を受け付けない
     await expect(ledger.apply(e(3, "prices.close", { date: "2026-11-11", valuesHash: bad }))).rejects.toThrow("ledger stopped at seq 2");
+    expect(() => ledger.account("alpha")).toThrow("ledger stopped at seq 2");
   });
 
   it("権利落ち日の公表を引け後処理に渡さなければ、追記で拒む", async () => {

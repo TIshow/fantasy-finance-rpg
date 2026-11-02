@@ -48,6 +48,7 @@ export class Ledger {
 
   /** 口座の写し（書き換えても台帳は変わらない） */
   account(agentId: string): Account {
+    if (this.failed) throw new Error(`ledger stopped at ${this.failed}`);
     const a = this.accounts.get(agentId);
     if (!a) throw new Error(`unknown agent ${agentId}`);
     return { cash: a.cash, holdings: Object.fromEntries(Object.entries(a.holdings).map(([k, h]) => [k, { ...h }])) };

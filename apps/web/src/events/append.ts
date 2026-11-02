@@ -153,9 +153,7 @@ export class EventLog {
     agentId: string,
     sheet: { tradingDate: string; orders: Order[]; runSeq: number; inputSeqs: number[] },
   ): Promise<AppendResult & { rejected?: RejectReason }> {
-    // AIの出力から来る値なので、形が違っても例外にせず拒否として残す
-    const seqsOk = Number.isSafeInteger(sheet.runSeq) && Array.isArray(sheet.inputSeqs) && sheet.inputSeqs.every((s) => Number.isSafeInteger(s));
-    const ordersOk = Array.isArray(sheet.orders) && sheet.orders.every((o) => typeof o === "object" && o !== null && !Array.isArray(o));
+    const seqsOk = seqsShapeOk(sheet.runSeq, sheet.inputSeqs);
     const committed: Draft = {
       type: "order_sheet.committed",
       recordedAt,
@@ -164,24 +162,34 @@ export class EventLog {
       payload: { agentId, tradingDate: sheet.tradingDate, orders: sheet.orders, runSeq: sheet.runSeq, inputSeqs: sheet.inputSeqs, holidaysSha256: this.ctx.holidaysSha256 },
     };
     if (!this.agents.has(agentId)) return { ok: false, reason: `unknown agent ${agentId}` };
-    const reject = !seqsOk ? "invalid_sheet" : !ordersOk ? "invalid_order" : this.sheetRejection(committed);
+    const reject = this.rejectionOf(committed);
     if (!reject) {
       const r = await this.write(committed);
       if (r.ok) return r;
     }
     const reason = reject ?? "invalid_sheet";
-    const runOk = Number.isSafeInteger(sheet.runSeq) && this.events[sheet.runSeq - 1]?.type === "agent.run";
+    // 元の run と入力は、すべて前のイベントを指すときだけ残す（照合のとき、同じ拒否の理由を出し直せるように）
+    const next = this.events.length + 1;
+    const seqsKept = seqsOk && [sheet.runSeq, ...sheet.inputSeqs].every((s) => s >= 1 && s < next);
     const base: Draft = {
       type: "order_sheet.rejected",
       recordedAt,
       actor: "system",
-      refs: runOk ? [sheet.runSeq] : [],
-      payload: { agentId, tradingDate: isValidDate(sheet.tradingDate) ? sheet.tradingDate : "invalid", reason, ...(runOk ? { runSeq: sheet.runSeq } : {}) },
+      refs: seqsKept ? committed.refs : [],
+      payload: { agentId, tradingDate: isValidDate(sheet.tradingDate) ? sheet.tradingDate : "invalid", reason, ...(seqsKept ? { runSeq: sheet.runSeq, inputSeqs: sheet.inputSeqs } : {}) },
     };
     // 受け取った注文票を残す（§3.2）。正規化できない中身なら、その旨だけを残す
     let r = await this.write({ ...base, payload: { ...base.payload, orders: sheet.orders } });
     if (!r.ok) r = await this.write({ ...base, payload: { ...base.payload, ordersUnreadable: true } });
     return r.ok ? { ...r, rejected: reason } : r;
+  }
+
+  /** 注文票を拒む理由（形の検査、停止、validateSheet など）。AIの出力から来る値なので、形が違っても例外にしない */
+  private rejectionOf(d: Draft): RejectReason | null {
+    const p = d.payload;
+    if (!seqsShapeOk(p.runSeq, p.inputSeqs)) return "invalid_sheet";
+    if (!Array.isArray(p.orders) || !p.orders.every((o) => typeof o === "object" && o !== null && !Array.isArray(o))) return "invalid_order";
+    return this.sheetRejection(d);
   }
 
   private sheetRejection(d: Draft): RejectReason | null {
@@ -253,7 +261,17 @@ export class EventLog {
         if (this.isSuspended(agentId, "posts")) return "suspended";
         return this.runProblem(d, agentId, "post");
       case "order_sheet.committed":
-        return this.sheetRejection(d);
+        // 保存済みのログの照合で、祝日の一覧が記録と違うときは、営業日の判定をやり直せない（D-031）
+        if (p.holidaysSha256 !== this.ctx.holidaysSha256) return `holidays table ${String(p.holidaysSha256)} differs from the current one`;
+        return this.rejectionOf(d);
+      case "order_sheet.rejected": {
+        const allowed = ["agentId", "tradingDate", "reason", "runSeq", "inputSeqs", "orders", "ordersUnreadable"];
+        if (Object.keys(p).some((k) => !allowed.includes(k))) return "unknown field in a rejected sheet";
+        if (p.ordersUnreadable === true) return typeof p.reason === "string" && p.orders === undefined ? null : "invalid rejected sheet";
+        // 受け取った注文票から、同じ時点・同じ検査で拒否の理由を出し直し、記録と同じであること
+        const again = this.rejectionOf({ ...d, type: "order_sheet.committed", payload: { agentId: p.agentId, tradingDate: p.tradingDate, orders: p.orders, runSeq: p.runSeq, inputSeqs: p.inputSeqs, holidaysSha256: this.ctx.holidaysSha256 } });
+        return again !== null && again === p.reason ? null : `rejection reason ${String(p.reason)} does not match ${String(again)}`;
+      }
       case "fills.executed": {
         const pend = st!.pending;
         if (!pend || pend.tradingDate !== p.tradingDate || pend.seq !== p.sheetSeq) return "no committed sheet for this trading date";
@@ -422,5 +440,7 @@ function payloadSeqs(p: Record<string, unknown>): unknown[] {
   for (const f of SEQ_LIST_FIELDS) if (Array.isArray(p[f])) out.push(...(p[f] as unknown[]));
   return out;
 }
+
+const seqsShapeOk = (runSeq: unknown, inputSeqs: unknown): boolean => Number.isSafeInteger(runSeq) && Array.isArray(inputSeqs) && inputSeqs.every((x) => Number.isSafeInteger(x));
 
 const isTime = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
