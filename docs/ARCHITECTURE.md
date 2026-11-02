@@ -26,6 +26,8 @@ LLMは文章と判断候補を生成するが、残高・約定・市場価格�
 | --- | --- | --- | --- |
 | Vitest 5.0.5（開発用） | 台帳などの純関数のテスト（`npm test`） | 無料（MIT） | テストは`describe`/`it`/`expect`だけなので、Node標準の`node:test`へ書き換えられる |
 
+祝日の一覧は`apps/web/src/holidays/`に置く（取得元は`docs/DECISIONS.md`のD-031）。
+
 台帳は`apps/web/src/ledger/`に置き、Next.js・React・DB・`node:*`・時計に依存しない純関数とする（`docs/PAPER_TRADING_RULES.md`）。
 
 ### 未決
