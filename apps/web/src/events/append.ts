@@ -106,8 +106,15 @@ export class EventLog {
     return new WithClosures(this.ctx.holidays, this.closed);
   }
 
-  /** 1件を足す。どれかの検査に通らなければ、何も変えずに理由を返す */
+  /** 1件を足す。どれかの検査に通らなければ、何も変えずに理由を返す。注文票の確定と拒否は commitSheet からだけ書ける */
   async append(d: Draft): Promise<AppendResult> {
+    if (d.type === "order_sheet.committed" || d.type === "order_sheet.rejected") return { ok: false, reason: "use commitSheet" };
+    return this.write(d);
+  }
+
+  private async write(d: Draft): Promise<AppendResult> {
+    const p: unknown = d.payload;
+    if (typeof p !== "object" || p === null || Array.isArray(p)) return { ok: false, reason: "payload must be an object" };
     const keys = keysOf(d.type, d.payload);
     if (typeof keys === "string") return { ok: false, reason: keys };
     const reason = this.check(d);
@@ -134,27 +141,34 @@ export class EventLog {
     agentId: string,
     sheet: { tradingDate: string; orders: Order[]; runSeq: number; inputSeqs: number[] },
   ): Promise<AppendResult & { rejected?: RejectReason }> {
+    // AIの出力から来る値なので、形が違っても例外にせず拒否として残す
+    const seqsOk = Number.isSafeInteger(sheet.runSeq) && Array.isArray(sheet.inputSeqs) && sheet.inputSeqs.every((s) => Number.isSafeInteger(s));
+    const ordersOk = Array.isArray(sheet.orders) && sheet.orders.every((o) => typeof o === "object" && o !== null && !Array.isArray(o));
     const committed: Draft = {
       type: "order_sheet.committed",
       recordedAt,
       actor: `agent:${agentId}`,
-      refs: [...new Set([sheet.runSeq, ...sheet.inputSeqs])],
+      refs: seqsOk ? [...new Set([sheet.runSeq, ...sheet.inputSeqs])] : [],
       payload: { agentId, tradingDate: sheet.tradingDate, orders: sheet.orders, runSeq: sheet.runSeq, inputSeqs: sheet.inputSeqs, holidaysSha256: this.ctx.holidaysSha256 },
     };
-    const reject = this.sheetRejection(committed);
+    if (!this.agents.has(agentId)) return { ok: false, reason: `unknown agent ${agentId}` };
+    const reject = !seqsOk ? "invalid_sheet" : !ordersOk ? "invalid_order" : this.sheetRejection(committed);
     if (!reject) {
-      const r = await this.append(committed);
-      if (r.ok || !this.agents.has(agentId)) return r;
+      const r = await this.write(committed);
+      if (r.ok) return r;
     }
     const reason = reject ?? "invalid_sheet";
-    const runOk = this.events[sheet.runSeq - 1]?.type === "agent.run";
-    const r = await this.append({
+    const runOk = Number.isSafeInteger(sheet.runSeq) && this.events[sheet.runSeq - 1]?.type === "agent.run";
+    const base: Draft = {
       type: "order_sheet.rejected",
       recordedAt,
       actor: "system",
       refs: runOk ? [sheet.runSeq] : [],
-      payload: { agentId, tradingDate: String(sheet.tradingDate), reason, ...(runOk ? { runSeq: sheet.runSeq } : {}) },
-    });
+      payload: { agentId, tradingDate: isValidDate(sheet.tradingDate) ? sheet.tradingDate : "invalid", reason, ...(runOk ? { runSeq: sheet.runSeq } : {}) },
+    };
+    // 受け取った注文票を残す（§3.2）。正規化できない中身なら、その旨だけを残す
+    let r = await this.write({ ...base, payload: { ...base.payload, orders: sheet.orders } });
+    if (!r.ok) r = await this.write({ ...base, payload: { ...base.payload, ordersUnreadable: true } });
     return r.ok ? { ...r, rejected: reason } : r;
   }
 
@@ -166,20 +180,25 @@ export class EventLog {
     if (this.isSuspended(agentId, "orders")) return "suspended";
     const tradingDate = p.tradingDate;
     if (!isValidDate(tradingDate) || !Array.isArray(p.orders)) return "invalid_sheet";
-    if (this.runProblem(d, agentId, "order") || this.inputProblem(p.inputSeqs, tradingDate)) return "invalid_sheet";
+    if (p.holidaysSha256 !== this.ctx.holidaysSha256) return "invalid_sheet";
+    // LLMが見た入力全体（元の run の入力）を、約定日の判断に使ってよい情報かで確かめる
+    const run = this.events[(p.runSeq as number) - 1];
+    if (this.runProblem(d, agentId, "order") || this.inputProblem(p.inputSeqs, tradingDate) || this.inputProblem((run?.payload as Record<string, unknown> | undefined)?.inputSeqs, tradingDate)) return "invalid_sheet";
     const v = validateSheet(
       { agentId, tradingDate, committedAt: d.recordedAt, orders: p.orders as Order[] },
       { universe: this.ctx.universe, alreadyCommitted: this.commits.has(`${agentId}:${tradingDate}`), account: this.ctx.accountOf(agentId), holidays: this.holidays(), accountAsOf: st.asOf },
     );
-    return v.ok ? null : v.reason;
+    if (!v.ok) return v.reason;
+    // 前の注文票が約定していない、またはその日以後をもう評価した口座では確定できない（§3.3 の順序）
+    if (st.pending || (st.valuedDate !== null && st.valuedDate >= tradingDate)) return "account_not_ready";
+    return null;
   }
 
   private check(d: Draft): string | null {
     const writer = WRITERS[d.type];
     if (!writer) return `unknown type ${d.type}`;
-    if (!d.actor.startsWith(writer)) return `${d.type} must be written by ${writer}`;
+    if (!(writer === "system" ? d.actor === "system" : d.actor.startsWith(`${writer}:`))) return `${d.type} must be written by ${writer}`;
     const p = d.payload;
-    if (typeof p !== "object" || p === null || Array.isArray(p)) return "payload must be an object";
     if (writer === "agent" && d.actor !== `agent:${String(p.agentId)}`) return "agentId does not match the actor";
     const next = this.events.length + 1;
     for (const s of payloadSeqs(p)) if (typeof s !== "number" || !d.refs.includes(s) || !(s >= 1 && s < next)) return `payload refers to ${String(s)} outside refs`;
@@ -196,10 +215,20 @@ export class EventLog {
         return null;
       }
       case "prices.open":
-        if (this.closed.has(p.date as string)) return "market was closed";
+        if (this.closed.has(p.date as string) || !isBusinessDay(p.date as string, H)) return "market was closed";
         return d.recordedAt >= cutoffOf(p.date as string) ? null : "open prices recorded before the cutoff";
-      case "market.closed":
-        return this.opens.has(p.date as string) ? "open prices already recorded" : null;
+      case "prices.close":
+        if (!isBusinessDay(p.date as string, H)) return "market was closed";
+        // 終値は大引け（15:30）のあと（docs/PAPER_TRADING_RULES.md §1）。締め（8:30）の7時間後
+        return d.recordedAt >= cutoffOf(p.date as string) + 7 * 3_600_000 ? null : "close prices recorded before 15:30";
+      case "market.closed": {
+        const date = p.date as string;
+        if (this.opens.has(date)) return "open prices already recorded";
+        if (this.closes.has(date)) return "close prices already recorded";
+        // すでにその日以後を評価・引け後処理したAIがいれば、営業日の並びが変わって口座が進めなくなる
+        for (const a of this.agents.values()) if ((a.valuedDate !== null && a.valuedDate >= date) || a.asOf >= date) return "an agent already passed this date";
+        return null;
+      }
       case "agent.registered": {
         const start = p.startDate;
         if (!isValidDate(start) || !isBusinessDay(start, H)) return "startDate must be a business day";
@@ -212,22 +241,43 @@ export class EventLog {
         if (this.isSuspended(agentId, "posts")) return "suspended";
         return this.runProblem(d, agentId, "post");
       case "order_sheet.committed":
-        // 直接 append しても、commitSheet と同じ検査を通す
-        return this.sheetRejection(d) ? "sheet rejected (use commitSheet to record the reason)" : null;
+        return this.sheetRejection(d);
       case "fills.executed": {
         const pend = st!.pending;
         if (!pend || pend.tradingDate !== p.tradingDate || pend.seq !== p.sheetSeq) return "no committed sheet for this trading date";
         if (this.closed.has(pend.tradingDate)) return p.openSeq === undefined ? null : "market was closed";
-        return p.openSeq === this.opens.get(pend.tradingDate) ? null : "openSeq must be prices.open of the trading date";
+        const open = this.opens.get(pend.tradingDate);
+        return open !== undefined && p.openSeq === open ? null : "openSeq must be prices.open of the trading date";
       }
       case "valuation.recorded": {
         if (st!.pending) return "the committed sheet is not filled yet";
         if (p.date !== nextBusinessDay(st!.asOf, H) || st!.valuedDate === p.date) return "valuation must be for the day after the last post-close";
-        return p.closeSeq === this.closes.get(p.date as string) ? null : "closeSeq must be prices.close of the date";
+        const close = this.closes.get(p.date as string);
+        return close !== undefined && p.closeSeq === close ? null : "closeSeq must be prices.close of the date";
       }
       case "corporate_actions.applied": {
+        if (st!.pending) return "the committed sheet is not filled yet";
         if (st!.valuedDate !== p.asOf || st!.asOf === p.asOf) return "value the day before applying corporate actions";
-        return p.exDate === nextBusinessDay(p.asOf as string, H) ? null : "exDate must be the next business day";
+        if (p.exDate !== nextBusinessDay(p.asOf as string, H)) return "exDate must be the next business day";
+        // 渡す公表は、権利落ち日がこの日の公表だけを、seq の昇順で（§3.3）
+        const seqs = p.announcedSeqs as unknown[];
+        for (const [i, s] of seqs.entries()) {
+          const e = this.events[(s as number) - 1];
+          if (e?.type !== "corporate_action.announced" || (e.payload as Record<string, unknown>).exDate !== p.exDate) return `announcedSeqs must be announcements with exDate ${String(p.exDate)}`;
+          if (i > 0 && (s as number) <= (seqs[i - 1] as number)) return "announcedSeqs must be in ascending order";
+        }
+        return null;
+      }
+      case "agent.suspended":
+      case "agent.resumed": {
+        if (p.scope !== "posts" && p.scope !== "orders" && p.scope !== "both") return "scope must be posts, orders or both";
+        if (typeof p.reason !== "string" || p.reason === "") return "reason is required";
+        if (d.type === "agent.resumed") {
+          const set = this.suspended.get(p.agentId as string);
+          const scopes = p.scope === "both" ? ["posts", "orders"] : [p.scope];
+          if (!scopes.some((x) => set?.has(x))) return "not suspended (resuming * does not resume a single agent)";
+        }
+        return null;
       }
       default:
         return null;
@@ -338,6 +388,7 @@ function keysOf(type: EventType, p: Record<string, unknown>): string[] | string 
       return k(["agentId", "asOf"], () => [`post_close:${String(id)}:${String(p.asOf)}`, ...(p.announcedSeqs as unknown[]).map((s) => `ca:${String(id)}:${String(s)}`)]);
     }
     case "ledger.adjusted":
+      if (!Number.isSafeInteger(p.correctionSeq)) return "invalid correctionSeq";
       return k(["agentId"], () => [`adjust:${String(id)}:${String(p.correctionSeq)}`]);
     default:
       return [];

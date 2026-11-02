@@ -50,6 +50,7 @@ AIの「情報の取得 → 発言 → 判断 → 注文 → 約定 → 評価 �
 | `market.closed` | 臨時休場の日、理由、出典。その日の `prices.open` が既にあれば拒む | operator | `closed:<日付>` |
 
 - `source.captured` は `publishedAt <= fetchedAt <= recordedAt` でなければ拒む。公開時刻が分からない出典は、判断の入力に使えない
+- `prices.open`・`prices.close` は営業日のものだけ。`prices.close`（D）は、`recordedAt` が D の15:30以降でなければ拒む（`docs/PAPER_TRADING_RULES.md` §1）。`market.closed`（T）は、T の始値・終値があるとき、またはT以後をもう評価・引け後処理したAIがいるときは拒む
 - `prices.open`（約定日 T）は、`recordedAt` が T の締め（8:30）以降でなければ拒む。注文票の確定は締めより前で、`recordedAt` は減らないので、T の注文票はすべて始値より前の `seq` になる
 
 ### 3.2 AI
@@ -64,6 +65,7 @@ AIの「情報の取得 → 発言 → 判断 → 注文 → 約定 → 評価 �
 
 - **LLMに渡した入力：** リクエストは、入力の `seq` の一覧とプロンプトの版から決定論的に組み立て、そのハッシュを記録する。組み立て直して同じハッシュになることを検査する。LLMのツールでWebなどから情報を取りに行くことは、取ったものを `source.captured` として記録できるまで使わない
 - **AIの身元：** 実際には、AIを動かす処理がAIの身元で追記する。その認証の分け方は保存先と一緒に決める（#20）
+- **注文票の確定と拒否：** 追記の処理の、確定の入口（`commitSheet`）からだけ書ける。拒否には、受け取った注文の並び（正規化できなければその旨）を残す
 - **注文票の入力：** 元になる `agent.run` は、同じAIの、目的が注文で、成功したもの。判断に使った入力は、その `agent.run` の入力の一部でなければならない
 - **入力に使える情報：** `source.captured` は `publishedAt` が締め（約定日の8:30）より前のもの。`prices.*`・`valuation.recorded` は日付が約定日より前のもの（`docs/PAPER_TRADING_RULES.md` §2）
 
