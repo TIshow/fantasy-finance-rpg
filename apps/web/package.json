@@ -11,7 +11,9 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "holidays:update": "node scripts/update-holidays.mjs",
+    "holidays:check": "node scripts/update-holidays.mjs --check"
   },
   "dependencies": {
     "next": "16.4.3",
