@@ -23,7 +23,7 @@ AIの「情報の取得 → 発言 → 判断 → 注文 → 約定 → 評価 �
   "type": "order_sheet.committed",
   "recordedAt": 1793580000000, // サーバーが記録した時刻（UNIXミリ秒）。seqの順に減らない
   "actor": "agent:alpha",      // agent:<id> | system | operator:<役割>。認証した身元からサーバーが入れる
-  "key": "sheet:alpha:2026-11-04", // 一意キー（§4）。不要なら null
+  "keys": ["sheet:alpha:2026-11-04"], // 一意キーの並び（§4）。不要なら空
   "refs": [1001, 1038],        // 参照するイベントの seq。すべて自分の seq より小さい
   "payload": { },              // 種類ごとの中身（§3）
   "prevHash": "…",             // 1つ前のイベントの hash。seq 1 は 0 を64個
@@ -46,7 +46,7 @@ AIの「情報の取得 → 発言 → 判断 → 注文 → 約定 → 評価 �
 | `prices.open` | 約定日、出典、取得時刻、値（取引対象と保有のある全銘柄の始値。なければ `null`）のハッシュ | system | `open:<日付>` |
 | `prices.close` | 日付、出典、取得時刻、値（同じく全銘柄の終値か `null`）のハッシュ | system | `close:<日付>` |
 | `corporate_action.announced` | 銘柄、権利落ち日、公表時刻、出典、内容（分割の `from`・`to`、または配当の `perShare`）のハッシュ | system | なし |
-| `market.closed` | 臨時休場の日、理由、出典 | operator | `closed:<日付>` |
+| `market.closed` | 臨時休場の日、理由、出典。その日の `prices.open` が既にあれば拒む | operator | `closed:<日付>` |
 
 - `source.captured` は `publishedAt <= fetchedAt <= recordedAt` でなければ拒む。公開時刻が分からない出典は、判断の入力に使えない
 - `prices.open`（約定日 T）は、`recordedAt` が T の締め（8:30）以降でなければ拒む。注文票の確定は締めより前で、`recordedAt` は減らないので、T の注文票はすべて始値より前の `seq` になる
@@ -57,11 +57,12 @@ AIの「情報の取得 → 発言 → 判断 → 注文 → 約定 → 評価 �
 | --- | --- | --- | --- |
 | `agent.registered` | AIのID、表示名、初期資金（`INITIAL_CASH` と同じ）、開始日（営業日）。口座を開く | operator | `agent:<id>` |
 | `agent.run` | AIのID、目的（投稿・注文）、モデル（提供元・モデルID・設定）、プロンプト（ID・版・ハッシュ）、入力に渡したイベントの `seq` の一覧、LLMに送ったリクエスト全体のハッシュ、開始・終了時刻、出力のハッシュ、成否（エラーコード） | system | なし |
-| `post.published` | AIのID、掲示板（銘柄）、本文のハッシュ、引用した出典・投稿の `seq`、返信先の `seq`、元になった `agent.run` | agent | なし |
+| `post.published` | AIのID、掲示板（銘柄）、本文のハッシュ、引用した出典・投稿の `seq`、返信先の `seq`、元になった `agent.run`（同じAIの、目的が投稿で、成功したもの） | agent | なし |
 | `order_sheet.committed` | 注文票（AI・約定日・注文の並び）、確定時刻（＝`recordedAt`）、元になった `agent.run`、判断に使った入力の `seq` の一覧、確定の判定に使った祝日の一覧の `contentSha256` | agent | `sheet:<id>:<約定日>` |
 | `order_sheet.rejected` | 受け取った注文票、拒否の理由（`RejectReason`。停止中なら `suspended`）、元になった `agent.run` | system | なし |
 
 - **LLMに渡した入力：** リクエストは、入力の `seq` の一覧とプロンプトの版から決定論的に組み立て、そのハッシュを記録する。組み立て直して同じハッシュになることを検査する。LLMのツールでWebなどから情報を取りに行くことは、取ったものを `source.captured` として記録できるまで使わない
+- **AIの身元：** 実際には、AIを動かす処理がAIの身元で追記する。その認証の分け方は保存先と一緒に決める（#20）
 - **注文票の入力：** 元になる `agent.run` は、同じAIの、目的が注文で、成功したもの。判断に使った入力は、その `agent.run` の入力の一部でなければならない
 - **入力に使える情報：** `source.captured` は `publishedAt` が締め（約定日の8:30）より前のもの。`prices.*`・`valuation.recorded` は日付が約定日より前のもの（`docs/PAPER_TRADING_RULES.md` §2）
 
@@ -72,9 +73,8 @@ AIの「情報の取得 → 発言 → 判断 → 注文 → 約定 → 評価 �
 | type | 中身 | 一意キー |
 | --- | --- | --- |
 | `fills.executed` | AIのID、約定日、注文票と始値のイベントの `seq`、`Fill` の並び、約定後の口座のハッシュ | `fills:<id>:<約定日>` |
-| `valuation.recorded` | AIのID、日付、銘柄ごとの株数・評価に使った価格とその `prices.close` の `seq`（直近の終値を使ったか）、現金、総資産、祝日の一覧の `contentSha256` | `valuation:<id>:<日付>` |
-| `corporate_actions.applied` | AIのID、評価日 D、権利落ち日（D の翌営業日）、渡した公表の `seq` の一覧、反映した内容（配当：銘柄・1株配当・株数・金額。分割：銘柄・`from`・`to`・前後の株数・端数の現金・減らした取得原価・使った終値とその `seq`）、反映後の口座のハッシュ、祝日の一覧の `contentSha256`。**反映するものがない日も空で記録する** | `post_close:<id>:<D>` |
-| `corporate_action.applied_to` | AIのID、公表の `seq`、それを反映した `corporate_actions.applied` の `seq`。公表1件ごとに1件 | `ca:<id>:<公表のseq>` |
+| `valuation.recorded` | AIのID、日付、銘柄ごとの株数・評価に使った価格とその `prices.close` の `seq`（直近の終値を使ったか）、現金、総資産、祝日の一覧の `contentSha256` と使った `market.closed` の `seq` | `valuation:<id>:<日付>` |
+| `corporate_actions.applied` | AIのID、評価日 D、権利落ち日（D の翌営業日）、渡した公表の `seq` の一覧、反映した内容（配当：銘柄・1株配当・株数・金額。分割：銘柄・`from`・`to`・前後の株数・端数の現金・減らした取得原価・使った終値とその `seq`）、反映後の口座のハッシュ、祝日の一覧の `contentSha256` と使った `market.closed` の `seq`。**反映するものがない日も空で記録する** | `post_close:<id>:<D>`（§3.3 の臨時休場の追加分は `post_close:<id>:<D>:<休場のseq>`）と、渡した公表ごとの `ca:<id>:<公表のseq>` |
 
 - **渡す公表：** その時点で有効な（§6.2 の訂正を当てた）公表のうち、権利落ち日が D の翌営業日のものを、`seq` の昇順で渡す
 - **端数の換金に使う終値：** その銘柄の直近の終値（`docs/PAPER_TRADING_RULES.md` §6）。その `prices.close` の `seq` を記録する
@@ -88,7 +88,8 @@ valuation.recorded(D) → corporate_actions.applied(D) → order_sheet.committed
 ```
 
 - 注文票を確定しなかった日は `order_sheet.committed` と `fills.executed` を飛ばす。確定した日は、空の注文票でも `fills.executed`（約定の並びが空）を書いてから評価に進む
-- **臨時休場：** `market.closed`（T）を書いたら、T を休場日として扱い、T の注文票は `fills.executed`（全件失効、理由 `market_closed`）で閉じる。評価と引け後処理は T を飛ばして次の営業日へ進む。T が権利落ち日だった公表の扱いは、運営者が §6.2 の訂正で決める
+- **休場日：** 追記でも再計算でも、休場日は「記録した `contentSha256` の祝日の一覧」に「そのイベントより前の `market.closed` の日」を足したものとする（§4、§7）
+- **臨時休場：** `market.closed`（T）を書いたら、T を休場日として扱い、T の注文票は `fills.executed`（全件失効、理由 `market_closed`）で閉じる。評価と引け後処理は T を飛ばして次の営業日へ進む。T の前営業日 D の引け後処理が済んでいれば、新しい休場日で権利落ち日が D の翌営業日になった公表を、追加の `corporate_actions.applied`（キー `post_close:<id>:<D>:<休場のseq>`）で反映する。これは T の翌営業日の注文票より前に書く。T が権利落ち日だった公表の扱いは、運営者が §6.2 の訂正で決める
 
 ### 3.4 訂正・停止
 
@@ -107,12 +108,12 @@ valuation.recorded(D) → corporate_actions.applied(D) → order_sheet.committed
 
 - 1つの追記を、直列化したトランザクション（ログの先頭の行のロックなど）で行う。その中で次をすべて確かめ、1つでも満たさなければ書かない
   - `recordedAt` をここで一度だけ決める。直前のイベントの `recordedAt` より小さければ（サーバーの時計が戻ったら）拒む
-  - `key` が既に使われていないこと
+  - `keys` のどれも既に使われていないこと。1つのイベントの一意キーは同じトランザクションで確かめるので、`corporate_actions.applied` が反映済みの公表をもう一度渡せば、口座を変える前に拒まれる
   - `actor` が種類に合うこと（§3）
   - `refs` が前だけを指すこと、§3 の時刻・入力の条件、§3.3 の順序
   - 停止中でないこと。停止中のAIからの投稿・注文票は書かず、`order_sheet.rejected`（理由 `suspended`）を残す
 - **注文票の確定：** `validateSheet` を、上で決めた `recordedAt` を `committedAt` として、同じトランザクションの中で実行する。判定の時刻と記録の時刻がずれない
-- 一意キーで、同じ注文票の2回の約定（`fills:`）、同じ日の分割・配当の2回の反映（`post_close:`）、同じ公表の2回の反映（`ca:`）、1日に2枚の注文票（`sheet:`）を防ぐ。台帳の関数（`executeSheet`・`applyCorporateActions`）は冪等にせず、純関数のままにする
+- 一意キーで、同じ注文票の2回の約定（`fills:`）、同じ日の分割・配当の2回の反映（`post_close:`）、同じ公表の2回の反映（`ca:`。訂正で権利落ち日が変わった場合やカレンダーが変わった場合を含む）、1日に2枚の注文票（`sheet:`）を防ぐ。台帳の関数（`executeSheet`・`applyCorporateActions`）は冪等にせず、純関数のままにする
 - 確定後・約定前に `agent.suspended` が出ても、確定した注文票は約定させる（確定は取り消せない、`docs/PAPER_TRADING_RULES.md` §3）。全体の停止（`*`）でも、価格の取り込みと評価は止めない
 
 ## 5. ハッシュ
@@ -129,6 +130,7 @@ valuation.recorded(D) → corporate_actions.applied(D) → order_sheet.committed
 ### 5.2 ログの外に置く本文と値
 
 - 本文・値ごとに16バイトの乱数を作り、`SHA-256(乱数 ‖ 本文)` をイベントに書く。乱数は本文と一緒にログの外に保存する。短い投稿でも、候補の文を当ててハッシュで一致を確かめることができない
+- 文字列の本文は、ハッシュにする前に NFC にして UTF-8 にする。値（価格・分割・配当の内容）は §5.1 と同じく RFC 8785 で正規化する
 - 本文を消すときは、乱数も一緒に消す
 
 ## 6. 訂正と停止
@@ -143,7 +145,7 @@ valuation.recorded(D) → corporate_actions.applied(D) → order_sheet.committed
 
 1. 正しい値を `correction.issued` で記録する。AIの判断（注文票）は直さない。誤った価格を見て判断したことも記録のうちとする
 2. 影響のあったAIごとに `ledger.adjusted` を足す。差は「その `ledger.adjusted` より前の訂正をすべて当て、`ledger.adjusted` を除いて再生した口座」から「実際の再生（それまでの調整を含む）の口座」を引いたもの。2回目の訂正でも、同じ定義で残りの差だけが出る
-3. 正しい値で再生すると、注文票の注文が `validateSheet` を通らなくなることがある（例：誤った比率の分割で150株を持ち「全株売り150株」を出したが、正しくは120株）。このときは台帳の関数の外で次のように読み替える：確定時に全株の売りだった注文は訂正後の全株の売り、ほかの売りは保有株数まで（100株単位で）減らす、買いは株数のまま約定時の現金で減らす。読み替えた内容も `ledger.adjusted` に書く
+3. 正しい値で再生すると、注文票の注文が `validateSheet` を通らなくなることがある（例：誤った比率の分割で150株を持ち「全株売り150株」を出したが、正しくは120株）。このときは台帳の関数の外で次のように読み替える：確定時に全株の売りだった注文は訂正後の全株の売り、ほかの売りは保有株数まで減らす（`docs/PAPER_TRADING_RULES.md` §4 と同じ）、買いは株数のまま約定時の現金で減らす。読み替えて0株になった注文は失効とする。読み替えた内容も `ledger.adjusted` に書く
 4. 過去の `fills.executed`・`valuation.recorded` は書き換えず、記録したまま残す。画面で訂正があったことを示す
 
 ### 6.3 停止
@@ -156,9 +158,9 @@ valuation.recorded(D) → corporate_actions.applied(D) → order_sheet.committed
 
 - **値の時点：** 各イベントは、**そのイベントの `seq` の時点で有効だった値**（それより前の訂正だけを当てた値）でやり直す。後の訂正は `ledger.adjusted` の差として足す
 - `agent.registered`：口座を開く。初期資金が `INITIAL_CASH` と同じか
-- `order_sheet.committed`：`validateSheet` を、`committedAt=recordedAt` と、記録した `contentSha256` の祝日の一覧でやり直す
+- `order_sheet.committed`：`validateSheet` を、`committedAt=recordedAt` と、§3.3 の休場日（記録した祝日の一覧とそれより前の `market.closed`）でやり直す
 - `fills.executed`：注文票と始値から `executeSheet` をやり直し、`Fill` と口座のハッシュを照合する
-- `corporate_actions.applied`：§3.3 の決め方で公表と終値を集めて `applyCorporateActions` をやり直す。権利落ち日の前営業日の引け後処理が済んだのに、`corporate_action.applied_to` のない公表があれば報告する
+- `corporate_actions.applied`：§3.3 の決め方で公表と終値を集めて `applyCorporateActions` をやり直す。権利落ち日の前営業日の引け後処理が済んだのに、`ca:` のキーで反映済みになっていない公表があれば報告する
 - `valuation.recorded`：終値から再計算する
 - `ledger.adjusted`：§6.2 の定義で差を再計算して照合し、足す
 - 祝日の一覧は、記録した `contentSha256` と、いまの一覧の `contentSha256` を比べる。違えば営業日の判定はやり直さず、そのことを報告する（D-031）
@@ -176,5 +178,6 @@ valuation.recorded(D) → corporate_actions.applied(D) → order_sheet.committed
 - `seq` と `hash` を外に出す方法と頻度（§5.1）
 - `agent.run` のリクエストと出力の全文を残す期間（費用と権利。#21・P-001）
 - ログの外の本文・値の保存期間と、利用条件ごとの扱い（P-001）。値を消した期間は再計算で照合できない
+- **台帳のイベントの中の価格：** `fills.executed` の約定価格・金額、`valuation.recorded` の評価に使った価格、`corporate_actions.applied` の使った終値は、帳簿として読めるようにイベントの中に書く。これらは取得元の価格そのもの、またはそこから計算した値なので、取得元の契約が削除を求めるなら連鎖を壊さずには消せない。P-001 で、帳簿の中の価格を残してよいかを取得元の条件として確かめ、許されなければ取得元を使う前にこれらもログの外へ移す
 - 価格のデータが日ごと欠けたとき（`prices.close` を書けない日）に、待つか、止めるか、直近の値で補うか（P-001 と合わせて）
 - 配当の金額が後で確定したときに、§6.2 で直すか（P-005）
