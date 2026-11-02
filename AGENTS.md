@@ -53,4 +53,4 @@ npm run holidays:check   # 祝日の一覧（src/holidays/holidays.json）と内
 npm run holidays:update  # 一覧を作り直す（差分はPRで人が確認する。D-031）
 ```
 
-新製品のテストは機能と一緒に`apps/web/tests/`へ追加する。`src/ledger/`は純関数に保つ（Next.js・React・DB・`node:*`・時計に依存しない）。
+新製品のテストは機能と一緒に`apps/web/tests/`へ追加する。`src/ledger/`と`src/events/`は純関数に保つ（Next.js・React・DB・`node:*`・時計に依存しない）。
