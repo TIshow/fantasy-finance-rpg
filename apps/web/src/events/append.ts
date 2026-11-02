@@ -99,6 +99,8 @@ export class EventLog {
   private readonly closes = new Map<string, number>();
   private readonly closed = new Map<string, number>();
   private readonly commits = new Set<string>();
+  /** 権利落ち日ごとの公表の seq（記録の順） */
+  private readonly announced = new Map<string, number[]>();
 
   constructor(private readonly ctx: AppendContext) {}
 
@@ -112,7 +114,16 @@ export class EventLog {
     return this.write(d);
   }
 
-  private async write(d: Draft): Promise<AppendResult> {
+  /**
+   * 保存済みのログを1件ずつ読み直すときに使う（replay.ts）。追記のときと同じ検査をし、作り直したイベントが
+   * 記録と同じハッシュになるときだけ受け入れる（一意キー・連鎖・中身のどれかが違えばハッシュが変わる）
+   */
+  async admit(e: LogEvent): Promise<string | null> {
+    const r = await this.write({ type: e.type, recordedAt: e.recordedAt, actor: e.actor, refs: e.refs, payload: e.payload as Record<string, unknown> }, e.hash);
+    return r.ok ? null : `seq ${e.seq} (${e.type}): ${r.reason}`;
+  }
+
+  private async write(d: Draft, expectedHash?: string): Promise<AppendResult> {
     const p: unknown = d.payload;
     if (typeof p !== "object" || p === null || Array.isArray(p)) return { ok: false, reason: "payload must be an object" };
     const keys = keysOf(d.type, d.payload);
@@ -126,6 +137,7 @@ export class EventLog {
       if (err instanceof CanonicalizeError || (err instanceof Error && err.message.startsWith("invalid event:"))) return { ok: false, reason: err.message };
       throw err;
     }
+    if (expectedHash !== undefined && event.hash !== expectedHash) return { ok: false, reason: "does not match the recorded event" };
     this.events.push(event);
     for (const k of keys) this.keys.add(k);
     this.apply(event);
@@ -266,6 +278,9 @@ export class EventLog {
           if (e?.type !== "corporate_action.announced" || (e.payload as Record<string, unknown>).exDate !== p.exDate) return `announcedSeqs must be announcements with exDate ${String(p.exDate)}`;
           if (i > 0 && (s as number) <= (seqs[i - 1] as number)) return "announcedSeqs must be in ascending order";
         }
+        // 権利落ち日がこの日の公表は、保有の有無によらず全部渡す（反映の漏れを防ぐ）
+        const all = this.announced.get(p.exDate as string) ?? [];
+        if (all.length !== seqs.length) return `announcedSeqs must include every announcement with exDate ${String(p.exDate)}`;
         return null;
       }
       case "agent.suspended":
@@ -296,6 +311,12 @@ export class EventLog {
       case "prices.close":
         this.closes.set(p.date as string, e.seq);
         break;
+      case "corporate_action.announced": {
+        const list = this.announced.get(String(p.exDate)) ?? [];
+        list.push(e.seq);
+        this.announced.set(String(p.exDate), list);
+        break;
+      }
       case "market.closed":
         this.closed.set(p.date as string, e.seq);
         break;
