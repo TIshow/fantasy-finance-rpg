@@ -28,6 +28,8 @@ LLMは文章と判断候補を生成するが、残高・約定・市場価格�
 
 祝日の一覧は`apps/web/src/holidays/`に置く（取得元は`docs/DECISIONS.md`のD-031）。
 
+イベントログの形式（正規化・ハッシュ・連鎖の検査）は`apps/web/src/events/`に置く（`docs/EVENT_LOG.md`）。SHA-256 は依存を足さず、ブラウザと Node のどちらにもある Web Crypto（`crypto.subtle`）で計算する。`node:crypto`を使わないので純関数の決まりを守れ、非同期になるのはハッシュを計算する関数だけ。Web Crypto がない環境に移すときは、同じテストの既知の値（`abc`の SHA-256 と固定したイベントのハッシュ）を満たす SHA-256 に差し替える。
+
 台帳は`apps/web/src/ledger/`に置き、Next.js・React・DB・`node:*`・時計に依存しない純関数とする（`docs/PAPER_TRADING_RULES.md`）。
 
 ### 未決
