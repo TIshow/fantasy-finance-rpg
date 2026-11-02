@@ -34,7 +34,9 @@ export function parseHolidayCsv(text: string, firstYear: number): Holiday[] {
     const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
     const day = new Date(Date.UTC(y, mo - 1, d));
     if (day.getUTCFullYear() !== y || day.getUTCMonth() !== mo - 1 || day.getUTCDate() !== d) throw new Error(`invalid date in CSV row ${i + 2}: ${line}`);
-    all.push({ date: day.toISOString().slice(0, 10), name: m[4]!.trim() });
+    const name = m[4]!.trim();
+    if (name === "") throw new Error(`empty name in CSV row ${i + 2}: ${line}`);
+    all.push({ date: day.toISOString().slice(0, 10), name });
   }
 
   const holidays = all.filter((h) => Number(h.date.slice(0, 4)) >= firstYear).sort((a, b) => a.date.localeCompare(b.date));
@@ -56,4 +58,26 @@ export function parseHolidayCsv(text: string, firstYear: number): Holiday[] {
     for (const md of FIXED_DAYS) if (!dateSet.has(`${y}-${md}`)) throw new Error(`missing fixed holiday ${y}-${md}`);
   }
   return holidays;
+}
+
+export type HolidayYears = Record<string, [string, string][]>;
+
+/** 年ごとの [日付, 名称] にまとめる。holidays.json の years と同じ形 */
+export function groupByYear(holidays: readonly Holiday[]): HolidayYears {
+  const years: HolidayYears = {};
+  for (const h of holidays) (years[h.date.slice(0, 4)] ??= []).push([h.date, h.name]);
+  return years;
+}
+
+/** 内容のハッシュを取るための、決まった形の文字列（年の昇順、各年は日付順） */
+export function canonicalYears(years: HolidayYears): string {
+  return JSON.stringify(Object.keys(years).sort().map((y) => [y, years[y]]));
+}
+
+/** protectThrough 年までで、祝日の日付か名称が変わった（増えた・減った・消えた年を含む）年 */
+export function changedPastYears(before: HolidayYears, after: HolidayYears, protectThrough: number): string[] {
+  const ys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  return [...ys]
+    .filter((y) => Number(y) <= protectThrough && y in before && JSON.stringify(before[y]) !== JSON.stringify(after[y]))
+    .sort();
 }

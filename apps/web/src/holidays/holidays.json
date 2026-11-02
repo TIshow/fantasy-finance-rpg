@@ -1,6 +1,7 @@
 {
   "source": "https://www8.cao.go.jp/chosei/shukujitsu/syukujitsu.csv",
   "sourceSha256": "cec37a743c96995cdb9cb52b685c9003634682a9b0e1a640a6b9b96881fe964a",
+  "contentSha256": "48d280260c3853a0223a073cf5725e6923307fb93671dd9cb07a49e6afd0cfdd",
   "firstYear": 2020,
   "lastYear": 2027,
   "years": {
