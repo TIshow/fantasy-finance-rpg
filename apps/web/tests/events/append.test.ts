@@ -241,6 +241,15 @@ describe("停止と臨時休場（§3.3・§6.3）", () => {
     expect(await reason(log.append(op("market.closed", jst("2026-11-11", 9, 1), { date: "2026-11-11" })))).toBe("open prices already recorded");
   });
 
+  it("開始日は登録時点の次の約定日だけ。先の日のAIで臨時休場が書けなくなることはない", async () => {
+    const log = newLog();
+    const reg = (startDate: string) => op("agent.registered", jst("2026-11-09", 20), { agentId: "beta", startDate, initialCash: INITIAL_CASH });
+    expect(await reason(log.append(reg("2026-12-01")))).toBe("startDate must be the next trading date");
+    expect(await reason(log.append(reg("2026-11-09")))).toBe("startDate must be the next trading date");
+    expect(await reason(log.append(reg("2026-11-10")))).toBe("ok");
+    expect(await reason(log.append(op("market.closed", jst("2026-11-10", 8, 40), { date: "2026-11-10" })))).toBe("ok");
+  });
+
   it("時計が戻った記録は拒む", async () => {
     const { log } = await setup();
     expect(await reason(log.append(sys("source.captured", jst("2026-11-09", 19), { publishedAt: jst("2026-11-09", 15), fetchedAt: jst("2026-11-09", 19) })))).toContain("recordedAt goes backwards");

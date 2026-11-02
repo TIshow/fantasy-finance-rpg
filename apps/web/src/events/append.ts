@@ -1,7 +1,7 @@
 // 追記の処理（docs/EVENT_LOG.md §3・§4）。メモリ上のログに、検査を通ったイベントだけを足す。
 // 時計は持たない。recordedAt はサーバーが1回だけ決めて渡す。一意キーは中身から作り、呼び出し側には任せない。
 // 中身の検査は、順序と時点の判定に使う項目だけ。口座の再計算と照合、訂正・調整は別のPR（§8の3）。
-import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusinessDay, validateSheet } from "../ledger/ledger";
+import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusinessDay, tradingDateFor, validateSheet } from "../ledger/ledger";
 import { INITIAL_CASH, type Account, type Order, type RejectReason } from "../ledger/types";
 import { CanonicalizeError } from "./canonical";
 import { sealEvent } from "./chain";
@@ -231,9 +231,9 @@ export class EventLog {
       }
       case "agent.registered": {
         const start = p.startDate;
-        if (!isValidDate(start) || !isBusinessDay(start, H)) return "startDate must be a business day";
-        if (p.initialCash !== INITIAL_CASH) return "initialCash must be INITIAL_CASH";
-        return d.recordedAt < cutoffOf(start) ? null : "register before the cutoff of startDate";
+        // 開始日は、登録した時点で締めがまだ来ていない最初の営業日だけ。先の日にすると、その前の日を臨時休場にできなくなるため
+        if (!isValidDate(start) || start !== tradingDateFor(d.recordedAt, H)) return "startDate must be the next trading date";
+        return p.initialCash === INITIAL_CASH ? null : "initialCash must be INITIAL_CASH";
       }
       case "agent.run":
         return p.purpose === "post" || p.purpose === "order" ? this.inputProblem(p.inputSeqs, null) : "purpose must be post or order";
