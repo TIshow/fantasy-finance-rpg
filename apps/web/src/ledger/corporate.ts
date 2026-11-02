@@ -19,9 +19,26 @@ export interface Dividend {
   perShare: Deciyen;
 }
 
+/**
+ * 反映した内容。反映前の口座とこの並びだけで反映後の口座をたどり直せる（docs/EVENT_LOG.md §3.3）：
+ * 配当は現金に amount を足す。分割は株数を qtyAfter にし（0なら保有を消す）、取得原価から costOut を引き、現金に cashInLieu を足す
+ */
 export type CorporateEvent =
-  | { kind: "dividend"; symbol: string; qty: number; amount: Deciyen }
-  | { kind: "split"; symbol: string; qtyBefore: number; qtyAfter: number; cashInLieu: Deciyen };
+  | { kind: "dividend"; symbol: string; perShare: Deciyen; qty: number; amount: Deciyen }
+  | {
+      kind: "split";
+      symbol: string;
+      from: number;
+      to: number;
+      qtyBefore: number;
+      qtyAfter: number;
+      /** 端数を現金にした額 */
+      cashInLieu: Deciyen;
+      /** 端数の分だけ減らした取得原価 */
+      costOut: Deciyen;
+      /** 端数の換金に使った前営業日の終値。端数がなければ null */
+      close: Deciyen | null;
+    };
 
 /**
  * exDate が権利落ち日の配当と分割を反映する。配当を先に（分割前の株数で）、分割を後に処理する。
@@ -44,7 +61,7 @@ export function applyCorporateActions(
     if (!h) continue;
     const amount = h.qty * d.perShare;
     cash += amount;
-    events.push({ kind: "dividend", symbol: d.symbol, qty: h.qty, amount });
+    events.push({ kind: "dividend", symbol: d.symbol, perShare: d.perShare, qty: h.qty, amount });
   }
 
   const seen = new Set<string>();
@@ -59,15 +76,17 @@ export function applyCorporateActions(
     // 1株未満の端数（分割後の株数で rem / from 株）を、前営業日の終値で現金にする
     const rem = h.qty * s.to - qtyAfter * s.from;
     let cashInLieu = 0;
+    let costOut = 0;
+    let close: Deciyen | null = null;
     if (rem > 0) {
-      const close = closes[s.symbol];
-      if (close === undefined) throw new Error(`missing close for ${s.symbol}`);
+      close = closes[s.symbol] ?? null;
+      if (close === null) throw new Error(`missing close for ${s.symbol}`);
       cashInLieu = Math.round((close * rem) / s.to);
-      const costOut = qtyAfter === 0 ? h.cost : Math.round((h.cost * rem) / (h.qty * s.to));
+      costOut = qtyAfter === 0 ? h.cost : Math.round((h.cost * rem) / (h.qty * s.to));
       h.cost -= costOut;
       cash += cashInLieu;
     }
-    events.push({ kind: "split", symbol: s.symbol, qtyBefore: h.qty, qtyAfter, cashInLieu });
+    events.push({ kind: "split", symbol: s.symbol, from: s.from, to: s.to, qtyBefore: h.qty, qtyAfter, cashInLieu, costOut, close });
     if (qtyAfter === 0) delete holdings[s.symbol];
     else h.qty = qtyAfter;
   }

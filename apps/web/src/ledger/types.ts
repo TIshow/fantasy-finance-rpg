@@ -45,10 +45,17 @@ export type RejectReason =
   | "invalid_order"
   | "unknown_symbol"
   | "invalid_qty"
-  | "insufficient_holdings";
+  | "insufficient_holdings"
+  /** 停止中のAI。validateSheet は返さず、追記の処理が使う（docs/EVENT_LOG.md §4） */
+  | "suspended";
 
 export type FillStatus = "filled" | "reduced" | "expired";
-export type FillReason = "insufficient_cash" | "insufficient_holdings" | "no_open_price";
+export type FillReason =
+  | "insufficient_cash"
+  | "insufficient_holdings"
+  | "no_open_price"
+  /** 臨時休場の日の注文票を閉じるとき。executeSheet は返さず、追記の処理が使う（docs/EVENT_LOG.md §3.3） */
+  | "market_closed";
 
 export interface Fill {
   symbol: string;
