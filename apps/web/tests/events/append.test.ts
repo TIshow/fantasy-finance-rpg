@@ -75,7 +75,7 @@ describe("1日の流れ（§3.3）", () => {
     const { log, src, run } = await setup();
     const r = await log.commitSheet(jst("2026-11-09", 23), "alpha", sheet(run, [src], "2026-11-11"));
     expect(r.rejected).toBe("wrong_trading_date");
-    expect(r.ok && r.event.payload).toEqual({ agentId: "alpha", tradingDate: "2026-11-11", reason: "wrong_trading_date", runSeq: run, orders: buy });
+    expect(r.ok && r.event.payload).toEqual({ agentId: "alpha", tradingDate: "2026-11-11", reason: "wrong_trading_date", runSeq: run, inputSeqs: [src], orders: buy });
   });
 
   it("締めちょうど（8:30）の注文票は受け付けない", async () => {

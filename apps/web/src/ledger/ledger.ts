@@ -106,8 +106,10 @@ function fillOne(acc: Account, o: Order, price: Deciyen | null): { account: Acco
 export function totalValue(account: Account, closes: Readonly<Record<string, Deciyen>>): Deciyen {
   let total = account.cash;
   for (const [symbol, h] of Object.entries(account.holdings)) {
-    const close = closes[symbol];
-    if (close === undefined) throw new Error(`missing close for ${symbol}`);
+    // Object.prototype と同名の銘柄を拾わないよう、自分の項目だけを読む。null や不正な値を0として足さない
+    const close: unknown = Object.hasOwn(closes, symbol) ? closes[symbol] : undefined;
+    if (close === undefined || close === null) throw new Error(`missing close for ${symbol}`);
+    if (typeof close !== "number" || !Number.isSafeInteger(close) || close <= 0) throw new Error(`invalid close for ${symbol}: ${String(close)}`);
     total += close * h.qty;
   }
   return total;

@@ -99,6 +99,8 @@ export class EventLog {
   private readonly closes = new Map<string, number>();
   private readonly closed = new Map<string, number>();
   private readonly commits = new Set<string>();
+  /** 権利落ち日ごとの公表の seq（記録の順） */
+  private readonly announced = new Map<string, number[]>();
 
   constructor(private readonly ctx: AppendContext) {}
 
@@ -112,7 +114,16 @@ export class EventLog {
     return this.write(d);
   }
 
-  private async write(d: Draft): Promise<AppendResult> {
+  /**
+   * 保存済みのログを1件ずつ読み直すときに使う（replay.ts）。追記のときと同じ検査をし、作り直したイベントが
+   * 記録と同じハッシュになるときだけ受け入れる（一意キー・連鎖・中身のどれかが違えばハッシュが変わる）
+   */
+  async admit(e: LogEvent): Promise<string | null> {
+    const r = await this.write({ type: e.type, recordedAt: e.recordedAt, actor: e.actor, refs: e.refs, payload: e.payload as Record<string, unknown> }, e.hash);
+    return r.ok ? null : `seq ${e.seq} (${e.type}): ${r.reason}`;
+  }
+
+  private async write(d: Draft, expectedHash?: string): Promise<AppendResult> {
     const p: unknown = d.payload;
     if (typeof p !== "object" || p === null || Array.isArray(p)) return { ok: false, reason: "payload must be an object" };
     const keys = keysOf(d.type, d.payload);
@@ -126,6 +137,7 @@ export class EventLog {
       if (err instanceof CanonicalizeError || (err instanceof Error && err.message.startsWith("invalid event:"))) return { ok: false, reason: err.message };
       throw err;
     }
+    if (expectedHash !== undefined && event.hash !== expectedHash) return { ok: false, reason: "does not match the recorded event" };
     this.events.push(event);
     for (const k of keys) this.keys.add(k);
     this.apply(event);
@@ -141,9 +153,7 @@ export class EventLog {
     agentId: string,
     sheet: { tradingDate: string; orders: Order[]; runSeq: number; inputSeqs: number[] },
   ): Promise<AppendResult & { rejected?: RejectReason }> {
-    // AIの出力から来る値なので、形が違っても例外にせず拒否として残す
-    const seqsOk = Number.isSafeInteger(sheet.runSeq) && Array.isArray(sheet.inputSeqs) && sheet.inputSeqs.every((s) => Number.isSafeInteger(s));
-    const ordersOk = Array.isArray(sheet.orders) && sheet.orders.every((o) => typeof o === "object" && o !== null && !Array.isArray(o));
+    const seqsOk = seqsShapeOk(sheet.runSeq, sheet.inputSeqs);
     const committed: Draft = {
       type: "order_sheet.committed",
       recordedAt,
@@ -152,24 +162,34 @@ export class EventLog {
       payload: { agentId, tradingDate: sheet.tradingDate, orders: sheet.orders, runSeq: sheet.runSeq, inputSeqs: sheet.inputSeqs, holidaysSha256: this.ctx.holidaysSha256 },
     };
     if (!this.agents.has(agentId)) return { ok: false, reason: `unknown agent ${agentId}` };
-    const reject = !seqsOk ? "invalid_sheet" : !ordersOk ? "invalid_order" : this.sheetRejection(committed);
+    const reject = this.rejectionOf(committed);
     if (!reject) {
       const r = await this.write(committed);
       if (r.ok) return r;
     }
     const reason = reject ?? "invalid_sheet";
-    const runOk = Number.isSafeInteger(sheet.runSeq) && this.events[sheet.runSeq - 1]?.type === "agent.run";
+    // 元の run と入力は、すべて前のイベントを指すときだけ残す（照合のとき、同じ拒否の理由を出し直せるように）
+    const next = this.events.length + 1;
+    const seqsKept = seqsOk && [sheet.runSeq, ...sheet.inputSeqs].every((s) => s >= 1 && s < next);
     const base: Draft = {
       type: "order_sheet.rejected",
       recordedAt,
       actor: "system",
-      refs: runOk ? [sheet.runSeq] : [],
-      payload: { agentId, tradingDate: isValidDate(sheet.tradingDate) ? sheet.tradingDate : "invalid", reason, ...(runOk ? { runSeq: sheet.runSeq } : {}) },
+      refs: seqsKept ? committed.refs : [],
+      payload: { agentId, tradingDate: isValidDate(sheet.tradingDate) ? sheet.tradingDate : "invalid", reason, ...(seqsKept ? { runSeq: sheet.runSeq, inputSeqs: sheet.inputSeqs } : {}) },
     };
     // 受け取った注文票を残す（§3.2）。正規化できない中身なら、その旨だけを残す
     let r = await this.write({ ...base, payload: { ...base.payload, orders: sheet.orders } });
     if (!r.ok) r = await this.write({ ...base, payload: { ...base.payload, ordersUnreadable: true } });
     return r.ok ? { ...r, rejected: reason } : r;
+  }
+
+  /** 注文票を拒む理由（形の検査、停止、validateSheet など）。AIの出力から来る値なので、形が違っても例外にしない */
+  private rejectionOf(d: Draft): RejectReason | null {
+    const p = d.payload;
+    if (!seqsShapeOk(p.runSeq, p.inputSeqs)) return "invalid_sheet";
+    if (!Array.isArray(p.orders) || !p.orders.every((o) => typeof o === "object" && o !== null && !Array.isArray(o))) return "invalid_order";
+    return this.sheetRejection(d);
   }
 
   private sheetRejection(d: Draft): RejectReason | null {
@@ -241,7 +261,17 @@ export class EventLog {
         if (this.isSuspended(agentId, "posts")) return "suspended";
         return this.runProblem(d, agentId, "post");
       case "order_sheet.committed":
-        return this.sheetRejection(d);
+        // 保存済みのログの照合で、祝日の一覧が記録と違うときは、営業日の判定をやり直せない（D-031）
+        if (p.holidaysSha256 !== this.ctx.holidaysSha256) return `holidays table ${String(p.holidaysSha256)} differs from the current one`;
+        return this.rejectionOf(d);
+      case "order_sheet.rejected": {
+        const allowed = ["agentId", "tradingDate", "reason", "runSeq", "inputSeqs", "orders", "ordersUnreadable"];
+        if (Object.keys(p).some((k) => !allowed.includes(k))) return "unknown field in a rejected sheet";
+        if (p.ordersUnreadable === true) return typeof p.reason === "string" && p.orders === undefined ? null : "invalid rejected sheet";
+        // 受け取った注文票から、同じ時点・同じ検査で拒否の理由を出し直し、記録と同じであること
+        const again = this.rejectionOf({ ...d, type: "order_sheet.committed", payload: { agentId: p.agentId, tradingDate: p.tradingDate, orders: p.orders, runSeq: p.runSeq, inputSeqs: p.inputSeqs, holidaysSha256: this.ctx.holidaysSha256 } });
+        return again !== null && again === p.reason ? null : `rejection reason ${String(p.reason)} does not match ${String(again)}`;
+      }
       case "fills.executed": {
         const pend = st!.pending;
         if (!pend || pend.tradingDate !== p.tradingDate || pend.seq !== p.sheetSeq) return "no committed sheet for this trading date";
@@ -266,6 +296,9 @@ export class EventLog {
           if (e?.type !== "corporate_action.announced" || (e.payload as Record<string, unknown>).exDate !== p.exDate) return `announcedSeqs must be announcements with exDate ${String(p.exDate)}`;
           if (i > 0 && (s as number) <= (seqs[i - 1] as number)) return "announcedSeqs must be in ascending order";
         }
+        // 権利落ち日がこの日の公表は、保有の有無によらず全部渡す（反映の漏れを防ぐ）
+        const all = this.announced.get(p.exDate as string) ?? [];
+        if (all.length !== seqs.length) return `announcedSeqs must include every announcement with exDate ${String(p.exDate)}`;
         return null;
       }
       case "agent.suspended":
@@ -296,6 +329,12 @@ export class EventLog {
       case "prices.close":
         this.closes.set(p.date as string, e.seq);
         break;
+      case "corporate_action.announced": {
+        const list = this.announced.get(String(p.exDate)) ?? [];
+        list.push(e.seq);
+        this.announced.set(String(p.exDate), list);
+        break;
+      }
       case "market.closed":
         this.closed.set(p.date as string, e.seq);
         break;
@@ -401,5 +440,7 @@ function payloadSeqs(p: Record<string, unknown>): unknown[] {
   for (const f of SEQ_LIST_FIELDS) if (Array.isArray(p[f])) out.push(...(p[f] as unknown[]));
   return out;
 }
+
+const seqsShapeOk = (runSeq: unknown, inputSeqs: unknown): boolean => Number.isSafeInteger(runSeq) && Array.isArray(inputSeqs) && inputSeqs.every((x) => Number.isSafeInteger(x));
 
 const isTime = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
