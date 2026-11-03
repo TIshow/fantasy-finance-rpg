@@ -1,6 +1,8 @@
 // 追記の処理（docs/EVENT_LOG.md §3・§4）。メモリ上のログに、検査を通ったイベントだけを足す。
 // 時計は持たない。recordedAt はサーバーが1回だけ決めて渡す。一意キーは中身から作り、呼び出し側には任せない。
 // 中身の検査は、順序と時点の判定に使う項目だけ。口座の再計算と照合、訂正・調整は別のPR（§8の3）。
+// 祝日の一覧の版と取引対象は、ログの holidays.adopted・universe.set が決める（§3.5）。照合でも、記録したときの版を使う。
+import { coveredHolidays, type HolidayTable } from "../holidays/table";
 import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusinessDay, tradingDateFor, validateSheet } from "../ledger/ledger";
 import { INITIAL_CASH, type Account, type Order, type RejectReason } from "../ledger/types";
 import { CanonicalizeError } from "./canonical";
@@ -16,6 +18,8 @@ const WRITERS: Record<EventType, Writer> = {
   "prices.close": "system",
   "corporate_action.announced": "system",
   "market.closed": "operator",
+  "holidays.adopted": "operator",
+  "universe.set": "operator",
   "agent.registered": "operator",
   "agent.run": "system",
   "post.published": "agent",
@@ -49,12 +53,25 @@ const AGENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "agent.resumed",
 ]);
 
+/** 営業日を判定するイベント。ほかに営業日を使うのは登録済みのAIのイベントで、登録には一覧が要るので、ここに入れなくてよい */
+const NEEDS_CALENDAR: ReadonlySet<EventType> = new Set<EventType>(["prices.open", "prices.close", "market.closed", "agent.registered"]);
+
+/** 営業日の判定を通した日付の項目（§3.5）。ログが使った一番遅い日付を覚えるのに使う。公表の権利落ち日と臨時休場の日は、判定を通さないので入れない */
+const JUDGED_DATES: Partial<Record<EventType, string[]>> = {
+  "prices.open": ["date"],
+  "prices.close": ["date"],
+  "agent.registered": ["startDate"],
+  "order_sheet.committed": ["tradingDate"],
+  "valuation.recorded": ["date"],
+  "corporate_actions.applied": ["asOf", "exDate"],
+};
+
+/** 銘柄コード（例：7203、130A。テストでは架空の英字） */
+const SYMBOL = /^[0-9A-Z]{3,8}$/;
+
 export interface AppendContext {
-  universe: ReadonlySet<string>;
-  /** holidaysFor() の結果。臨時休場（market.closed）はこのログが足す */
-  holidays: ReadonlySet<string>;
-  /** 使った祝日の一覧の版（HolidayTable.contentSha256） */
-  holidaysSha256: string;
+  /** これまでに採用した祝日の一覧を、版（contentSha256）で引けるように渡す。どの版を使うかはログの holidays.adopted が決める */
+  holidayTables: ReadonlyMap<string, HolidayTable>;
   /** そのAIのいまの口座（再計算で得る） */
   accountOf(agentId: string): Account;
 }
@@ -101,11 +118,17 @@ export class EventLog {
   private readonly commits = new Set<string>();
   /** 権利落ち日ごとの公表の seq（記録の順） */
   private readonly announced = new Map<string, number[]>();
+  /** いま採用している祝日の一覧と、範囲の外を例外にする集合 */
+  private calendar: { table: HolidayTable; covered: ReadonlySet<string> } | null = null;
+  private universe: ReadonlySet<string> = new Set();
+  /** 記録に出た一番遅い日付。一覧を替えても、ここまでの休場日は変えさせない */
+  private latest = "";
 
   constructor(private readonly ctx: AppendContext) {}
 
   holidays(): ReadonlySet<string> {
-    return new WithClosures(this.ctx.holidays, this.closed);
+    if (!this.calendar) throw new Error("no holiday table adopted");
+    return new WithClosures(this.calendar.covered, this.closed);
   }
 
   /** 1件を足す。どれかの検査に通らなければ、何も変えずに理由を返す。注文票の確定と拒否は commitSheet からだけ書ける */
@@ -159,7 +182,7 @@ export class EventLog {
       recordedAt,
       actor: `agent:${agentId}`,
       refs: seqsOk ? [...new Set([sheet.runSeq, ...sheet.inputSeqs])] : [],
-      payload: { agentId, tradingDate: sheet.tradingDate, orders: sheet.orders, runSeq: sheet.runSeq, inputSeqs: sheet.inputSeqs, holidaysSha256: this.ctx.holidaysSha256 },
+      payload: { agentId, tradingDate: sheet.tradingDate, orders: sheet.orders, runSeq: sheet.runSeq, inputSeqs: sheet.inputSeqs, holidaysSha256: this.calendar?.table.contentSha256 ?? null },
     };
     if (!this.agents.has(agentId)) return { ok: false, reason: `unknown agent ${agentId}` };
     const reject = this.rejectionOf(committed);
@@ -200,13 +223,13 @@ export class EventLog {
     if (this.isSuspended(agentId, "orders")) return "suspended";
     const tradingDate = p.tradingDate;
     if (!isValidDate(tradingDate) || !Array.isArray(p.orders)) return "invalid_sheet";
-    if (p.holidaysSha256 !== this.ctx.holidaysSha256) return "invalid_sheet";
+    if (p.holidaysSha256 !== this.calendar?.table.contentSha256) return "invalid_sheet";
     // LLMが見た入力全体（元の run の入力）を、約定日の判断に使ってよい情報かで確かめる
     const run = this.events[(p.runSeq as number) - 1];
     if (this.runProblem(d, agentId, "order") || this.inputProblem(p.inputSeqs, tradingDate) || this.inputProblem((run?.payload as Record<string, unknown> | undefined)?.inputSeqs, tradingDate)) return "invalid_sheet";
     const v = validateSheet(
       { agentId, tradingDate, committedAt: d.recordedAt, orders: p.orders as Order[] },
-      { universe: this.ctx.universe, alreadyCommitted: this.commits.has(`${agentId}:${tradingDate}`), account: this.ctx.accountOf(agentId), holidays: this.holidays(), accountAsOf: st.asOf },
+      { universe: this.universe, alreadyCommitted: this.commits.has(`${agentId}:${tradingDate}`), account: this.ctx.accountOf(agentId), holidays: this.holidays(), accountAsOf: st.asOf },
     );
     if (!v.ok) return v.reason;
     // 前の注文票が約定していない、またはその日以後をもう評価した口座では確定できない（§3.3 の順序）
@@ -227,7 +250,8 @@ export class EventLog {
     const everyone = (d.type === "agent.suspended" || d.type === "agent.resumed") && p.agentId === "*";
     if (AGENT_TYPES.has(d.type) && !st && !everyone) return `unknown agent ${String(p.agentId)}`;
     if (d.type === "agent.registered" && st) return `agent ${agentId} already registered`;
-    const H = this.holidays();
+    if (!this.calendar && NEEDS_CALENDAR.has(d.type)) return "no holiday table adopted";
+    const H = this.calendar ? this.holidays() : new Set<string>();
     switch (d.type) {
       case "source.captured": {
         const { publishedAt, fetchedAt } = p;
@@ -249,6 +273,27 @@ export class EventLog {
         for (const a of this.agents.values()) if ((a.valuedDate !== null && a.valuedDate >= date) || a.asOf >= date) return "an agent already passed this date";
         return null;
       }
+      case "holidays.adopted": {
+        const next = this.ctx.holidayTables.get(String(p.holidaysSha256));
+        if (!next || next.contentSha256 !== p.holidaysSha256) return `unknown holiday table ${String(p.holidaysSha256)}`;
+        if (!this.calendar) return null;
+        if (this.calendar.table.contentSha256 === next.contentSha256) return "this holiday table is already adopted";
+        return calendarChange(this.calendar.table, next, this.latest);
+      }
+      case "universe.set": {
+        const symbols = p.symbols;
+        if (!Array.isArray(symbols) || !symbols.every((x, i) => typeof x === "string" && SYMBOL.test(x) && (i === 0 || x > (symbols[i - 1] as string)))) return "symbols must be distinct symbol codes in ascending order";
+        if (symbols.length === this.universe.size && symbols.every((x) => this.universe.has(x as string))) return "symbols are the same as the current universe";
+        const removed = [...this.universe].filter((x) => !symbols.includes(x));
+        if (removed.length === 0) return null;
+        // 外した銘柄は注文できなくなるので、持っている、または約定待ちの注文票があるAIがいれば外さない（上場廃止の扱いは §9）
+        for (const [id, a] of this.agents) {
+          if (a.pending) return `agent ${id} has a committed sheet that is not filled yet`;
+          const held = removed.find((x) => (this.ctx.accountOf(id).holdings[x]?.qty ?? 0) > 0);
+          if (held) return `agent ${id} holds ${held}`;
+        }
+        return null;
+      }
       case "agent.registered": {
         const start = p.startDate;
         // 開始日は、登録した時点で締めがまだ来ていない最初の営業日だけ。先の日にすると、その前の日を臨時休場にできなくなるため
@@ -262,14 +307,14 @@ export class EventLog {
         return this.runProblem(d, agentId, "post");
       case "order_sheet.committed":
         // 保存済みのログの照合で、祝日の一覧が記録と違うときは、営業日の判定をやり直せない（D-031）
-        if (p.holidaysSha256 !== this.ctx.holidaysSha256) return `holidays table ${String(p.holidaysSha256)} differs from the current one`;
+        if (p.holidaysSha256 !== this.calendar?.table.contentSha256) return `holidays table ${String(p.holidaysSha256)} is not the adopted one`;
         return this.rejectionOf(d);
       case "order_sheet.rejected": {
         const allowed = ["agentId", "tradingDate", "reason", "runSeq", "inputSeqs", "orders", "ordersUnreadable"];
         if (Object.keys(p).some((k) => !allowed.includes(k))) return "unknown field in a rejected sheet";
         if (p.ordersUnreadable === true) return typeof p.reason === "string" && p.orders === undefined ? null : "invalid rejected sheet";
         // 受け取った注文票から、同じ時点・同じ検査で拒否の理由を出し直し、記録と同じであること
-        const again = this.rejectionOf({ ...d, type: "order_sheet.committed", payload: { agentId: p.agentId, tradingDate: p.tradingDate, orders: p.orders, runSeq: p.runSeq, inputSeqs: p.inputSeqs, holidaysSha256: this.ctx.holidaysSha256 } });
+        const again = this.rejectionOf({ ...d, type: "order_sheet.committed", payload: { agentId: p.agentId, tradingDate: p.tradingDate, orders: p.orders, runSeq: p.runSeq, inputSeqs: p.inputSeqs, holidaysSha256: this.calendar?.table.contentSha256 } });
         return again !== null && again === p.reason ? null : `rejection reason ${String(p.reason)} does not match ${String(again)}`;
       }
       case "fills.executed": {
@@ -322,7 +367,16 @@ export class EventLog {
     const p = e.payload as Record<string, unknown>;
     const agentId = p.agentId as string;
     const st = this.agents.get(agentId);
+    for (const f of JUDGED_DATES[e.type] ?? []) if (isValidDate(p[f]) && (p[f] as string) > this.latest) this.latest = p[f] as string;
     switch (e.type) {
+      case "holidays.adopted": {
+        const table = this.ctx.holidayTables.get(p.holidaysSha256 as string)!;
+        this.calendar = { table, covered: coveredHolidays(table, `${table.firstYear}-01-01`, `${table.lastYear}-12-31`) };
+        break;
+      }
+      case "universe.set":
+        this.universe = new Set(p.symbols as string[]);
+        break;
       case "prices.open":
         this.opens.set(p.date as string, e.seq);
         break;
@@ -397,6 +451,19 @@ export class EventLog {
     }
     return null;
   }
+}
+
+/**
+ * 祝日の一覧を替えてよいか（§3.5）。ログがもう使った日付（latest まで）の休場日が同じで、
+ * 新しい一覧が、いまの一覧の始まりの年から latest の年までを覆うこと。latest より後の日付は直してよい
+ */
+function calendarChange(cur: HolidayTable, next: HolidayTable, latest: string): string | null {
+  const lastUsed = latest === "" ? cur.firstYear : Number(latest.slice(0, 4));
+  if (next.firstYear > cur.firstYear || next.lastYear < lastUsed) return `holiday table must cover ${cur.firstYear}-${lastUsed}`;
+  for (const d of new Set([...cur.dates, ...next.dates])) {
+    if (Number(d.slice(0, 4)) >= cur.firstYear && d <= latest && cur.dates.has(d) !== next.dates.has(d)) return `holiday table changes ${d}, which the log already used`;
+  }
+  return null;
 }
 
 /** §3 の一意キー。中身から作る。作れなければ理由を返す */

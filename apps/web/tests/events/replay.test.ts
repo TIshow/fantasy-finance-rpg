@@ -5,12 +5,16 @@ import { sealEvent } from "../../src/events/chain";
 import { bodyHash } from "../../src/events/hash";
 import { Ledger, replay, type ValueStore } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
+import type { HolidayTable } from "../../src/holidays/index";
 import { totalValue } from "../../src/ledger/ledger";
 import { INITIAL_CASH, type Account } from "../../src/ledger/types";
 
 const jst = (date: string, hh: number, mm = 0) => Date.parse(`${date}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00+09:00`);
 const yen = (n: number) => Math.round(n * 10);
-const CTX = { universe: new Set(["AAA"]), holidays: new Set<string>(), holidaysSha256: "a".repeat(64) };
+const table = (sha: string, dates: string[] = []): HolidayTable => ({ firstYear: 2026, lastYear: 2027, sourceSha256: "0".repeat(64), contentSha256: sha, dates: new Set(dates) });
+const [A, B] = ["a".repeat(64), "b".repeat(64)];
+/** 11/12 を祝日に直した版 B も渡しておく（採用するかはログが決める） */
+const CTX = { holidayTables: new Map([table(A), table(B, ["2026-11-12"])].map((t) => [t.contentSha256, t])) };
 const AGENTS = ["alpha", "beta"];
 
 /** ログの外の値の置き場（テストでは乱数を固定） */
@@ -40,6 +44,9 @@ async function start() {
   };
   const sys = (type: Draft["type"], recordedAt: number, payload: Record<string, unknown>, refs: number[] = []): Draft => ({ type, recordedAt, actor: "system", refs, payload });
   const prices = async (type: "prices.open" | "prices.close", at: number, date: string, values: Record<string, number | null>) => add(sys(type, at, { date, valuesHash: await store.put(values) }));
+  const op = (type: Draft["type"], recordedAt: number, payload: Record<string, unknown>): Draft => ({ type, recordedAt, actor: "operator:owner", refs: [], payload });
+  await add(op("holidays.adopted", 0, { holidaysSha256: A }));
+  await add(op("universe.set", 0, { symbols: ["AAA"] }));
   const announce = async (at: number, exDate: string, value: unknown) => add(sys("corporate_action.announced", at, { symbol: "AAA", exDate, valuesHash: await store.put(value) }));
 
   // alpha・beta が 11/10 の寄り付きで AAA を100株ずつ買う注文票を確定する
@@ -65,7 +72,7 @@ async function start() {
     const ca = await ledger.computeCorporate(id, "2026-11-10", "2026-11-11", announcedSeqs);
     return add(sys("corporate_actions.applied", at, { agentId: id, asOf: "2026-11-10", exDate: "2026-11-11", announcedSeqs, ...ca.payload }, announcedSeqs));
   };
-  return { store, ledger, log, add, sys, prices, announce, fills, valuation, postClose };
+  return { store, ledger, log, add, sys, op, prices, announce, fills, valuation, postClose };
 }
 
 /**
@@ -166,7 +173,7 @@ describe("照合で止まるもの", () => {
     const fakeReject = await forge(log.events, { ...base, type: "order_sheet.rejected", actor: "system", payload: { agentId: "alpha", tradingDate: "2026-11-11", reason: "suspended" } });
     await expect(replay(fakeReject, store, CTX)).rejects.toThrow("rejection reason suspended does not match invalid_sheet");
     const run = log.events.find((e) => e.type === "agent.run")!.seq;
-    const nullOrder = await forge(log.events, { ...base, type: "order_sheet.committed", actor: "agent:alpha", keys: ["sheet:alpha:2026-11-11"], refs: [run], payload: { agentId: "alpha", tradingDate: "2026-11-11", orders: [null], runSeq: run, inputSeqs: [], holidaysSha256: CTX.holidaysSha256 } });
+    const nullOrder = await forge(log.events, { ...base, type: "order_sheet.committed", actor: "agent:alpha", keys: ["sheet:alpha:2026-11-11"], refs: [run], payload: { agentId: "alpha", tradingDate: "2026-11-11", orders: [null], runSeq: run, inputSeqs: [], holidaysSha256: A } });
     await expect(replay(nullOrder, store, CTX)).rejects.toThrow("(order_sheet.committed): invalid_order");
     // 中身と口座のハッシュの両方を偽って連鎖を作り直しても、台帳の再計算と合わない
     const i = log.events.findIndex((e) => e.type === "fills.executed");
@@ -176,9 +183,35 @@ describe("照合で止まるもの", () => {
     await expect(replay(tampered, store, CTX)).rejects.toThrow("(fills.executed): recorded");
   });
 
-  it("祝日の一覧が記録と違えば、営業日の判定をやり直さずに止まる", async () => {
-    const { store, log } = await world();
-    await expect(replay(log.events, store, { ...CTX, holidaysSha256: "b".repeat(64) })).rejects.toThrow("differs from the current one");
+  it("途中で祝日の一覧を替えたログは、記録したときの版で照合でき、使った版が渡されなければ止まる", async () => {
+    const { store, ledger, log, add, op } = await world();
+    await add(op("holidays.adopted", jst("2026-11-10", 16), { holidaysSha256: B }));
+    expect((await replay(log.events, store, CTX)).account("alpha")).toEqual(ledger.account("alpha"));
+    await expect(replay(log.events, store, { holidayTables: new Map([[B, CTX.holidayTables.get(B)!]]) })).rejects.toThrow(`seq 1 (holidays.adopted): unknown holiday table ${A}`);
+  });
+
+  it("取引対象を替えたあとの確定と拒否も、記録したときの取引対象と版で照合できる", async () => {
+    const { store, ledger, log, add, sys, op } = await world();
+    await add(op("universe.set", jst("2026-11-10", 16), { symbols: ["AAA", "BBB"] }));
+    await add(op("holidays.adopted", jst("2026-11-10", 16, 1), { holidaysSha256: B }));
+    const run = await add(sys("agent.run", jst("2026-11-10", 20), { agentId: "beta", purpose: "order", inputSeqs: [], ok: true }));
+    const s = (symbol: string) => ({ tradingDate: "2026-11-11", orders: [{ symbol, side: "buy" as const, qty: 100 }], runSeq: run, inputSeqs: [] });
+    const rejected = await log.commitSheet(jst("2026-11-10", 21), "beta", s("CCC"));
+    expect(rejected.ok && rejected.rejected).toBe("unknown_symbol");
+    if (rejected.ok) await ledger.apply(rejected.event);
+    const committed = await log.commitSheet(jst("2026-11-10", 22), "beta", s("BBB"));
+    expect(committed.ok && !committed.rejected && committed.event.payload).toMatchObject({ holidaysSha256: B });
+    if (committed.ok) await ledger.apply(committed.event);
+    expect((await replay(log.events, store, CTX)).account("beta")).toEqual(ledger.account("beta"));
+  });
+
+  it("持っている銘柄は取引対象から外せない（照合でも同じ）", async () => {
+    const { store, log, op } = await world();
+    const remove = op("universe.set", jst("2026-11-10", 16), { symbols: [] });
+    const r = await log.append(remove);
+    expect(r.ok ? "ok" : r.reason).toBe("agent alpha holds AAA");
+    const forged = await forge(log.events, { ...remove, keys: [] });
+    await expect(replay(forged, store, CTX)).rejects.toThrow(`seq ${forged.length} (universe.set): agent alpha holds AAA`);
   });
 
   it("ログの外の値が書き換わっていたり、無かったり、形が違えば止まる", async () => {
