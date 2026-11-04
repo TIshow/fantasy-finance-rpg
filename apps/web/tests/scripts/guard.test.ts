@@ -505,9 +505,14 @@ describe("役の担当パスの正本（.claude/roles/paths.json）", () => {
     for (const r of raw.readOnly) expect(checkWrite(r, "/repo/docs/x.md", "/repo", env) ?? "").toContain("読み取り専用");
   });
 
+  it("役の名前でないもの（constructor・__proto__ など）は、制限なしにせず止める", () => {
+    for (const r of ["constructor", "__proto__", "toString"]) expect(checkWrite(r, "/repo/docs/x.md", "/repo", env) ?? "", r).toContain("不明な役名");
+    expect(checkWrite("general-purpose", "/repo/docs/x.md", "/repo", env)).toBeNull(); // 知らない普通の役は、守りの設定以外は制限しない
+  });
+
   it("役と守りの設定の中身を固定する（誤って消すと、ここで気づく）", () => {
     expect(raw.readOnly.sort()).toEqual(["Explore", "Plan", "code-reviewer"]);
-    for (const p of [".claude/", ".github/", "AGENTS.md", "CLAUDE.md", "apps/web/scripts/check-purity.ts", "apps/web/tests/scripts/"]) expect(raw.protected).toContain(p);
+    for (const p of [".claude/", ".github/", "AGENTS.md", "CLAUDE.md", "apps/web/scripts/check-purity.ts", "apps/web/tests/scripts/", "scripts/"]) expect(raw.protected).toContain(p);
     expect(raw.roles.core).toEqual(expect.arrayContaining(["apps/web/src/ledger/", "apps/web/src/events/", "apps/web/src/holidays/"]));
     expect(raw.roles.web).not.toContain("apps/web/src/ledger/");
     expect(raw.roles.verifier).toEqual(["apps/web/tests/adversarial/"]);

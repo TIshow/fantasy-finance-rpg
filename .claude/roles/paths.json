@@ -1,5 +1,5 @@
 {
-  "_comment": "役の担当パスの正本。guard.ts（書き込み前の制限）が読む。完了前の検査（scripts/check-boundaries.sh）も、追加されたらこれを読む。パスはリポジトリのルートからの相対。末尾が / のものはその下すべて。変更はownerだけ（.claude/ は守りの設定）。",
+  "_comment": "役の担当パスの正本。guard.ts（書き込み前の制限）が読む。完了前の検査（scripts/check-boundaries.sh）も読む（そちらは基準ブランチの版を使う）。パスはリポジトリのルートからの相対。末尾が / のものはその下すべて。変更はownerだけ（.claude/ は守りの設定）。",
   "roles": {
     "lead": ["docs/", "README.md"],
     "core": [
@@ -20,7 +20,7 @@
   "readOnly": ["code-reviewer", "Explore", "Plan"],
   "protected": [
     ".claude/", ".github/", "AGENTS.md", "CLAUDE.md", ".tool-versions", "apps/web/scripts/check-purity.ts", "apps/web/tests/scripts/",
-    "apps/web/package.json", "apps/web/package-lock.json", "apps/web/next.config.ts", "apps/web/tsconfig.json"
+    "scripts/", "apps/web/package.json", "apps/web/package-lock.json", "apps/web/next.config.ts", "apps/web/tsconfig.json"
   ],
   "generated": ["node_modules/", "apps/web/node_modules/", "apps/web/.next/", "apps/web/coverage/", "apps/web/tsconfig.tsbuildinfo"]
 }
