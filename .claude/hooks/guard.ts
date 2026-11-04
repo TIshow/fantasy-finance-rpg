@@ -7,12 +7,14 @@
 // 守りの本体はPRの境界（CODEOWNERS・CI・ownerの手動マージ）で、このフックはその手前の安全網。
 // Node単体で動かす（依存なし）。テスト：apps/web/tests/scripts/guard.test.ts
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export type HookInput = { tool_name?: string; tool_input?: Record<string, unknown>; cwd?: string };
+export type HookInput = { tool_name?: string; tool_input?: Record<string, unknown>; cwd?: string; agent_type?: string };
 /** 実行環境への依存（テストで差し替える） */
-export type Env = { branch: () => string };
+export type Env = { branch: () => string; /** path が属する worktree のルート（その場所での git rev-parse --show-toplevel）。git の外なら null。役が決まっているときだけ呼ぶ */ root: (path: string) => string | null };
 
 const MAIN = new Set(["main", "master"]);
 
@@ -40,12 +42,15 @@ function parseSeq(text: string, start: number, depth: number, out: string[][], i
   let tok = "";
   let has = false;
   let redir = false;
+  let quoted = false;
   const pending: string[] = [];
   const flushTok = () => {
-    if (has) cur.push(tok);
+    // 引用符の中から来た "<" ">" で始まる語（"> 引用" や ">= 0"）は、リダイレクトではないので印を付けて区別する
+    if (has) cur.push(quoted && !redir && /^[<>]/.test(tok) ? `\u0002${tok}` : tok);
     tok = "";
     has = false;
     redir = false;
+    quoted = false;
   };
   const flushCmd = () => {
     flushTok();
@@ -60,6 +65,7 @@ function parseSeq(text: string, start: number, depth: number, out: string[][], i
       const end = j < 0 ? text.length : j;
       tok += text.slice(i + 1, end);
       has = true;
+      quoted = true;
       i = end;
     } else if (c === '"') {
       let j = i + 1;
@@ -78,6 +84,7 @@ function parseSeq(text: string, start: number, depth: number, out: string[][], i
         } else tok += d;
       }
       has = true;
+      quoted = true;
       i = j;
     } else if (c === "\\") {
       if (text[i + 1] !== "\n") {
@@ -301,12 +308,157 @@ function checkGh(args: string[]): string | null {
   return `gh api ${p} への書き込みは使えない（許すのは、PR・issueの作成と更新、コメント、レビューだけ。マージ・ref・ファイル・設定は ownerが行う）`;
 }
 
+// ---- 役ごとの書き込み先 ----
+
+/** 役ごとに書いてよいパス（worktree のルートからの相対。末尾が / ならその下、なければそのファイルだけ）。docs/WORKFLOW.md §2 と .claude/agents/<役>.md に合わせる */
+const ROLE_PATHS: Record<string, string[]> = {
+  lead: ["docs/", "README.md"],
+  core: ["apps/web/src/ledger/", "apps/web/src/events/", "apps/web/src/holidays/", "apps/web/tests/ledger/", "apps/web/tests/events/", "apps/web/tests/holidays/"],
+  platform: [
+    ...["store", "ingest", "runner", "llm"].flatMap((d) => [`apps/web/src/${d}/`, `apps/web/tests/${d}/`]),
+    ...["apps/web/db/", "apps/web/scripts/"],
+  ],
+  web: ["app", "components", "view"].flatMap((d) => [`apps/web/src/${d}/`, `apps/web/tests/${d}/`]),
+  verifier: ["apps/web/tests/adversarial/"],
+};
+/** 書かない役（Bash の書き込みも止める） */
+const READ_ONLY = new Set(["code-reviewer", "Explore", "Plan"]);
+/** どの役も書かない守りの設定（.github/CODEOWNERS の、ownerの承認が要るパスのうち、役が触りうるもの） */
+const PROTECTED = [
+  ".claude/", ".github/", "AGENTS.md", "CLAUDE.md", ".tool-versions", "apps/web/scripts/check-purity.ts", "apps/web/tests/scripts/",
+  "apps/web/package.json", "apps/web/package-lock.json", "apps/web/next.config.ts", "apps/web/tsconfig.json",
+];
+/** 生成物・取得物（書いても履歴に残らない） */
+const GENERATED = ["node_modules/", "apps/web/node_modules/", "apps/web/.next/", "apps/web/coverage/", "apps/web/tsconfig.tsbuildinfo"];
+
+/** list に入るか。末尾が / のものはその下。self なら、そのディレクトリ自身（mkdir -p・rm -rf .claude など）も含める */
+const inList = (rel: string, list: string[], self = false) => list.some((p) => (p.endsWith("/") ? rel.startsWith(p) || (self && rel === p.slice(0, -1)) : rel === p));
+
+/** realpath。存在しない末尾は、存在する親の実体のパスにつなぐ（シンボリックリンクや .. での抜け道を塞ぐ） */
+export function realpathLoose(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    const d = dirname(p);
+    return d === p ? p : join(realpathLoose(d), basename(p));
+  }
+}
+
+/** シェルのワイルドカード（* ? [..] {a,b}）を正規表現にする。先頭の . にも当たる（安全側） */
+const globToRe = (g: string): RegExp =>
+  new RegExp(`^${g.replace(/[.+^$()|\\]/g, "\\$&").replace(/\[!/g, "[^").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\{([^{}]*)\}/g, (_, x: string) => `(?:${x.split(",").join("|")})`)}$`);
+
+/** role が target（絶対パス、または cwd からの相対）に書いてよいか。だめなら理由。role が undefined（ownerが直接動かすセッション）は制限しない。判定は target が属する worktree のルートからの相対パスで行う */
+export function checkWrite(role: string | undefined, target: string, cwd: string, env: Env): string | null {
+  if (role === undefined) return null;
+  if (target.startsWith("~") && target !== "~" && !target.startsWith("~/")) return `${target} の形（~ユーザー名）は調べられない。パスを直接書く`;
+  const expanded = target === "~" || target.startsWith("~/") ? join(homedir(), target.slice(1)) : target;
+  const abs = realpathLoose(resolve(cwd, expanded));
+  const root = env.root(abs);
+  const rel = root === null ? ".." : relative(realpathLoose(root), abs).split(sep).join("/");
+  if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
+    return [realpathLoose("/tmp"), realpathLoose(tmpdir()), "/dev"].some((t) => abs.startsWith(t + sep)) ? null : `リポジトリの外（${target}）には書かない（/tmp は可）`;
+  }
+  if (READ_ONLY.has(role)) return `${role} は読み取り専用の役。ファイルは書かない（${rel}）`;
+  if (inList(rel, GENERATED, true)) return null;
+  const guardedAncestor = rel === "" || PROTECTED.some((p) => p.startsWith(`${rel}/`));
+  const globHit = /[*?[{]/.test(rel) && PROTECTED.some((p) => globToRe(rel).test(p.replace(/\/$/, "")));
+  if (inList(rel, PROTECTED, true) || guardedAncestor || globHit)
+    return `${rel || "."} は守りの設定（またはそれを含む場所）で、ownerだけが変更する。必要ならissueのコメントでleadに頼む（WORKFLOW §5）`;
+  const allowed = ROLE_PATHS[role];
+  if (allowed === undefined || inList(rel, allowed, true)) return null;
+  return `${role} の担当外のパス（${rel}）。担当：${allowed.join("・")}。必要ならissueのコメントでleadに頼む（WORKFLOW §5）`;
+}
+
+/** 実行するプログラムの前に付く語と、値を取るオプションの正規表現・飛ばす位置引数の数 */
+const WRAPPERS: Record<string, [RegExp, number]> = {
+  sudo: [/^-[ugChprtUT]$/, 0], env: [/^-[uSC]$/, 0], nohup: [/^$/, 0], time: [/^$/, 0], command: [/^$/, 0], nice: [/^-n$/, 0], exec: [/^$/, 0], builtin: [/^$/, 0], timeout: [/^-[ks]$/, 1],
+};
+/** 値を取るオプション（その値を書き込み先と取り違えない）と、つなげて書ける短いオプションの値の文字 */
+const VALUE_OPTS: Record<string, string[]> = {
+  touch: ["-d", "-t", "-r", "--date", "--reference"], mkdir: ["-m", "--mode"], truncate: ["-s", "-r", "--size", "--reference"],
+  install: ["-m", "-o", "-g", "--mode", "--owner", "--group"], chmod: ["--reference"], chown: ["--reference"],
+};
+const SHORT_VALUE: Record<string, string> = { cp: "t", mv: "t", install: "tmog", ln: "t", sed: "ef", touch: "dtr", mkdir: "m", truncate: "sr" };
+const WRITERS = new Set(["tee", "sed", "cp", "mv", "install", "ln", "rm", "rmdir", "unlink", "touch", "mkdir", "truncate", "chmod", "chown", "dd", "git"]);
+
+/** コマンドが書き込む先。うっかり検出の範囲：リダイレクト、tee、sed -i、cp・mv・install・ln、rm・rmdir・unlink、touch・mkdir・truncate、chmod・chown、dd of=、git mv・git rm。`$` を含む語は展開されるので調べない */
+export function writeTargets(cmd: string[]): string[] {
+  const out = cmd.filter((w) => w.startsWith(">") && !/^>+&\d*-?$/.test(w)).map((w) => w.replace(/^>+[|&]?/, "")).filter((w) => w !== "");
+  const words = cmd.filter((w) => !/^[<>]/.test(w)).map((w) => w.replace(/^\u0002/, ""));
+  let i = 0;
+  for (;;) {
+    const w = words[i];
+    const wrap = w === undefined ? undefined : WRAPPERS[base(w)];
+    if (w !== undefined && /^\w+=/.test(w)) i++;
+    else if (wrap !== undefined) {
+      i++;
+      while (words[i]?.startsWith("-")) i += wrap[0].test(words[i]!) ? 2 : 1;
+      i += wrap[1];
+    } else break;
+  }
+  let prog = words[i] === undefined ? "" : base(words[i]!);
+  let args = words.slice(i + 1);
+  if (prog === "git") {
+    const sub = gitSub(args);
+    if (sub?.[0] !== "mv" && sub?.[0] !== "rm") return out.filter((w) => !w.includes("$"));
+    prog = sub[0] === "mv" ? "mv" : "rm";
+    args = sub[1];
+  }
+  if (!WRITERS.has(prog)) return out.filter((w) => !w.includes("$"));
+  args = splitOpts(args, SHORT_VALUE[prog] ?? "");
+  const valueOpts = VALUE_OPTS[prog] ?? [];
+  const isOpt = (a: string) => (prog === "chmod" ? a.startsWith("--") || /^-[RfvcHLP]+$/.test(a) : a.startsWith("-"));
+  const pos: string[] = [];
+  let targetDir: string | undefined;
+  let scriptOpt = false;
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k]!;
+    if (prog === "dd") {
+      if (a.startsWith("of=")) out.push(a.slice(3));
+    } else if (prog === "sed" && ["-e", "-f", "--expression", "--file"].includes(a)) {
+      scriptOpt = true;
+      k++;
+    } else if (a === "-t" && ["cp", "mv", "install", "ln"].includes(prog)) targetDir = args[++k];
+    else if (a.startsWith("--target-directory")) targetDir = a.includes("=") ? a.slice(a.indexOf("=") + 1) : args[++k];
+    else if (valueOpts.includes(a)) k++;
+    else if (!isOpt(a)) pos.push(a);
+  }
+  const has = (re: RegExp) => args.some((a) => re.test(a));
+  switch (prog) {
+    case "dd": break;
+    case "sed": if (has(/^-[a-zA-Z]*i/) || has(/^--in-place/)) out.push(...(scriptOpt ? pos : pos.slice(1))); break;
+    case "install": out.push(...(has(/^-[a-zA-Z]*d/) ? pos : targetDir !== undefined ? [targetDir] : pos.slice(-1))); break;
+    case "cp": case "ln": out.push(...(targetDir !== undefined ? [targetDir] : pos.slice(-1))); break;
+    case "mv": out.push(...pos, ...(targetDir !== undefined ? [targetDir] : [])); break;
+    case "chmod": case "chown": out.push(...pos.slice(has(/^--reference/) ? 0 : 1)); break;
+    default: out.push(...pos);
+  }
+  return out.filter((w) => !w.includes("$"));
+}
+
 // ---- 入口 ----
 
-export function checkBash(command: string, env: Env): string | null {
+export function checkBash(command: string, env: Env, who: { role?: string; cwd?: string } = {}): string | null {
+  // cd の行き先を文字どおりの引数だけ追う。分からなくなったら undefined（相対パスの書き込みは止める）
+  let cwd: string | undefined = who.cwd ?? process.cwd();
   for (const cmd of parseCommands(command)) {
     const secret = cmd.find(touchesSecret);
     if (secret !== undefined) return `秘密のファイル（${secret}）には触れない。必要な値は、ownerが環境変数で渡す`;
+    if (who.role !== undefined) {
+      for (const t of writeTargets(cmd)) {
+        if (cwd === undefined && !isAbsolute(t) && !t.startsWith("~")) return `cd の行き先を読み取れないので、相対パス（${t}）への書き込みは調べられない。絶対パスで書く`;
+        const why = checkWrite(who.role, t, cwd ?? "/", env);
+        if (why) return why;
+      }
+      const first = cmd.find((w) => !/^\w+=/.test(w) && !/^[<>]/.test(w));
+      if (first !== undefined && ["cd", "pushd", "popd"].includes(base(first))) {
+        const args = cmd.slice(cmd.indexOf(first) + 1).filter((w) => !/^[<>]/.test(w) && !(w.startsWith("-") && w !== "-"));
+        const dest = args[0];
+        if (base(first) !== "cd" || args.length > 1 || (dest !== undefined && (dest.includes("$") || dest === "-" || dest.startsWith("~") && !dest.startsWith("~/") && dest !== "~"))) cwd = undefined;
+        else if (cwd !== undefined) cwd = dest === undefined || dest === "~" || dest.startsWith("~/") ? join(homedir(), (dest ?? "").slice(1)) : resolve(cwd, dest);
+      }
+    }
     const g = cmd.findIndex((w) => base(w) === "git");
     if (g >= 0) {
       const sub = gitSub(cmd.slice(g + 1));
@@ -330,7 +482,7 @@ export function decide(input: HookInput, env: Env): string | null {
   let targets: unknown[];
   switch (input.tool_name) {
     case "Bash":
-      return typeof ti.command === "string" ? checkBash(ti.command, env) : null;
+      return typeof ti.command === "string" ? checkBash(ti.command, env, { role: input.agent_type, cwd: input.cwd }) : null;
     case "Read":
     case "Edit":
     case "Write":
@@ -348,7 +500,10 @@ export function decide(input: HookInput, env: Env): string | null {
       return null;
   }
   const hit = targets.find((t): t is string => typeof t === "string" && touchesSecret(t));
-  return hit === undefined ? null : `秘密のファイル（${hit}）は読み書きしない。必要な値は、ownerが環境変数で渡す`;
+  if (hit !== undefined) return `秘密のファイル（${hit}）は読み書きしない。必要な値は、ownerが環境変数で渡す`;
+  if (input.tool_name === "Read" || input.tool_name === "Grep" || input.tool_name === "Glob") return null;
+  const file = ti.file_path ?? ti.notebook_path;
+  return typeof file === "string" ? checkWrite(input.agent_type, file, input.cwd ?? process.cwd(), env) : null;
 }
 
 const here = fileURLToPath(import.meta.url);
@@ -362,7 +517,17 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(here)) {
         return "";
       }
     };
-    const why = decide(input, { branch });
+    // path が属する worktree。path がまだ無ければ、存在する一番近い親で聞く。git の外なら null
+    const root = (path: string) => {
+      let dir = path;
+      while (!existsSync(dir) && dirname(dir) !== dir) dir = dirname(dir);
+      try {
+        return execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd: statSync(dir).isDirectory() ? dir : dirname(dir), encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+      } catch {
+        return null;
+      }
+    };
+    const why = decide(input, { branch, root });
     if (why) {
       console.error(`ブロック：${why}`);
       process.exit(2);
