@@ -246,17 +246,37 @@ async function simulate(seed: number, st: Stats, days = 18) {
   await add(op("universe.set", 0, { symbols: SYMBOLS }));
   for (const [i, id] of AGENTS.entries()) await add(op("agent.registered", jst("2026-11-06", 20, i), { agentId: id, startDate: "2026-11-09", initialCash: INITIAL_CASH }));
   const H = () => log.holidays();
-  // 臨時休場にする日を先に決める（その日を権利落ち日にする公表は出さない。権利落ち日が休場になった扱いは §6.2 の訂正で、別のPR）
+  // 臨時休場にする日を先に決める（その日を権利落ち日にする公表は出さない。権利落ち日が休場になった扱いは §6.2 の訂正で、別のPR）。
+  // 休場の翌営業日を権利落ち日にする公表は出し、休場のあとの追加の引け後処理（§3.3、closedSeq。#71）で反映する
   const dates: string[] = [];
   for (let d = "2026-11-09"; dates.length < days; d = nextBusinessDay(d, H())) dates.push(d);
   const closedPlan = new Set(dates.slice(2, -2).filter(() => r.next() < 0.12));
   const base: Record<string, number> = Object.fromEntries(SYMBOLS.map((s) => [s, r.int(100, 80_000)]));
   const pending = new Map<string, { seq: number; orders: Order[]; date: string }>();
   let lastClose: Record<string, number> = { ...base };
+  let lastCloseSeq = 0;
+  /** 休場 T の翌営業日に権利落ち日がずれる公表。T の前営業日 D の引け後処理のあと、T に追加の処理で反映する */
+  let moved = null as { T: string; D: string; exDate: string; divs: Dividend[]; splits: Split[]; ann: number[] } | null;
+  const announce = async (at: number, exDate: string, divs: Dividend[], splits: Split[], ann: number[], pDiv: number, pSplit: number) => {
+    for (const symbol of SYMBOLS) {
+      for (let k = r.next() < pDiv ? r.int(1, 2) : 0; k > 0; k--) {
+        const perShare = r.int(0, 1_500);
+        divs.push({ symbol, exDate, perShare });
+        ann.push(await add(sys("corporate_action.announced", at + ann.length * 1000, { symbol, exDate, valuesHash: await store.put({ kind: "dividend", perShare }) })));
+      }
+      if (r.next() < pSplit && !splits.some((x) => x.symbol === symbol)) {
+        const [from, to] = r.pick(RATIOS);
+        splits.push({ symbol, exDate, from, to });
+        ann.push(await add(sys("corporate_action.announced", at + ann.length * 1000, { symbol, exDate, valuesHash: await store.put({ kind: "split", from, to }) })));
+      }
+    }
+  };
 
   for (let D = "2026-11-09", n = 0; n < days; n++) {
     // 前の晩に確定した注文票を、始値で約定させる（臨時休場なら全件失効）
-    if (closedPlan.has(D)) await add(op("market.closed", jst(D, 7), { date: D, reason: "test" }));
+    const closedSeq = closedPlan.has(D) ? await add(op("market.closed", jst(D, 7), { date: D, reason: "test" })) : undefined;
+    // 休場のあとにも、ずれた権利落ち日の公表が出ることがある（追加の処理の前なら、それも渡す）
+    if (moved?.T === D && r.next() < 0.4) await announce(jst(D, 8), moved.exDate, moved.divs, moved.splits, moved.ann, 0.15, 0.15);
     const open = closedPlan.has(D) ? undefined : Object.fromEntries(SYMBOLS.map((s) => [s, r.next() < 0.08 ? null : (base[s] = randomPrice(r, base[s]!))]));
     const openSeq = open ? await add(sys("prices.open", jst(D, 9), { date: D, valuesHash: await store.put(open) })) : undefined;
     for (const [i, id] of AGENTS.entries()) {
@@ -270,26 +290,50 @@ async function simulate(seed: number, st: Stats, days = 18) {
       check(id, at);
       pending.delete(id);
     }
+    if (moved?.T === D) {
+      const mv = moved;
+      moved = null;
+      for (const [i, id] of AGENTS.entries()) {
+        // 反映する公表があるうちは、翌営業日の注文票は account_not_ready で拒まれる（公表がなければ追加の処理は書かなくてよい）
+        if (mv.ann.length > 0 && r.next() < 0.5) {
+          const run = await add(sys("agent.run", jst(D, 10, 4 * i), { agentId: id, purpose: "order", inputSeqs: [], ok: true }));
+          const c = await log.commitSheet(jst(D, 10, 4 * i + 1), id, { tradingDate: mv.exDate, orders: [], runSeq: run, inputSeqs: [] });
+          expect(c.ok && c.rejected, `seed ${seed} ${D} ${id} sheet before the catch-up`).toBe("account_not_ready");
+          if (c.ok) await ledger.apply(c.event);
+          bump(st, "sheet blocked until the catch-up");
+        }
+        if (mv.ann.length === 0 && r.next() < 0.5) continue;
+        const ca = await ledger.computeCorporate(id, mv.D, mv.exDate, mv.ann);
+        const draft = sys("corporate_actions.applied", jst(D, 10, 4 * i + 2), { agentId: id, asOf: mv.D, exDate: mv.exDate, announcedSeqs: mv.ann, closedSeq, ...ca.payload }, [...mv.ann, closedSeq!]);
+        await add(draft);
+        const at = `${D} catch-up ${JSON.stringify({ divs: mv.divs, splits: mv.splits, lastClose })}`;
+        const mm = models.get(id)!;
+        const expected = modelCorporate(mm, mv.divs, mv.splits, lastClose, st).map((e) => (e.kind === "split" && e.close !== null ? { ...e, closeSeq: lastCloseSeq } : e));
+        expect(ca.payload.actions, `seed ${seed} ${at} ${id}`).toEqual(expected);
+        check(id, at);
+        bump(st, expected.length > 0 ? "catch-up with actions" : "catch-up without actions");
+        if (expected.some((e) => e.kind === "split" && e.close !== null)) bump(st, "catch-up split with cash in lieu");
+        // 同じ休場の追加の処理は1回だけ
+        expect((await log.append({ ...draft, recordedAt: draft.recordedAt + 1 })).ok, `seed ${seed} ${at} ${id} twice`).toBe(false);
+      }
+      for (const s of mv.splits) base[s.symbol] = Math.min(1_000_000, Math.max(10, Math.round((base[s.symbol]! * s.from) / s.to)));
+    }
     if (!closedPlan.has(D)) {
       lastClose = Object.fromEntries(SYMBOLS.map((s) => [s, (base[s] = randomPrice(r, base[s]!))]));
       const closeSeq = await add(sys("prices.close", jst(D, 15, 30), { date: D, valuesHash: await store.put(lastClose) }));
+      lastCloseSeq = closeSeq;
       // 翌営業日が権利落ち日の配当・分割を公表し、評価のあとに反映する
       const ex = nextBusinessDay(D, H());
       const divs: Dividend[] = [];
       const splits: Split[] = [];
       const ann: number[] = [];
-      if (!closedPlan.has(ex)) {
-        for (const symbol of SYMBOLS) {
-          for (let k = r.next() < 0.2 ? r.int(1, 2) : 0; k > 0; k--) {
-            const perShare = r.int(0, 1_500);
-            divs.push({ symbol, exDate: ex, perShare });
-            ann.push(await add(sys("corporate_action.announced", jst(D, 15, 31) + ann.length * 1000, { symbol, exDate: ex, valuesHash: await store.put({ kind: "dividend", perShare }) })));
-          }
-          if (r.next() < 0.15) {
-            const [from, to] = r.pick(RATIOS);
-            splits.push({ symbol, exDate: ex, from, to });
-            ann.push(await add(sys("corporate_action.announced", jst(D, 15, 31) + ann.length * 1000, { symbol, exDate: ex, valuesHash: await store.put({ kind: "split", from, to }) })));
-          }
+      if (!closedPlan.has(ex)) await announce(jst(D, 15, 31), ex, divs, splits, ann, 0.2, 0.15);
+      else {
+        // 翌営業日 T を休場にする予定：T の次の日（それも休場でなければ）を権利落ち日にする公表を、休場より前に出す
+        const after = dates[dates.indexOf(ex) + 1];
+        if (after && !closedPlan.has(after)) {
+          moved = { T: ex, D, exDate: after, divs: [], splits: [], ann: [] };
+          await announce(jst(D, 15, 35), after, moved.divs, moved.splits, moved.ann, 0.35, 0.3);
         }
       }
       for (const [i, id] of AGENTS.entries()) {
@@ -332,7 +376,7 @@ describe("追記・台帳・replay をつないだ無作為な日々（20シー�
       const b = await simulate(seed, {});
       expect(b.log.events.at(-1)!.hash, `seed ${seed}`).toBe(a.log.events.at(-1)!.hash);
     }
-    for (const k of ["filled:", "reduced:insufficient_cash", "expired:no_open_price", "sheet closed by market.closed", "buy listed before a sell", "split with cash in lieu"]) {
+    for (const k of ["filled:", "reduced:insufficient_cash", "expired:no_open_price", "sheet closed by market.closed", "buy listed before a sell", "split with cash in lieu", "catch-up with actions", "catch-up without actions", "catch-up split with cash in lieu", "sheet blocked until the catch-up"]) {
       expect(st[k] ?? 0, `path ${k} ${JSON.stringify(st)}`).toBeGreaterThan(0);
     }
   }, 120_000);
