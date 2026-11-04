@@ -1,0 +1,165 @@
+// 契約（src/contracts）のメモリ上の簡単な偽物。platform・web のテストが、契約だけに依存して使える。
+import type { Clock, CommitResult, DraftInput, EventStore, LlmPolicy, LlmPort, LlmRequest, LlmResult, MarketDataPort, MarketView, PriceObservation, SheetInput } from "../../src/contracts";
+import type { EventLog } from "../../src/events/append";
+import type { LogEvent } from "../../src/events/types";
+import type { Deciyen } from "../../src/ledger/types";
+import type { BackendReply, LlmBackend } from "./backend";
+
+/** 日本時間の日時を UNIXミリ秒にする */
+export const jst = (date: string, hh: number, mm = 0) => Date.parse(`${date}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00+09:00`);
+
+/** 日本時間の暦日 */
+export const jstDay = (ms: number) => new Date(ms + 9 * 3_600_000).toISOString().slice(0, 10);
+
+/** テストが時刻を進められる時計。本番の保管には注入しない（clock.ts） */
+export class FakeClock implements Clock {
+  constructor(private t: number) {}
+  now() {
+    return this.t;
+  }
+  set(t: number) {
+    this.t = t;
+  }
+}
+
+/** 直列に実行する（EVENT_LOG §4 のトランザクションの代わり）。前の失敗は次に伝えない */
+class Serial {
+  private queue: Promise<unknown> = Promise.resolve();
+  run<T>(f: () => Promise<T>): Promise<T> {
+    const r = this.queue.then(f, f);
+    this.queue = r.catch(() => undefined);
+    return r;
+  }
+}
+
+/** この偽物が1回の read で返す件数の既定の上限（limit を省いたとき） */
+export const READ_MAX = 1000;
+
+/**
+ * EventLog の検査を通して追記するだけの保管。追記は1件ずつ直列にし、その中で Clock から recordedAt を決める。
+ * 呼び出し側は時刻を渡せない。返すイベントは sealEvent が凍結したもの
+ */
+export class MemoryEventStore implements EventStore {
+  private readonly serial = new Serial();
+
+  constructor(
+    private readonly log: EventLog,
+    private readonly clock: Clock,
+    private readonly readMax = READ_MAX,
+  ) {}
+
+  async read(afterSeq = 0, limit = this.readMax): Promise<readonly LogEvent[]> {
+    if (!Number.isInteger(afterSeq) || afterSeq < 0) throw new RangeError("afterSeq must be an integer >= 0");
+    if (!Number.isInteger(limit) || limit < 1) throw new RangeError("limit must be an integer >= 1");
+    return this.log.events.filter((e) => e.seq > afterSeq).slice(0, Math.min(limit, this.readMax));
+  }
+
+  async last(): Promise<LogEvent | null> {
+    return this.log.events.at(-1) ?? null;
+  }
+
+  append(draft: DraftInput) {
+    return this.serial.run(() => this.log.append({ ...draft, recordedAt: this.clock.now() }));
+  }
+
+  commitSheet(agentId: string, sheet: SheetInput): Promise<CommitResult> {
+    return this.serial.run(() => this.log.commitSheet(this.clock.now(), agentId, sheet));
+  }
+}
+
+const KIND_ORDER = { open: 0, close: 1 } as const;
+
+/** 窓に見せてよい観測：公開時刻・取得時刻が有限の数で、fetchedAt >= publishedAt、かつどちらも at より前 */
+const visibleAt = (o: PriceObservation, at: number) =>
+  Number.isFinite(o.publishedAt) && Number.isFinite(o.fetchedAt) && o.fetchedAt >= o.publishedAt && o.publishedAt < at && o.fetchedAt < at;
+
+/**
+ * 観測を持ち、時点 at の窓には publishedAt < at かつ fetchedAt < at の観測だけを見せる。
+ * 公開時刻・取得時刻が数でない観測や、fetchedAt < publishedAt の観測は返さない。at が現在時刻より後なら RangeError
+ */
+export class MemoryMarketData implements MarketDataPort {
+  constructor(
+    private readonly all: readonly PriceObservation[],
+    private readonly clock: Clock,
+  ) {}
+
+  asOf(at: number): MarketView {
+    if (!Number.isFinite(at) || at > this.clock.now()) throw new RangeError("asOf is later than now");
+    const visible = (symbol: string) =>
+      this.all
+        .filter((o) => o.symbol === symbol && visibleAt(o, at))
+        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.publishedAt - b.publishedAt || KIND_ORDER[a.kind] - KIND_ORDER[b.kind] || a.fetchedAt - b.fetchedAt));
+    return {
+      at,
+      history: async (symbol, limit) => {
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw new RangeError("limit must be an integer >= 1");
+        const v = visible(symbol);
+        return limit === undefined ? v : v.slice(Math.max(0, v.length - limit));
+      },
+      latest: async (symbol, kind) => visible(symbol).filter((o) => o.kind === kind).at(-1) ?? null,
+    };
+  }
+}
+
+/** 決まった返事を順に返し、1回の費用は cost の提供元 */
+export function scripted(replies: readonly string[], cost: Deciyen): LlmBackend {
+  let n = 0;
+  return async (request) => ({ ok: true, output: replies[n++ % replies.length] ?? "", cost, respondedModel: `${request.model.modelId}-fake` });
+}
+
+/** 0 以上の安全な整数 */
+const isCost = (v: unknown): v is Deciyen => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+
+/**
+ * 費用を予約して提供元を呼ぶLLM。使用済み（予約中を含む）＋maxCost が上限を超えるなら呼ばずに断る。
+ * 判定と予約は同期で行い（間に await を挟まない）原子的。呼び出しは外に出し、直列にしない。
+ * 精算は予約を実費に置き換える（実費が maxCost を超えても切り捨てない）。分からない失敗は maxCost を費用とする
+ */
+export class FakeLlm implements LlmPort {
+  readonly calls: LlmRequest[] = [];
+  private readonly spentByDay = new Map<string, Deciyen>();
+
+  readonly policy: LlmPolicy;
+
+  constructor(
+    policy: LlmPolicy,
+    private readonly clock: Clock,
+    private readonly backend: LlmBackend,
+  ) {
+    if (!isCost(policy.dailyCostLimit)) throw new RangeError("dailyCostLimit must be a non-negative safe integer");
+    this.policy = Object.freeze({ ...policy }); // 複製して持つ。作ったあとに書き換えても効かない
+  }
+
+  async spent(day: string): Promise<Deciyen> {
+    return this.spentByDay.get(day) ?? 0;
+  }
+
+  async complete(request: LlmRequest): Promise<LlmResult> {
+    if (!isCost(request.maxCost) || request.maxCost < 1) throw new RangeError("maxCost must be a safe integer >= 1");
+    const startedAt = this.clock.now();
+    const day = jstDay(startedAt);
+    const used = this.spentByDay.get(day) ?? 0;
+    if (used + request.maxCost > this.policy.dailyCostLimit) {
+      return { ok: false, errorCode: "budget_exceeded", usage: { inputTokens: 0, outputTokens: 0, cost: 0 }, startedAt, finishedAt: startedAt };
+    }
+    this.spentByDay.set(day, used + request.maxCost); // 予約
+    this.calls.push(request);
+    let reply: BackendReply;
+    try {
+      reply = await this.backend(request);
+    } catch {
+      reply = { ok: false, errorCode: "provider_error", cost: "unknown" };
+    }
+    // 費用は、端数を切り上げてから検査する。分からない費用と、そのあとも 0 以上の安全な整数でない費用（NaN・負・Infinity）は
+    // maxCost で数える（上限を効かなくする方向には倒さない）
+    const rounded = typeof reply.cost === "number" && Number.isFinite(reply.cost) && reply.cost >= 0 ? Math.ceil(reply.cost) : NaN;
+    const cost = isCost(rounded) ? rounded : request.maxCost;
+    this.spentByDay.set(day, (this.spentByDay.get(day) ?? 0) - request.maxCost + cost); // 精算：予約を実費に置き換える
+    // トークン数は、数えられないとき（失敗）は 0
+    const usage = { inputTokens: reply.ok ? 10 : 0, outputTokens: reply.ok ? reply.output.length : 0, cost };
+    const finishedAt = this.clock.now();
+    return reply.ok
+      ? { ok: true, output: reply.output, usage, respondedModel: reply.respondedModel, startedAt, finishedAt }
+      : { ok: false, errorCode: reply.errorCode, usage, startedAt, finishedAt };
+  }
+}
