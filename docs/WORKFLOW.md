@@ -52,9 +52,8 @@
 5. **PR。** mainが出す。1 PR = 1目的、300行程度（`AGENTS.md`）。大きい仕事は積み重ねたPR（前のPRの上に次のPR）に分ける
 6. **マージ。** ownerの承認が必須なのは、台帳・イベントログ・祝日とそのテスト、規則の正本（`docs/DECISIONS.md`・`PAPER_TRADING_RULES.md`・`EVENT_LOG.md`・`WORKFLOW.md`）、ガードレール（`AGENTS.md`・`CLAUDE.md`・`.claude/`・`.github/`・純関数の検査とそのテスト・`package.json`・`next.config.ts`など）。対象の一覧は`.github/CODEOWNERS`。ほかはCIが通り、レビューの高・中が片づいていればmainの判断で進めてよい（ownerが後から確認できるよう、STATUSに書く）
 
-   **限界：** ブランチ保護でCode ownersのレビューを必須にしても、PRを出す者とownerが同じGitHubアカウントだと、GitHubが自分のPRの承認を認めないので、ownerは管理者の権限でマージすることになる。エージェントがownerの認証で動くと、エージェントも同じ権限で迂回できてしまう。次のどちらかを、ownerが決める（決めるまでは、ownerが手動でマージし、エージェントはマージしない）。
-   - (a) エージェントのpushとPR作成には、権限を絞った別の認証（リポジトリ限定のfine-grained PATやGitHub App）を使い、ブランチ保護を管理者にも適用する
-   - (b) 別の認証は使わず、ブランチ保護ではCIの成功とPRを必須にするだけにして、承認の必須は設けない（CODEOWNERSは通知とレビューの目印にとどめる）。ownerが手動でマージする規律で守る
+   **承認の扱い（ownerの決定、2026-11-04、D-033の追記）：** 別の認証は使わず、ブランチ保護はCIの成功（`check`・`size`）とPRを必須にするだけにする。承認の必須は設けない（CODEOWNERSは通知とレビューの目印）。**マージはownerが手動で行い、エージェントはマージしない**（上の「mainの判断で進めてよい」は、この方式をやめるまで停止する）。
+   **限界：** エージェントはownerのGitHub認証で動くので、技術的にはmainへ直接pushもマージもできてしまう。守るのは、この規律と、Claude Codeの設定・フックでのmainへのpush・force pushの禁止（次のPR）。フックはBash経由の迂回を完全には止められない。改めて固い守りが要るときは、権限を絞った別の認証（fine-grained PATやGitHub App）を使い、ブランチ保護を管理者にも適用する方式へ移る。
 7. **記録。** mainが`docs/STATUS.md`を更新する。履歴は`docs/HISTORY.md`（STATUSの分割と一緒に別のPRで作る。それまでは`docs/STATUS.md`の履歴に書く）、レビューで残した指摘は`review-debt`ラベルのissueにする
 
 ## 5. 役のあいだの連絡と、ownerへの質問
