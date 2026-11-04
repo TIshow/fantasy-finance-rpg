@@ -48,6 +48,7 @@ cd apps/web
 npm ci
 npm test          # 台帳などの純関数のテスト（Vitest）
 npm run typecheck
+npm run lint:purity   # src/ledger・src/events が純関数の決まりを守っているか（構文木で検査）
 npm run build
 npm run dev
 npm run holidays:check   # 祝日の一覧（src/holidays/holidays.json）と内閣府のCSVの差を確かめる

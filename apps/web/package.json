@@ -11,6 +11,7 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
+    "lint:purity": "node scripts/check-purity.ts",
     "test": "vitest run",
     "holidays:update": "node scripts/update-holidays.mjs",
     "holidays:check": "node scripts/update-holidays.mjs --check"
