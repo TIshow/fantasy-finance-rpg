@@ -55,9 +55,10 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => s
         const total: Deciyen = p.total;
         const change = total - (last.get(p.agentId) ?? initial.get(p.agentId) ?? INITIAL_CASH);
         last.set(p.agentId, total);
-        timeline.push({ ...base(p.agentId), kind: "valuation", date: p.date, cash: p.cash, positions: (p.positions as P[]).map((x) => ({ symbol: x.symbol, qty: x.qty, price: x.price, priceText: formatYen(x.price), closeSeq: x.closeSeq, stale: (closeDate.get(x.closeSeq) ?? p.date) < p.date })), total, totalText: formatYen(total), change, changeText: formatSignedYen(change) });
+        const positions = (p.positions as P[]).map((x) => ({ symbol: x.symbol, qty: x.qty, price: x.price, priceText: formatYen(x.price), closeSeq: x.closeSeq, stale: (closeDate.get(x.closeSeq) ?? p.date) < p.date }));
+        timeline.push({ ...base(p.agentId), kind: "valuation", date: p.date, cash: p.cash, positions, total, totalText: formatYen(total), change, changeText: formatSignedYen(change) });
         // rank は全AIの出そろった後に入れる
-        (days.get(p.agentId) ?? days.set(p.agentId, []).get(p.agentId)!).push({ date: p.date, total, totalText: formatYen(total), change, changeText: formatSignedYen(change), rank: 0 });
+        (days.get(p.agentId) ?? days.set(p.agentId, []).get(p.agentId)!).push({ date: p.date, total, totalText: formatYen(total), change, changeText: formatSignedYen(change), stale: positions.some((x) => x.stale), rank: 0 });
         break;
       }
       case "agent.suspended":

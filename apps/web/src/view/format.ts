@@ -15,3 +15,8 @@ export function formatYen(d: Deciyen): string {
 export function formatSignedYen(d: Deciyen): string {
   return d > 0 ? `+${formatYen(d)}` : formatYen(d);
 }
+
+/** UNIXミリ秒 → 日本時間の "YYYY-MM-DD HH:MM:SS"（実行環境のロケール・タイムゾーンに依らない） */
+export function formatJst(ms: number): string {
+  return new Date(ms + 9 * 3_600_000).toISOString().slice(0, 19).replace("T", " ");
+}

@@ -69,6 +69,7 @@ describe("buildView（手で組んだ小さなログ）", () => {
       ["c", "2026-11-10", "140円", "-9,999,860円"], // 未登録のAIは名前がIDのまま、基準は台帳の初期資金
     ]);
     // 評価に使った保有。終値の日付が評価日より前なら stale（closeSeq 11 は 11-09 の終値）
+    expect(v.agents.map((a) => a.days.map((d) => d.stale))).toEqual([[false, true], [false, false], [false]]);
     expect(vals.map((t) => t.positions.map((x) => [x.priceText, x.stale]))).toEqual([[["1.2円", false]], [], [["1.2円", true]], [], []]);
   });
 
