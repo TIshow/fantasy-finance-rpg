@@ -64,7 +64,7 @@
 - PRのマージ（`gh pr merge`、`gh api`のmerge）。`gh api`の書き込みは、PR・issueの作成と更新、コメント、レビューだけ許す。`gh repo`の変更、`gh secret`、`gh auth`のトークン表示も止める
 - `.env`など秘密のファイル（`.env.example`などは除く）の読み書き（Bash・Read・Grep・Glob・編集ツール）。`.env*`のようなワイルドカードや、`curl -d @.env`の形も止める
 - ownerだけが付けるラベル`large-pr-approved`（pr-sizeの失敗を自分で解く道を塞ぐ）
-- **役ごとの書き込み先**（`agent_type`で役を判別）。編集ツール（Edit・Write・MultiEdit・NotebookEdit）と、Bashの書き込み（リダイレクト、`tee`・`sed -i`・`cp`・`mv`・`install`・`ln`・`rm`・`unlink`・`rmdir`・`touch`・`mkdir`・`truncate`・`chmod`・`chown`・`dd of=`・`git mv`・`git rm`）に効く。パスは実体（`..`・シンボリックリンクを解いた後）で判定し、書き込み先が属するworktreeのルートからの相対で見る（別のworktreeやgitの外のパスも、そのルートで判定する）。Bashの`cd`は文字どおりの引数だけ追い、行き先が読めない`cd`のあとの相対パスへの書き込みは止める
+- **役ごとの書き込み先**（`agent_type`で役を判別。担当パス・読み取り専用の役・守りの設定・生成物の正本は`.claude/roles/paths.json`。読めない・形が違うときは止める）。編集ツール（Edit・Write・MultiEdit・NotebookEdit）と、Bashの書き込み（リダイレクト、`tee`・`sed -i`・`cp`・`mv`・`install`・`ln`・`rm`・`unlink`・`rmdir`・`touch`・`mkdir`・`truncate`・`chmod`・`chown`・`dd of=`・`git mv`・`git rm`）に効く。パスは実体（`..`・シンボリックリンクを解いた後）で判定し、書き込み先が属するworktreeのルートからの相対で見る（別のworktreeやgitの外のパスも、そのルートで判定する）。Bashの`cd`は文字どおりの引数だけ追い、行き先が読めない`cd`のあとの相対パスへの書き込みは止める
 
 | 役 | 書いてよい |
 | --- | --- |
