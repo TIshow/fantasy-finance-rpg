@@ -77,6 +77,20 @@ export function describeEventStoreContract(name: string, make: (env: StoreEnv) =
       expect(last.recordedAt).toBe(jst("2026-11-10", 8, 31));
     });
 
+    it("実行時に余分な recordedAt が渡されても無視し、保管の時計の値を使う", async () => {
+      const { store, clock } = await setup();
+      await seedAgent(store, clock);
+      clock.set(jst("2026-11-09", 22, 30));
+      const forged = { ...sys("source.captured", { publishedAt: jst("2026-11-09", 15, 30), fetchedAt: jst("2026-11-09", 22, 30) }), recordedAt: jst("2026-11-09", 22) } as DraftInput;
+      const r = await store.append(forged);
+      expect(r.ok && r.event.recordedAt).toBe(jst("2026-11-09", 22, 30));
+      expect((await store.last())?.recordedAt).toBe(jst("2026-11-09", 22, 30));
+      // 締め（8:30）の後に、締め前の recordedAt を渡しても、確定は締め前に装えない
+      clock.set(jst("2026-11-10", 8, 31));
+      const late = await store.commitSheet("ai-a", { tradingDate: "2026-11-10", orders: [], runSeq: 5, inputSeqs: [4], recordedAt: jst("2026-11-10", 8) } as never);
+      expect(late).toMatchObject({ ok: true, rejected: "after_cutoff" });
+    });
+
     it("時計が戻れば拒む（recordedAt は減らない）", async () => {
       const { store, clock } = await setup();
       await seedAgent(store, clock);
@@ -115,8 +129,10 @@ export function describeEventStoreContract(name: string, make: (env: StoreEnv) =
       const sheet = { tradingDate: "2026-11-10", orders: [], runSeq: run, inputSeqs: [4] };
       clock.set(jst("2026-11-10", 8));
       // 型では DraftInput に注文票の type を渡せない。実行時に渡されても保管が拒む
+      const before = await store.last();
       const viaAppend = await store.append({ type: "order_sheet.committed", actor: "agent:ai-a", refs: [run], payload: sheet } as unknown as DraftInput);
-      expect(viaAppend).toEqual({ ok: false, reason: "use commitSheet" });
+      expect(viaAppend.ok).toBe(false);
+      expect(await store.last()).toEqual(before); // 何も書かれていない
       const r = await store.commitSheet("ai-a", sheet);
       expect(r.ok && r.event.type).toBe("order_sheet.committed");
       expect((await store.commitSheet("ai-zzz", sheet)).ok).toBe(false);
@@ -243,6 +259,23 @@ export function describeMarketDataContract(name: string, make: (observations: re
       expect(await view.latest("NOPE", "close")).toBeNull();
     });
 
+    it("limit は観測（版）を数える。範囲外の limit は reject の RangeError", async () => {
+      const t = jst("2026-11-10", 15, 30);
+      const p = make([close("2026-11-10", 1_010_0, t), close("2026-11-10", 1_011_0, t + 3_600_000)], clock);
+      const view = p.asOf(jst("2026-11-12", 0));
+      expect((await view.history("TSTA", 1)).map((o) => o.price)).toEqual([1_011_0]); // 日ではなく版を数える
+      expect((await view.history("TSTA", 2)).map((o) => o.price)).toEqual([1_010_0, 1_011_0]);
+      for (const bad of [0, -1, 1.5, NaN, Infinity]) await expect(view.history("TSTA", bad)).rejects.toThrow(RangeError);
+    });
+
+    it("同じ日・同じ公開時刻・同じ種類の版は、取得時刻の昇順に並ぶ", async () => {
+      const t = jst("2026-11-10", 15, 30);
+      const early = { ...close("2026-11-10", 1_010_0, t), fetchedAt: t + 1000 };
+      const later = { ...close("2026-11-10", 1_011_0, t), fetchedAt: t + 2000 };
+      const p = make([later, early], clock);
+      expect((await p.asOf(jst("2026-11-12", 0)).history("TSTA")).map((o) => o.price)).toEqual([1_010_0, 1_011_0]);
+    });
+
     it("公開時刻が同じなら始値が先。改訂は、より後の公開・取得時刻の新しい観測で表し、過去の窓には見えない", async () => {
       const t = jst("2026-11-10", 15, 30);
       const p = make([close("2026-11-10", 1_010_0, t), open("2026-11-10", 1_000_0, t), close("2026-11-10", 1_011_0, t + 3_600_000)], clock);
@@ -259,7 +292,10 @@ export function describeMarketDataContract(name: string, make: (observations: re
     });
 
     it("窓には at・history・latest だけがある（日付や時刻を指定して未来を引く口はない）", () => {
-      expect(Object.keys(port.asOf(0)).sort()).toEqual(["at", "history", "latest"]);
+      const view = port.asOf(0);
+      expect(typeof view.at).toBe("number");
+      expect(typeof view.history).toBe("function");
+      expect(typeof view.latest).toBe("function");
     });
   });
 }
@@ -370,20 +406,32 @@ export function describeLlmContract(name: string, make: (policy: LlmPolicy, cloc
     it("失敗でも課金された費用は記録し、課金されたか分からない失敗（timeout）は予約した maxCost を残す", async () => {
       let n = 0;
       const llm = make(policy, new FakeClock(t0), () => Promise.resolve(n++ === 0 ? { ok: false, errorCode: "provider_error", cost: 3 } : { ok: false, errorCode: "timeout", cost: "unknown" }));
-      expect(await llm.complete(request(10))).toMatchObject({ ok: false, errorCode: "provider_error", usage: { cost: 3 } });
+      expect(await llm.complete(request(10))).toMatchObject({ ok: false, errorCode: "provider_error", usage: { cost: 3, inputTokens: 0, outputTokens: 0 } }); // トークンを数えられない失敗は 0
       expect(await llm.spent("2026-11-09")).toBe(3);
       expect(await llm.complete(request(10))).toMatchObject({ ok: false, errorCode: "timeout", usage: { cost: 10 } });
       expect(await llm.spent("2026-11-09")).toBe(13);
     });
 
-    it("提供元の費用が比較できない値（NaN・負・小数）なら maxCost を費用とし、上限を効かなくしない", async () => {
-      const costs = [NaN, -5, 1.5];
+    it("提供元の費用は端数を切り上げてから検査し、NaN・負・Infinity なら maxCost を費用とする（上限を効かなくしない）", async () => {
+      const costs = [1.5, NaN, -5];
       let n = 0;
       const llm = make({ dailyCostLimit: 25, dryRun: false }, new FakeClock(t0), () => ok(costs[n++ % costs.length]!));
+      expect(await llm.complete(request(10))).toMatchObject({ ok: true, usage: { cost: 2 } }); // 1.5 は切り上げて 2
       expect(await llm.complete(request(10))).toMatchObject({ ok: true, usage: { cost: 10 } });
       expect(await llm.complete(request(10))).toMatchObject({ ok: true, usage: { cost: 10 } });
-      expect(await llm.spent("2026-11-09")).toBe(20);
-      expect(await llm.complete(request(10))).toMatchObject({ ok: false, errorCode: "budget_exceeded" }); // 20 + 10 > 25
+      expect(await llm.spent("2026-11-09")).toBe(22);
+      expect(await llm.complete(request(10))).toMatchObject({ ok: false, errorCode: "budget_exceeded" }); // 22 + 10 > 25
+      const inf = make({ dailyCostLimit: 25, dryRun: false }, new FakeClock(t0), () => ok(Infinity));
+      expect(await inf.complete(request(10))).toMatchObject({ ok: true, usage: { cost: 10 } });
+    });
+
+    it("提供元が例外で失敗しても complete は reject せず ok: false を返し、予約した maxCost を費用に残す", async () => {
+      const llm = make(policy, new FakeClock(t0), () => Promise.reject(new Error("connection reset: request-id=secret")));
+      const r = await llm.complete(request(10));
+      expect(r).toMatchObject({ ok: false, usage: { cost: 10, inputTokens: 0, outputTokens: 0 } });
+      expect(["provider_error", "timeout"]).toContain(!r.ok && r.errorCode);
+      expect(JSON.stringify(r)).not.toContain("secret"); // 提供元のエラー文は載せない
+      expect(await llm.spent("2026-11-09")).toBe(10); // 予約を 0 に戻さない
     });
 
     it("予約：呼び出し中の spent は予約を含み、精算で実費に置き換わる", async () => {

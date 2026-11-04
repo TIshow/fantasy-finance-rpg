@@ -17,7 +17,7 @@ import type { Order, RejectReason } from "../ledger/types";
 export interface EventReader {
   /**
    * seq が afterSeq より大きいイベントを、seq の昇順で最大 limit 件返す。afterSeq は 0 以上の整数（既定 0）、
-   * limit は 1 以上の整数。外れた値は RangeError。limit を省くと、実装の上限（実装が決める。1回の読みで全件を返すとは限らない）まで返す。
+   * limit は 1 以上の整数。外れた値（NaN・Infinity も）は reject の RangeError（Promise を返す口は同期で投げない）。limit を省くと、実装の上限（実装が決める。1回の読みで全件を返すとは限らない）まで返す。
    * 全件を読むには、返った最後の seq を次の afterSeq にして、空の配列が返るまで繰り返す。
    */
   read(afterSeq?: number, limit?: number): Promise<readonly LogEvent[]>;
@@ -54,6 +54,8 @@ export type DraftInput = Omit<Draft, "recordedAt" | "type"> & {
  * 追記だけのイベントの保管。
  * - 追記のたびに、直列化したトランザクションの中で、保管が持つ Clock（時計の権威は保管の1つ。clock.ts）から
  *   recordedAt を一度だけ決め、EventLog の検査（append・commitSheet）を通す（§4）。呼び出し側は時刻を渡せない。
+ *   型では DraftInput に recordedAt がないが、実行時に余分な recordedAt が渡されても**無視**し、保管の時計の値を使う
+ *   （実装は { ...draft, recordedAt: clock.now() } の順で、時計の値を最後に置く）。
  *   締めの検査（validateSheet）は、この時刻で行われる。検査に通らないものは書かず、理由を返す。
  * - seq・prevHash・hash も保管が付ける。
  * - 書き手（actor）は、本来は認証した身元から入れる。その分け方は保存先と一緒に決める（#20、§3.2）。

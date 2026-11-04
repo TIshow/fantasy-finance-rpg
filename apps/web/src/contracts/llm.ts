@@ -61,13 +61,21 @@ export interface LlmRequest {
    * 精算：呼び出しが終わったら、予約を実費に置き換える。実費が maxCost を超えても切り捨てず、そのまま
    * usage.cost と spent に記録する。usage.cost > maxCost は異常で、呼び出し側は運用者に知らせる。
    * 課金されたかどうか分からない失敗（timeout など）は、予約した maxCost を費用として残す。
-   * 提供元の費用が比較できない値（NaN・負・小数など）のときも maxCost を費用とする（上限を効かなくする方向には倒さない）。
+   * 提供元の例外・通信断も同じ扱いで、complete は reject せず ok: false（provider_error か timeout）を返し、
+   * maxCost を費用に残す（try/finally で予約を 0 に戻さない）。complete が reject するのは、maxCost の RangeError だけ。
+   *
+   * 費用の順序：#21 の換算（端数は切り上げ）を先に行い、その結果が 0 以上の安全な整数でないとき
+   * （NaN・負・Infinity など）だけ maxCost を費用とする（上限を効かなくする方向には倒さない）。
+   *
+   * 提供元の呼び出しは直列にしない（複数の complete を並行に呼べる）。直列にするのは判定と予約だけ。
    */
   maxCost: Deciyen;
 }
 
 export interface LlmUsage {
+  /** 数えられないとき（失敗・タイムアウトなど）は 0 */
   inputTokens: number;
+  /** 数えられないとき（失敗・タイムアウトなど）は 0 */
   outputTokens: number;
   /**
    * この呼び出しの費用。0.1円単位の整数（端数は切り上げ）。失敗でも課金されたら入れる。
@@ -102,6 +110,7 @@ export interface LlmPort {
   /**
    * 1回呼ぶ。費用の暦日は startedAt（日本時間）で決める。上限を超えるなら、呼ばずに
    * errorCode: "budget_exceeded"（費用0）を返す。maxCost の検査は LlmRequest を見る。
+   * Promise を返す口の RangeError は reject（同期で投げない）。NaN・Infinity も対象。
    */
   complete(request: LlmRequest): Promise<LlmResult>;
 }

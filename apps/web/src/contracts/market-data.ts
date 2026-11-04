@@ -26,7 +26,9 @@ interface ObservationBase {
    */
   publishedAt: number;
   /**
-   * 私たちがこの値を取得した時刻（UNIXミリ秒）。窓はこれでも絞る。source.captured の
+   * 私たちがこの値を取得した時刻（UNIXミリ秒）。窓はこれでも絞る。本番では、取得したときに時計の権威（Clock）から取る。
+   * 取得元の値や入力から取らず、後から過去の時刻を作らない（作れると、後から知ったことを過去の窓に見せられる）。
+   * 試験の値の作り方（公開の1分後など）は試験の中だけで、本番の規則ではない。source.captured の
    * publishedAt <= fetchedAt <= recordedAt を満たすために、publishedAt 以上でなければならない（EVENT_LOG §3.1）。
    * 満たさない観測（fetchedAt が publishedAt より前、または数でない）は窓が返さない。
    */
@@ -59,13 +61,17 @@ export type PriceObservation = OpenObservation | CloseObservation;
 export interface MarketView {
   /** この窓の時点（UNIXミリ秒） */
   readonly at: number;
-  /** 銘柄の観測を、(date, publishedAt, 始値が先) の昇順で返す。limit（1以上）があれば新しい方から limit 件（返す順は昇順） */
+  /**
+   * 銘柄の観測を、(date, publishedAt, kind, fetchedAt) の昇順で返す（kind は始値が先）。
+   * limit（1 以上の整数）があれば新しい方から limit 件を返す（返す順は昇順）。limit は日ではなく**観測（版）を数える**。
+   * limit が範囲外（0・負・小数・NaN・Infinity）なら reject の RangeError（Promise を返す口は同期で投げない）。
+   */
   history(symbol: string, limit?: number): Promise<readonly PriceObservation[]>;
   /** 銘柄の kind ごとの、一番新しい観測（改訂があれば改訂後）。まだなければ null */
   latest(symbol: string, kind: "open" | "close"): Promise<PriceObservation | null>;
 }
 
 export interface MarketDataPort {
-  /** 時点 at（UNIXミリ秒）の窓を返す。at 以後に公開または取得されたデータは見えない。at が現在時刻より後なら RangeError */
+  /** 時点 at（UNIXミリ秒）の窓を返す。at 以後に公開または取得されたデータは見えない。at が現在時刻より後なら RangeError（asOf は同期なので、同期で投げる。NaN・Infinity も対象） */
   asOf(at: number): MarketView;
 }

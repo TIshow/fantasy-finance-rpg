@@ -88,10 +88,11 @@ export class MemoryMarketData implements MarketDataPort {
     const visible = (symbol: string) =>
       this.all
         .filter((o) => o.symbol === symbol && visibleAt(o, at))
-        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.publishedAt - b.publishedAt || KIND_ORDER[a.kind] - KIND_ORDER[b.kind]));
+        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.publishedAt - b.publishedAt || KIND_ORDER[a.kind] - KIND_ORDER[b.kind] || a.fetchedAt - b.fetchedAt));
     return {
       at,
       history: async (symbol, limit) => {
+        if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw new RangeError("limit must be an integer >= 1");
         const v = visible(symbol);
         return limit === undefined ? v : v.slice(Math.max(0, v.length - limit));
       },
@@ -149,10 +150,13 @@ export class FakeLlm implements LlmPort {
     } catch {
       reply = { ok: false, errorCode: "provider_error", cost: "unknown" };
     }
-    // 分からない費用と、比較できない費用（NaN・負・小数）は maxCost で数える（上限を効かなくする方向には倒さない）
-    const cost = isCost(reply.cost) ? reply.cost : request.maxCost;
+    // 費用は、端数を切り上げてから検査する。分からない費用と、そのあとも 0 以上の安全な整数でない費用（NaN・負・Infinity）は
+    // maxCost で数える（上限を効かなくする方向には倒さない）
+    const rounded = typeof reply.cost === "number" && Number.isFinite(reply.cost) && reply.cost >= 0 ? Math.ceil(reply.cost) : NaN;
+    const cost = isCost(rounded) ? rounded : request.maxCost;
     this.spentByDay.set(day, (this.spentByDay.get(day) ?? 0) - request.maxCost + cost); // 精算：予約を実費に置き換える
-    const usage = { inputTokens: 10, outputTokens: reply.ok ? reply.output.length : 0, cost };
+    // トークン数は、数えられないとき（失敗）は 0
+    const usage = { inputTokens: reply.ok ? 10 : 0, outputTokens: reply.ok ? reply.output.length : 0, cost };
     const finishedAt = this.clock.now();
     return reply.ok
       ? { ok: true, output: reply.output, usage, respondedModel: reply.respondedModel, startedAt, finishedAt }

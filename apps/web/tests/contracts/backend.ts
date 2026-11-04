@@ -1,6 +1,6 @@
 // LlmPort の契約テスト（conformance.ts）が、実装の差し替えに使う「提供元の口」の型。
 // platform は、自分の LlmPort 実装を作るときに、この口へ提供元の応答を差し込める形にしてテストを当てる。
-// 実装は、この口に「費用を 0.1円単位の整数で直接受け取る経路」を持つ必要がある。トークン数や外貨からの
+// 実装は、この口に「費用を 0.1円単位で直接受け取る経路」を持つ必要がある（端数は切り上げる）。トークン数や外貨からの
 // 換算（為替・単価）は #21 で決めるので、この契約テストでは検査しない。
 import type { LlmErrorCode, LlmRequest } from "../../src/contracts";
 import type { Deciyen } from "../../src/ledger/types";
