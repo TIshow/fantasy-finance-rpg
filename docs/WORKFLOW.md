@@ -21,7 +21,7 @@
 | **owner**（人間） | すべての最終判断 | — |
 | **cto**（claude.aiのチャット） | 戦略・仕様・判断材料・タスク票と指示ファイルの案 | 日々の実装 |
 | **main（`lead`）** | `docs/STATUS.md`、`docs/HISTORY.md`、`docs/DECISIONS.md`（案のみ。承認はowner）、タスク票、マージの順序 | `apps/`の機能コード |
-| **core** | `apps/web/src/{ledger,events,holidays}/`とそのテスト | DB・ネットワーク・UI |
+| **core** | `apps/web/src/{ledger,events,holidays}/`とそのテスト、契約`apps/web/src/contracts/`とそのテスト、固定データ`apps/web/tests/fixtures/` | DB・ネットワーク・UI |
 | **platform** | `apps/web/src/{store,ingest,runner,llm}/`、`apps/web/db/`、`apps/web/scripts/` | `ledger/`・`events/`の中身 |
 | **web** | `apps/web/src/{app,components,view}/` | 台帳の計算、DBへの書き込み |
 | **verifier** | `apps/web/tests/adversarial/`だけ書ける。`src/`は読むだけ | `src/`の変更 |
@@ -85,14 +85,14 @@
 
 | 役 | 書いてよい |
 | --- | --- |
-| core | `apps/web/src/{ledger,events,holidays}/`、`apps/web/tests/{ledger,events,holidays}/` |
+| core | `apps/web/src/{ledger,events,holidays,contracts}/`、`apps/web/tests/{ledger,events,holidays,contracts,fixtures}/` |
 | platform | `apps/web/src/{store,ingest,runner,llm}/`、`apps/web/tests/{store,ingest,runner,llm}/`、`apps/web/db/`、`apps/web/scripts/` |
 | web | `apps/web/src/{app,components,view}/`、`apps/web/tests/{app,components,view}/` |
 | verifier | `apps/web/tests/adversarial/` |
 | lead | `docs/`、`README.md`（機能コードと`apps/`は書かない） |
 | code-reviewer・Explore・Plan | 書かない（`/tmp`は可） |
 
-どの役も書けない：`.claude/`・`.github/`・`scripts/`・`AGENTS.md`・`CLAUDE.md`・`.tool-versions`・`apps/web/scripts/check-purity.ts`・`apps/web/tests/scripts/`・`apps/web/{package.json,package-lock.json,next.config.ts,tsconfig.json}`（`.github/CODEOWNERS`のownerの承認が要るもの）と、リポジトリの外（`/tmp`と`/dev`は可）。依存の追加などは、ownerが役のないセッションで行う。ほかの`agent_type`（`general-purpose`など）は、守りの設定とリポジトリの外だけ制限する。生成物（`node_modules`・`.next`・`coverage`）は書ける。
+どの役も書けない：`.claude/`・`.github/`・`scripts/`・`AGENTS.md`・`CLAUDE.md`・`.tool-versions`・`apps/web/scripts/check-purity.ts`・`apps/web/tests/scripts/`・`apps/web/{package.json,package-lock.json,next.config.ts,tsconfig.json,vitest.config.ts,postcss.config.mjs}`・`apps/web/public/`（`.github/CODEOWNERS`のownerの承認が要るもの）と、リポジトリの外（`/tmp`と`/dev`は可）。依存の追加などは、ownerが役のないセッションで行う。ほかの`agent_type`（`general-purpose`など）は、守りの設定とリポジトリの外だけ制限する。生成物（`node_modules`・`.next`・`coverage`）は書ける。
 
 `settings.json`の`permissions.deny`は補助で、本体はフック。`deny`のBashルールは`git -C . push`や`bash -c`の形を止めないため、フックがコマンド全文を解析する。**限界：** 想定する相手はうっかり。`python -c`の中のgit、別のGitHubクライアント、大文字小文字を区別しないファイルシステム、シンボリックリンク経由の`.env`、`grep -r`のようなディレクトリ全体の検索が`.env`を読むこと、`gh`以外のクライアントでの書き込み、Bashでは`git checkout`/`git apply`・スクリプトの中の書き込み、などは止められない。守りの本体はPRの境界（CODEOWNERS・CI・ownerの手動マージ）。
 

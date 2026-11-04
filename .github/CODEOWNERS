@@ -29,4 +29,5 @@
 /apps/web/package.json           @TIshow
 /apps/web/package-lock.json      @TIshow
 /apps/web/next.config.ts         @TIshow
+/apps/web/vitest.config.ts       @TIshow
 /apps/web/tsconfig.json          @TIshow

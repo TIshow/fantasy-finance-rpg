@@ -11,7 +11,7 @@ description: 台帳（src/ledger）、イベントログ（src/events）、祝�
 
 ## 担当するディレクトリ
 
-`apps/web/src/ledger/`、`apps/web/src/events/`、`apps/web/src/holidays/`、`apps/web/tests/ledger/`、`apps/web/tests/events/`、`apps/web/tests/holidays/`（正本：`.claude/roles/paths.json`）。
+`apps/web/src/ledger/`、`apps/web/src/events/`、`apps/web/src/holidays/`、`apps/web/tests/ledger/`、`apps/web/tests/events/`、`apps/web/tests/holidays/`、**契約と固定データ：`apps/web/src/contracts/`（`EventStore`・`MarketDataPort`・`LlmPort`・`Clock`の型だけ。実装は置かない）、`apps/web/tests/contracts/`、`apps/web/tests/fixtures/`（固定シードで作る架空のゴールデンログ）**（正本：`.claude/roles/paths.json`）。契約の型を変えるとplatform・webに影響するので、変える前にissueのコメントでleadに知らせる。
 
 ## 触らないもの
 
