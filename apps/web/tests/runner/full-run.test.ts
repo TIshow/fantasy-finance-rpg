@@ -21,7 +21,7 @@ const LATE = "2026-11-18";
 const p = (e: LogEvent) => e.payload as Record<string, unknown>;
 
 /** 架空の始値・終値と、それを取得する時刻。値動きは大きめ（規則が売買するように）。同じシードなら同じ */
-function quotes(seed: number): { fetchedAt: number; quote: SourceQuote }[] {
+function quotes(seed: number, lateFetchAt: number): { fetchedAt: number; quote: SourceQuote }[] {
   const rand = mulberry32(seed);
   const out: { fetchedAt: number; quote: SourceQuote }[] = [];
   const last: Record<string, number> = { TSTA: 1200, TSTB: 2500, TSTC: 800 };
@@ -33,22 +33,29 @@ function quotes(seed: number): { fetchedAt: number; quote: SourceQuote }[] {
       const delay = () => randInt(rand, 5, 120) * 1000;
       const base = { symbol, date, source: "fixture:synthetic" };
       out.push({ fetchedAt: jst(date, 9) + delay(), quote: { ...base, kind: "open", price: open * 10, publishedAt: jst(date, 9) } });
-      const closeFetch = date === LATE ? jst("2026-11-19", 3) : jst(date, 15, 30) + delay();
+      const closeFetch = date === LATE ? lateFetchAt : jst(date, 15, 30) + delay();
       out.push({ fetchedAt: closeFetch, quote: { ...base, kind: "close", price: close * 10, volume: randInt(rand, 100, 5000) * 100, publishedAt: jst(date, 15, 30) } });
     }
   }
   return out.sort((a, b) => a.fetchedAt - b.fetchedAt);
 }
 
-/** 保管・取り込み・runner を組み、前営業日から10営業日を回す。取り込みは取得の時刻に staticSource から行う */
-async function run(seed: number) {
+/** AIが受け取った入力（先読みの検査に使う） */
+type Seen = { agentId: string; tradingDate: string; at: number; closes: { seq: number; date: string }[] };
+
+/**
+ * 保管・取り込み・runner を組み、前営業日から10営業日を回す。取り込みは取得の時刻に staticSource から行う。
+ * salt の乱数は固定（データのシードだけでログが変わることを見るため）。
+ * lateFetchAt：LATE の終値を取得する時刻。interrupt：毎日、判断の後・寄り付きの前で一度止めてから回し直す
+ */
+async function run(seed: number, opts: { lateFetchAt?: number; interrupt?: boolean } = {}) {
   const clock = new FakeClock(0);
   const holidayTables = new Map([[FIXTURE_HOLIDAYS.contentSha256, FIXTURE_HOLIDAYS]]);
-  const rand = mulberry32(seed ^ 0x5a17);
+  const rand = mulberry32(0x5a17);
   const values = new RunnerValues(() => Uint8Array.from({ length: 16 }, () => Math.floor(rand() * 256)));
   const store = new InMemoryEventStore(values, holidayTables, clock);
   const market = new IngestedMarketData(clock);
-  const pending = quotes(seed);
+  const pending = quotes(seed, opts.lateFetchAt ?? jst("2026-11-19", 3));
   const waitUntil = async (at: number) => {
     while (pending.length > 0 && pending[0]!.fetchedAt <= at) {
       const t = pending[0]!.fetchedAt;
@@ -58,7 +65,14 @@ async function run(seed: number) {
     }
     if (at > clock.now()) clock.set(at);
   };
-  const agents = await ruleAgents();
+  const seen: Seen[] = [];
+  const agents = (await ruleAgents()).map((a) => ({
+    ...a,
+    decide: (input: Parameters<typeof a.decide>[0]) => {
+      seen.push({ agentId: a.id, tradingDate: input.tradingDate, at: input.at, closes: input.closes.map((c) => ({ seq: c.seq, date: c.date })) });
+      return a.decide(input);
+    },
+  }));
   const deps: RunnerDeps = { store, market, values, holidayTables, agents, clock, waitUntil, inputDays: 5 };
   const op = (type: "holidays.adopted" | "universe.set" | "agent.registered", payload: Record<string, unknown>) => store.append({ type, actor: "operator:owner", refs: [], payload });
   await op("holidays.adopted", { holidaysSha256: FIXTURE_HOLIDAYS.contentSha256 });
@@ -66,8 +80,14 @@ async function run(seed: number) {
   await runDay(PRIOR, deps);
   await waitUntil(scheduleOf(PRIOR).closeAt + 3 * 3_600_000);
   for (const a of agents) await op("agent.registered", { agentId: a.id, displayName: a.id, startDate: DAYS[0], initialCash: INITIAL_CASH });
-  for (const d of DAYS) await runDay(d, deps);
-  return { store, values, holidayTables, deps, events: await store.read(0, 100_000) };
+  for (const d of DAYS) {
+    if (opts.interrupt) {
+      const stop = async (at: number) => (at === scheduleOf(d).openAt ? Promise.reject(new Error("stop")) : waitUntil(at));
+      await expect(runDay(d, { ...deps, waitUntil: stop })).rejects.toThrow("stop");
+    }
+    await runDay(d, deps);
+  }
+  return { store, values, holidayTables, deps, seen, events: await store.read(0, 100_000) };
 }
 
 describe("規則のAI 3体で10営業日を通す", async () => {
@@ -90,14 +110,17 @@ describe("規則のAI 3体で10営業日を通す", async () => {
     for (const id of ids) expect(ledger.account(id)).toEqual(r.store.account(id));
   });
 
-  it("(c) 同じ入力（シード）なら同じログになり、別のシードなら変わる", async () => {
+  it("(c) 同じ入力（シード）なら同じログになり、別のデータなら変わる（salt は固定）", async () => {
     expect((await run(20261104)).events.at(-1)!.hash).toBe(r.events.at(-1)!.hash);
     expect((await run(20261105)).events.at(-1)!.hash).not.toBe(r.events.at(-1)!.hash);
   });
 
-  it("(d) 同じ日を2回回しても、ログは変わらない", async () => {
+  it("(d) 同じ日を2回回しても、ログは変わらない（済んだ後にも、判断の後・寄り付きの前に止めて回し直しても）", async () => {
     for (const d of [PRIOR, ...DAYS]) await runDay(d, r.deps);
     expect(await r.store.read(0, 100_000)).toEqual(r.events);
+    const interrupted = await run(20261104, { interrupt: true });
+    expect(interrupted.events).toEqual(r.events);
+    expect(interrupted.seen.length).toBe(r.seen.length); // 回し直しで判断をやり直していない
   });
 
   it("(e) 先読みがない：判断の入力は、すべて判断より前に取り込み・記録した、約定日より前の日のもの", () => {
@@ -114,10 +137,44 @@ describe("規則のAI 3体で10営業日を通す", async () => {
         }
       }
     }
+    // AIが受け取った終値は、すべて約定日より前の日のもので、その判断の run の入力に載っている
+    expect(r.seen.length).toBeGreaterThan(0);
+    for (const x of r.seen) {
+      const run = of("agent.run").find((e) => p(e).agentId === x.agentId && p(e).startedAt === x.at)!;
+      for (const c of x.closes) {
+        expect(c.date < x.tradingDate).toBe(true);
+        expect(p(run).inputSeqs as number[]).toContain(c.seq);
+      }
+    }
+    // 判断に使った終値の、記録した出典（source.captured）の公開・取得の時刻は、判断より前
+    for (const run of of("agent.run")) {
+      for (const seq of p(run).inputSeqs as number[]) {
+        const input = r.events[seq - 1]!;
+        if (input.type !== "prices.close") continue;
+        const src = of("source.captured").filter((e) => p(e).contentHash === p(input).valuesHash);
+        expect(src.length).toBe(1);
+        expect(p(src[0]!).publishedAt as number).toBeLessThan(p(run).startedAt as number);
+        expect(p(src[0]!).fetchedAt as number).toBeLessThan(p(run).startedAt as number);
+      }
+    }
     // 遅れた日の終値は、取り込んだ後の判断（翌日の朝）から入力に入る
     const late = of("prices.close").find((e) => p(e).date === LATE)!;
     expect(late.recordedAt).toBeGreaterThanOrEqual(jst("2026-11-19", 3));
     expect(of("agent.run").filter((e) => (p(e).inputSeqs as number[]).includes(late.seq)).length).toBeGreaterThan(0);
     expect(of("agent.run").filter((e) => (p(e).inputSeqs as number[]).includes(late.seq)).every((e) => e.seq > late.seq && e.recordedAt >= late.recordedAt)).toBe(true);
+  });
+
+  it("前の日の終値が朝の判断より後に届いた日は、判断を待ち（その日は注文しない）、その後に追いつく", async () => {
+    const next = "2026-11-19";
+    const late = await run(20261104, { lateFetchAt: jst(next, 8) }); // 判断（7:00）の後、締め（8:30）の前に届く
+    const ev = late.events;
+    const lateClose = ev.find((e) => e.type === "prices.close" && p(e).date === LATE)!;
+    expect(lateClose.recordedAt).toBeGreaterThanOrEqual(jst(next, 8));
+    expect(late.seen.filter((x) => x.tradingDate === next)).toEqual([]);
+    expect(ev.filter((e) => e.type === "order_sheet.committed" && p(e).tradingDate === next)).toEqual([]);
+    expect(ev.filter((e) => e.type === "valuation.recorded").length).toBe(DAYS.length * 3);
+    expect(await verifyChain(ev)).toEqual([]);
+    const ledger = await replay(ev, late.values, { holidayTables: late.holidayTables });
+    for (const id of ids) expect(ledger.account(id)).toEqual(late.store.account(id));
   });
 });
