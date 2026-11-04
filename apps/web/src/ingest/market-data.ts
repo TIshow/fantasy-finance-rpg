@@ -30,7 +30,7 @@ export function staticSource(quotes: readonly SourceQuote[]): MarketSource {
   return { fetch: async () => copy.map((q) => ({ ...q })) };
 }
 
-export type QuoteRejectReason = "invalid_quote" | "unknown_published_at" | "published_after_fetch" | "invalid_revised_at";
+export type QuoteRejectReason = "invalid_quote" | "unknown_published_at" | "published_after_fetch" | "invalid_revised_at" | "duplicate_in_batch";
 
 export interface CaptureResult {
   fetchedAt: number;
@@ -43,6 +43,12 @@ export interface CaptureResult {
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const isTime = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+/** 暦の上にある日付（2026-13-45 などを断る） */
+const isDate = (v: unknown): v is string => {
+  if (typeof v !== "string" || !DATE.test(v)) return false;
+  const t = Date.parse(`${v}T00:00:00Z`);
+  return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === v;
+};
 const isAmount = (v: unknown) => v === null || (typeof v === "number" && Number.isSafeInteger(v) && v >= 0);
 const KIND_ORDER = { open: 0, close: 1 } as const;
 const keyOf = (o: { symbol: string; date: string; kind: string }) => `${o.symbol}\u0000${o.date}\u0000${o.kind}`;
@@ -64,7 +70,8 @@ export class IngestedMarketData implements MarketDataPort {
   private readonly versions: PriceObservation[] = [];
   /** (銘柄, 日, 種類) ごとの最新の版 */
   private readonly latestByKey = new Map<string, PriceObservation>();
-  private lastFetchedAt = -Infinity;
+  /** capture と asOf が見た Clock の最大値。これより前の fetchedAt を足すと、渡した窓の中身が後から変わるので断る */
+  private highWater = -Infinity;
 
   constructor(private readonly clock: Clock) {}
 
@@ -77,17 +84,21 @@ export class IngestedMarketData implements MarketDataPort {
    * 取得した観測を取り込む。fetchedAt はここで Clock から一度だけ取る（同期なので、途中に別の取り込みは挟まらない）。
    * - 公開時刻が分からない・fetchedAt より後の観測は足さない（窓が返せないため。rejected に理由を残す）
    * - 最新の版と値（価格・出来高・出典）が同じなら足さない
-   * - 値が違えば改訂として新しい版を足す。元の版は残す。改訂の publishedAt は取得元の revisedAt、なければ fetchedAt
+   * - 値が違えば改訂として新しい版を足す。元の版は残す。改訂の publishedAt は取得元の revisedAt（元の版の fetchedAt 以上に限る）、なければ fetchedAt
    *   （こちらが改訂を最初に観測した時刻。取得元の古い publishedAt を使うと、過去の窓に改訂後の値が見えるため）
-   * Clock が前回の取り込みより前に戻っていたら、何も足さずに RangeError（後から過去の fetchedAt を作らない）。
+   * - 同じ取り込みの中で同じ (銘柄, 日, 種類) が2件以上あれば、どれも足さない（どちらが正しいか決められない）
+   * Clock が、前回の取り込みや asOf で見た時刻より前に戻っていたら、何も足さずに RangeError
+   * （後から過去の fetchedAt を作らない。渡した窓に、後から観測が増えない）。
    */
   capture(quotes: readonly SourceQuote[]): CaptureResult {
     const fetchedAt = this.clock.now();
-    if (!isTime(fetchedAt) || fetchedAt < this.lastFetchedAt) throw new RangeError("clock went backwards or is not a time");
-    this.lastFetchedAt = fetchedAt;
+    if (!isTime(fetchedAt) || fetchedAt < this.highWater) throw new RangeError("clock went backwards or is not a time");
+    this.highWater = fetchedAt;
     const result: CaptureResult = { fetchedAt, added: [], unchanged: 0, rejected: [] };
+    const counts = new Map<string, number>();
+    for (const q of quotes) counts.set(keyOf(q), (counts.get(keyOf(q)) ?? 0) + 1);
     for (const quote of quotes) {
-      const outcome = this.toVersion(quote, fetchedAt);
+      const outcome = (counts.get(keyOf(quote)) ?? 0) > 1 ? "duplicate_in_batch" : this.toVersion(quote, fetchedAt);
       if (typeof outcome === "string") result.rejected.push({ quote, reason: outcome });
       else if (outcome === null) result.unchanged++;
       else {
@@ -101,7 +112,7 @@ export class IngestedMarketData implements MarketDataPort {
 
   /** 新しい版、同じ値なら null、足せなければ理由 */
   private toVersion(q: SourceQuote, fetchedAt: number): PriceObservation | null | QuoteRejectReason {
-    if (typeof q.symbol !== "string" || q.symbol === "" || typeof q.date !== "string" || !DATE.test(q.date)) return "invalid_quote";
+    if (typeof q.symbol !== "string" || q.symbol === "" || !isDate(q.date)) return "invalid_quote";
     if ((q.kind !== "open" && q.kind !== "close") || typeof q.source !== "string" || q.source === "" || !isAmount(q.price)) return "invalid_quote";
     const volume = q.kind === "close" ? (q.volume ?? null) : undefined;
     if (volume !== undefined && !isAmount(volume)) return "invalid_quote";
@@ -112,7 +123,8 @@ export class IngestedMarketData implements MarketDataPort {
     if (prev) {
       if (prev.price === q.price && volumeOf(prev) === volume && prev.source === q.source) return null;
       if (q.revisedAt == null) publishedAt = fetchedAt;
-      else if (!isTime(q.revisedAt) || q.revisedAt < prev.publishedAt) return "invalid_revised_at";
+      // 元の版を取得した時刻には、取得元はまだ元の値を出していた。それより前の改訂時刻は、見たことと矛盾する
+      else if (!isTime(q.revisedAt) || q.revisedAt < prev.fetchedAt) return "invalid_revised_at";
       else publishedAt = q.revisedAt;
     }
     if (publishedAt > fetchedAt) return "published_after_fetch";
@@ -122,7 +134,10 @@ export class IngestedMarketData implements MarketDataPort {
   }
 
   asOf(at: number): MarketView {
-    if (!Number.isFinite(at) || at > this.clock.now()) throw new RangeError("asOf is later than now");
+    const now = this.clock.now();
+    if (!isTime(now)) throw new RangeError("clock is not a time");
+    if (!Number.isFinite(at) || at > now) throw new RangeError("asOf is later than now");
+    this.highWater = Math.max(this.highWater, now);
     const visible = (symbol: string) => this.versions.filter((o) => o.symbol === symbol && visibleAt(o, at)).sort(compare);
     return Object.freeze({
       at,

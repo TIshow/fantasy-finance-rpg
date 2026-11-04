@@ -54,21 +54,45 @@ describe("IngestedMarketData の取り込み", () => {
     expect((await port.asOf(T + 3_600_001).history("TSTA")).map((o) => o.price)).toEqual([1_010_0, 1_011_0]);
   });
 
-  it("取得元の改訂時刻を使う。元の版の公開時刻より前・数でない改訂時刻は断る", () => {
-    const clock = new FakeClock(T + 3_600_000);
+  it("取得元の改訂時刻を使う。元の版を取得した時刻より前・数でない改訂時刻は断る", () => {
+    const clock = new FakeClock(T + 1_000);
     const port = new IngestedMarketData(clock);
     port.capture([close(1_010_0, T)]);
     clock.set(T + 7_200_000);
-    const r = port.capture([close(1_011_0, T, { revisedAt: T + 1_800_000 }), close(1_012_0, T, { revisedAt: T - 1 }), close(1_013_0, T, { revisedAt: NaN })]);
+    const bad = [close(1_012_0, T, { revisedAt: T + 500 }), close(1_013_0, T, { revisedAt: NaN })].map((q) => port.capture([q]));
+    expect(bad.flatMap((r) => r.rejected.map((x) => x.reason))).toEqual(["invalid_revised_at", "invalid_revised_at"]);
+    const r = port.capture([close(1_011_0, T, { revisedAt: T + 1_800_000 })]);
     expect(r.added.map((o) => [o.price, o.publishedAt])).toEqual([[1_011_0, T + 1_800_000]]);
-    expect(r.rejected.map((x) => x.reason)).toEqual(["invalid_revised_at", "invalid_revised_at"]);
   });
 
   it("公開時刻が分からない・取り込みより後に公開・形の壊れた観測は足さず、理由を返す", () => {
     const port = new IngestedMarketData(new FakeClock(T));
-    const r = port.capture([close(1_010_0, null), close(1_010_0, T + 1), close(1.5, T), close(1_010_0, T, { date: "11/10" }), close(1_010_0, T, { volume: -1 })]);
-    expect(r.added).toEqual([]);
-    expect(r.rejected.map((x) => x.reason)).toEqual(["unknown_published_at", "published_after_fetch", "invalid_quote", "invalid_quote", "invalid_quote"]);
+    const quotes = [close(1_010_0, null), close(1_010_0, T + 1), close(1.5, T), close(1_010_0, T, { date: "11/10" }), close(1_010_0, T, { date: "2026-13-45" }), close(1_010_0, T, { volume: -1 })];
+    const results = quotes.map((q) => port.capture([q]));
+    expect(results.flatMap((r) => r.added)).toEqual([]);
+    expect(results.flatMap((r) => r.rejected.map((x) => x.reason))).toEqual(["unknown_published_at", "published_after_fetch", "invalid_quote", "invalid_quote", "invalid_quote", "invalid_quote"]);
+  });
+
+  it("同じ取り込みに同じ銘柄・日・種類が2件あれば、どちらも足さない", () => {
+    const port = new IngestedMarketData(new FakeClock(T + 1_000));
+    const r = port.capture([close(1_010_0, T), close(1_011_0, T), close(1_000_0, T, { kind: "open" })]);
+    expect(r.added.map((o) => o.kind)).toEqual(["open"]);
+    expect(r.rejected.map((x) => x.reason)).toEqual(["duplicate_in_batch", "duplicate_in_batch"]);
+  });
+
+  it("渡した窓は、後の取り込みや改訂で中身が変わらない。窓を渡した時刻より前に時計が戻ったら取り込みを断る", async () => {
+    const clock = new FakeClock(T + 1_000);
+    const port = new IngestedMarketData(clock);
+    port.capture([close(1_010_0, T)]);
+    clock.set(T + 10_000);
+    const view = port.asOf(T + 10_000);
+    const before = await view.history("TSTA");
+    clock.set(T + 5_000); // 時計の巻き戻り（NTP の補正など）
+    expect(() => port.capture([close(1_011_0, T)])).toThrow(RangeError);
+    clock.set(T + 10_000);
+    port.capture([close(1_012_0, T)]); // ちょうど at に取得したものは見えない
+    expect(await view.history("TSTA")).toEqual(before);
+    expect(() => new IngestedMarketData({ now: () => NaN }).asOf(0)).toThrow(RangeError);
   });
 
   it("時計が前回の取り込みより前に戻ったら、何も足さずに断る", () => {
