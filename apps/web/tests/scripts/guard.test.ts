@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { checkBash, decide, globHitsSecret, isSecretPath, parseCommands } from "../../../../.claude/hooks/guard";
+import { checkBash, checkWrite, decide, globHitsSecret, isSecretPath, parseCommands, writeTargets } from "../../../../.claude/hooks/guard";
 
-const onBranch = (b: string) => ({ branch: () => b });
+const onBranch = (b: string) => ({ branch: () => b, root: () => "/repo" });
 const feature = onBranch("agent/core/12-fix");
 /** 止める（理由に part を含む） */
 const blocked = (cmd: string, part: string, env = feature) => expect(checkBash(cmd, env) ?? "").toContain(part);
@@ -240,5 +242,228 @@ describe("2回目のレビューで見つかった抜け道", () => {
       "gh api repos/a/b/branches/main/protection -X PUT", "gh api repos/a/b/pulls/5/reviews/3 -X PUT", "gh api repos/a/b/labels -f name=x", "gh api user -X PATCH -f name=x",
     ])
       blocked(cmd, "書き込み");
+  });
+});
+
+describe("役ごとの書き込み先（agent_type）", () => {
+  const env = onBranch("agent/x/1-y");
+  const W = "/repo/apps/web";
+  const write = (role: string | undefined, path: string, cwd = "/repo") => checkWrite(role, path, cwd, env);
+  const denied = (role: string | undefined, path: string, part: string, cwd = "/repo") => expect(write(role, path, cwd) ?? "").toContain(part);
+  const ok = (role: string | undefined, path: string, cwd = "/repo") => expect(write(role, path, cwd)).toBeNull();
+
+  it("core：台帳・イベント・祝日とそのテストだけ", () => {
+    for (const f of [`${W}/src/ledger/a.ts`, `${W}/src/events/append.ts`, `${W}/src/holidays/table.ts`, `${W}/tests/ledger/a.test.ts`, `${W}/tests/events/x.test.ts`, `${W}/tests/holidays/h.test.ts`]) ok("core", f);
+    ok("core", "src/ledger/a.ts", W);
+    for (const f of [`${W}/src/store/db.ts`, `${W}/src/app/page.tsx`, "/repo/docs/STATUS.md", `${W}/tests/store/x.test.ts`, `${W}/src/ledger-extra/a.ts`])
+      denied("core", f, "core の担当外");
+    ok("core", `${W}/src/ledger`); // 担当ディレクトリ自身（mkdir -p など）
+  });
+
+  it("platform：基盤の層。守りの設定（check-purity・tests/scripts）は担当に見えても書けない", () => {
+    for (const f of [`${W}/src/store/db.ts`, `${W}/src/ingest/a.ts`, `${W}/src/runner/a.ts`, `${W}/src/llm/a.ts`, `${W}/db/001.sql`, `${W}/scripts/update-holidays.mjs`, `${W}/tests/llm/x.test.ts`]) ok("platform", f);
+    for (const f of [`${W}/scripts/check-purity.ts`, `${W}/tests/scripts/guard.test.ts`]) denied("platform", f, "守りの設定");
+    for (const f of [`${W}/src/ledger/a.ts`, `${W}/src/events/a.ts`, `${W}/src/app/page.tsx`]) denied("platform", f, "platform の担当外");
+  });
+
+  it("web：画面だけ", () => {
+    for (const f of [`${W}/src/app/page.tsx`, `${W}/src/app/globals.css`, `${W}/src/components/x.tsx`, `${W}/src/view/t.ts`, `${W}/tests/view/t.test.ts`]) ok("web", f);
+    for (const f of [`${W}/src/ledger/a.ts`, `${W}/src/store/a.ts`, "/repo/docs/STATUS.md"]) denied("web", f, "web の担当外");
+  });
+
+  it("verifier：tests/adversarial/ だけ", () => {
+    ok("verifier", `${W}/tests/adversarial/a.test.ts`);
+    for (const f of [`${W}/src/ledger/a.ts`, `${W}/tests/ledger/a.test.ts`, "/repo/docs/DECISIONS.md"]) denied("verifier", f, "verifier の担当外");
+  });
+
+  it("lead：docs/ と README だけ。機能コードは書かない", () => {
+    for (const f of ["/repo/docs/STATUS.md", "/repo/docs/HISTORY.md", "/repo/README.md"]) ok("lead", f);
+    for (const f of [`${W}/src/ledger/a.ts`, `${W}/src/app/page.tsx`]) denied("lead", f, "lead の担当外");
+  });
+
+  it("どの役も、守りの設定（.claude・.github・AGENTS.md・package.json など）は書けない", () => {
+    for (const role of ["core", "platform", "web", "verifier", "lead", "general-purpose"])
+      for (const f of ["/repo/.claude/settings.json", "/repo/.claude/hooks/guard.ts", "/repo/.github/workflows/ci.yml", "/repo/AGENTS.md", "/repo/CLAUDE.md", `${W}/package.json`, `${W}/tsconfig.json`, "/repo/.tool-versions"])
+        denied(role, f, "守りの設定");
+  });
+
+  it("読み取り専用の役（code-reviewer・Explore・Plan）はリポジトリに書けない。/tmp は可", () => {
+    for (const role of ["code-reviewer", "Explore", "Plan"]) {
+      denied(role, `${W}/src/ledger/a.ts`, "読み取り専用");
+      denied(role, "/repo/docs/x.md", "読み取り専用");
+      ok(role, "/tmp/review-notes.md");
+    }
+  });
+
+  it("役が決まっていないセッション（ownerが直接動かす）は制限しない。知らない役は担当の制限なし（守りの設定だけ）", () => {
+    ok(undefined, "/repo/.claude/settings.json");
+    ok(undefined, "/home/x/anything");
+    ok("general-purpose", `${W}/src/ledger/a.ts`);
+    ok("general-purpose", `${W}/src/store/a.ts`);
+  });
+
+  it("リポジトリの外は書けない（/tmp と /dev は可）。.. で抜けられない", () => {
+    for (const f of ["/home/x/.bashrc", "/etc/passwd", "/repo/../other/a.ts", `${W}/src/ledger/../../../../../outside.ts`]) denied("core", f, "リポジトリの外");
+    for (const f of ["/tmp/x.log", "/dev/null"]) ok("core", f);
+    denied("core", `${W}/src/ledger/../store/x.ts`, "core の担当外");
+    ok("core", `${W}/src/store/../ledger/x.ts`);
+  });
+
+  it("生成物（.next・node_modules・coverage）は書ける", () => {
+    for (const f of [`${W}/.next/cache/x`, `${W}/node_modules/x/y.js`, `${W}/coverage/index.html`, `${W}/tsconfig.tsbuildinfo`]) ok("verifier", f);
+  });
+
+  it("シンボリックリンクで担当外・リポジトリの外へ抜けられない（実体のパスで判定）", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "guard-")));
+    try {
+      for (const d of ["apps/web/src/ledger", "docs"]) mkdirSync(join(root, d), { recursive: true });
+      writeFileSync(join(root, "docs/STATUS.md"), "x");
+      symlinkSync("../../../../docs", join(root, "apps/web/src/ledger/to-docs"));
+      symlinkSync("/etc", join(root, "apps/web/src/ledger/to-etc"));
+      const real = { branch: () => "x", root: () => root };
+      expect(checkWrite("core", join(root, "apps/web/src/ledger/to-docs/STATUS.md"), root, real) ?? "").toContain("core の担当外");
+      expect(checkWrite("core", join(root, "apps/web/src/ledger/to-etc/hosts"), root, real) ?? "").toContain("リポジトリの外");
+      expect(checkWrite("core", join(root, "apps/web/src/ledger/new.ts"), root, real)).toBeNull();
+      expect(checkWrite("lead", join(root, "docs/STATUS.md"), root, real)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("編集ツール（Edit・Write・MultiEdit・NotebookEdit）に効く。.env は役より先に秘密として止める", () => {
+    const base = { agent_type: "core", cwd: "/repo" };
+    for (const tool_name of ["Edit", "Write", "MultiEdit"]) {
+      expect(decide({ ...base, tool_name, tool_input: { file_path: `${W}/src/store/a.ts` } }, env) ?? "").toContain("core の担当外");
+      expect(decide({ ...base, tool_name, tool_input: { file_path: `${W}/src/ledger/a.ts` } }, env)).toBeNull();
+    }
+    expect(decide({ ...base, tool_name: "NotebookEdit", tool_input: { notebook_path: "/repo/docs/n.ipynb" } }, env) ?? "").toContain("core の担当外");
+    expect(decide({ ...base, tool_name: "Write", tool_input: { file_path: `${W}/src/ledger/.env` } }, env) ?? "").toContain("秘密のファイル");
+    expect(decide({ ...base, tool_name: "Read", tool_input: { file_path: "/repo/docs/STATUS.md" } }, env)).toBeNull();
+    expect(decide({ ...base, tool_name: "Grep", tool_input: { pattern: "x", path: "/repo/docs" } }, env)).toBeNull();
+    expect(decide({ tool_name: "Edit", tool_input: { file_path: "/repo/.claude/settings.json" }, cwd: "/repo" }, env)).toBeNull();
+  });
+});
+
+describe("Bash の書き込み先（役があるとき）", () => {
+  const env = onBranch("agent/x/1-y");
+  const W = "apps/web";
+  const asCore = (cmd: string) => checkBash(cmd, env, { role: "core", cwd: "/repo" });
+  const stop = (cmd: string, part = "core の担当外") => expect(asCore(cmd) ?? "").toContain(part);
+  const pass = (cmd: string) => expect(asCore(cmd)).toBeNull();
+
+  const stopped: [string, string?][] = [
+    [`echo x > ${W}/src/store/x.ts`], [`echo x >> docs/STATUS.md`], [`echo x >${W}/src/app/p.tsx`], [`cat a | tee ${W}/src/store/x.ts`], [`tee -a docs/x < in`],
+    [`sed -i 's/a/b/' ${W}/src/store/x.ts`], [`sed -i.bak -e 's/a/b/' docs/x.md`], [`sed -ni 's/a/b/p' docs/x.md`], [`cp a.ts docs/b.ts`], [`cp -r a ${W}/src/store/`], [`cp -t docs a b`], [`install -m 644 a docs/b`],
+    [`mv ${W}/src/ledger/a.ts ${W}/src/store/a.ts`], [`mv docs/x ${W}/src/ledger/x`], [`ln -s a docs/l`], [`rm docs/x`], [`rm -rf ${W}/src/store`], [`rmdir docs/old`], [`touch docs/n`], [`mkdir -p ${W}/src/store`],
+    [`truncate -s 0 docs/x`], [`chmod 755 ${W}/src/store/x`], [`chown u docs/x`], [`dd if=a of=docs/x`], [`sudo rm docs/x`], [`FOO=1 cp a docs/b`], [`bash -c 'echo x > docs/y'`], [`echo $(rm docs/x)`],
+    [`ls && rm docs/x`], [`echo x > /home/u/.bashrc`, "リポジトリの外"], [`cp a /etc/hosts`, "リポジトリの外"], [`rm .claude/settings.json`, "守りの設定"], [`echo x > AGENTS.md`, "守りの設定"],
+  ];
+  it.each(stopped)("%s を止める", (cmd, part) => stop(cmd, part));
+
+  it.each([
+    [`echo x > ${W}/src/ledger/a.ts`], [`echo x >> ${W}/tests/events/e.test.ts`], [`cat a | tee ${W}/src/ledger/x.ts`], [`sed -i 's/a/b/' ${W}/src/ledger/x.ts`], [`sed -i -e 's/a/b/' ${W}/src/events/x.ts`],
+    [`sed -n 's/a/b/p' docs/x.md`], [`sed 's/a/b/' docs/x.md > /tmp/out`], [`cp docs/x ${W}/src/ledger/y.ts`], [`mv ${W}/src/ledger/a.ts ${W}/src/ledger/b.ts`], [`rm -rf ${W}/.next ${W}/coverage`],
+    [`mkdir -p ${W}/src/ledger/sub`], [`touch -d yesterday ${W}/src/ledger/a`], [`truncate -s 0 ${W}/src/ledger/x`], [`chmod 755 ${W}/src/ledger/x`], [`dd if=a of=/dev/null`],
+    [`npm test > /tmp/out.txt 2>&1`], [`npm run build 2>&1 | tail -5`], [`echo x > /dev/null`], [`echo x >&2`], [`rm -rf $TMPDIR/x`], [`rm -f /tmp/a /tmp/b`],
+    [`ls ${W}/src/store`], [`cat docs/STATUS.md`], [`grep -rn x docs > /tmp/o`], [`git commit -m "docs/rm"`], [`git status && git diff --stat`], [`npx vitest run tests/ledger`],
+  ])("%s は通す", (cmd) => pass(cmd));
+
+  it("役のないセッションは制限しない。読み取り専用の役は repo に書けず /tmp は可", () => {
+    expect(checkBash("echo x > docs/x && rm .claude/settings.json", env, { cwd: "/repo" })).toBeNull();
+    expect(checkBash("echo x > docs/x", env, { role: "code-reviewer", cwd: "/repo" }) ?? "").toContain("読み取り専用");
+    expect(checkBash("echo x > /tmp/notes", env, { role: "code-reviewer", cwd: "/repo" })).toBeNull();
+  });
+
+  it("引用符の中の > は書き込み先ではない（M1）", () => {
+    pass(`echo "> 引用" && grep ">= 0" docs/x.md`);
+    pass(`git commit -m ">> docs/x"`);
+    expect(writeTargets(["echo", "\u0002> q"])).toEqual([]);
+    stop(`echo x > "${W}/src/store/x.ts"`);
+  });
+
+  it("cd を文字どおり追う。読めない cd のあとの相対パスは止める（M5）", () => {
+    stop(`cd docs && echo x > y.md`);
+    stop(`cd ${W}/src/store && touch a.ts`);
+    pass(`cd ${W}/src/ledger && touch a.ts`);
+    pass(`cd /tmp && echo x > a`);
+    stop(`cd $X && echo x > y.md`, "cd の行き先");
+    stop(`cd "$X" && touch a`, "cd の行き先");
+    pass(`cd $X && echo x > /tmp/a`);
+  });
+
+  it("追加の書き込みコマンド（L1）", () => {
+    stop(`timeout 5 rm docs/x`);
+    stop(`git mv docs/a docs/b`);
+    stop(`git rm docs/x`);
+    stop(`rm -rf -- docs/x`);
+    stop(`cp -t docs a b`);
+    stop(`install -d ${W}/src/store`);
+    stop(`sed -es/a/b/ -i docs/x.md`);
+    stop(`chmod -R u+w docs`);
+    pass(`git mv ${W}/src/ledger/a.ts ${W}/src/ledger/b.ts`);
+    pass(`timeout 5 npm test`);
+    expect(writeTargets(["timeout", "-k", "3", "5", "rm", "p"])).toEqual(["p"]);
+  });
+
+  it("& や ~ の扱い（L2・M4）", () => {
+    stop(`echo x &> docs/y`);
+    stop(`echo x > ~/.bashrc`, "リポジトリの外");
+    stop(`rm -rf ~`, "リポジトリの外");
+    stop(`echo x > ~root/x`, "~ユーザー名");
+  });
+
+  it("守りの設定を含む場所・ワイルドカード（M3・M4）", () => {
+    stop(`rm -rf .`, "守りの設定");
+    stop(`rm -rf apps`, "守りの設定");
+    stop(`rm -rf .gith*`, "守りの設定");
+    stop(`rm -rf .clau?e`, "守りの設定");
+    stop(`rm -rf ${W}/package.js*`, "守りの設定");
+  });
+
+  it("書き込み先の取り出し", () => {
+    expect(writeTargets(["echo", "x", ">a", ">>b", ">&2", ">&1"])).toEqual(["a", "b"]);
+    expect(writeTargets(["sed", "-i", "s/a/b/", "f", "g"])).toEqual(["f", "g"]);
+    expect(writeTargets(["sed", "-i", "-e", "s/a/b/", "f"])).toEqual(["f"]);
+    expect(writeTargets(["cp", "-r", "a", "b", "dst"])).toEqual(["dst"]);
+    expect(writeTargets(["chmod", "-R", "755", "d"])).toEqual(["d"]);
+    expect(writeTargets(["sudo", "-u", "x", "rm", "-rf", "p"])).toEqual(["p"]);
+    expect(writeTargets(["git", "commit", "-m", "cp a/b"])).toEqual([]);
+    expect(writeTargets(["rm", "$X", "ok"])).toEqual(["ok"]);
+  });
+});
+
+describe("worktree ごとのルート（M7・L3）", () => {
+  const roots: Record<string, string | null> = { "/wt/a": "/wt/a", "/repo": "/repo", "/other": null };
+  const pick = (p: string) => Object.keys(roots).find((k) => p === k || p.startsWith(`${k}/`));
+  const env = { branch: () => "agent/x/1-y", root: (p: string) => { const k = pick(p); return k === undefined ? null : roots[k]!; } };
+
+  it("worktree の中でも、そのルートからの相対で判定する", () => {
+    expect(checkWrite("core", "/wt/a/apps/web/src/ledger/a.ts", "/wt/a", env)).toBeNull();
+    expect(checkWrite("core", "/wt/a/docs/x.md", "/wt/a", env) ?? "").toContain("core の担当外");
+  });
+
+  it("別の worktree への書き込みも、その worktree のルートで判定する", () => {
+    expect(checkWrite("core", "/repo/apps/web/src/store/x.ts", "/wt/a", env) ?? "").toContain("core の担当外");
+    expect(checkWrite("core", "/repo/apps/web/src/ledger/x.ts", "/wt/a", env)).toBeNull();
+  });
+
+  it("git の外（root が分からない）は、リポジトリの外として止める。/tmp は可", () => {
+    expect(checkWrite("core", "/other/x", "/wt/a", env) ?? "").toContain("リポジトリの外");
+    expect(checkWrite("core", "/tmp/x", "/wt/a", env)).toBeNull();
+  });
+});
+
+describe("フックの入口：役の判別", () => {
+  const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
+  const script = join(root, ".claude", "hooks", "guard.ts");
+  const run = (input: object) => spawnSync(process.execPath, [script], { input: JSON.stringify({ cwd: root, ...input }), encoding: "utf8" });
+
+  it("agent_type が core なら担当外の編集を止め、担当内は通す。役がなければ通す", () => {
+    const stop = run({ agent_type: "core", tool_name: "Edit", tool_input: { file_path: join(root, "apps/web/src/store/x.ts") } });
+    expect(stop.status).toBe(2);
+    expect(stop.stderr).toContain("core の担当外");
+    expect(run({ agent_type: "core", tool_name: "Write", tool_input: { file_path: join(root, "apps/web/src/ledger/x.ts") } }).status).toBe(0);
+    expect(run({ tool_name: "Edit", tool_input: { file_path: join(root, "apps/web/src/store/x.ts") } }).status).toBe(0);
+    expect(run({ agent_type: "web", tool_name: "Bash", tool_input: { command: "echo x > apps/web/src/ledger/a.ts" } }).status).toBe(2);
   });
 });

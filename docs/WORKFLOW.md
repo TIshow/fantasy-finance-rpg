@@ -10,7 +10,7 @@
 - **少人数。** 同時に動かすのは通常3体まで（main＋実装1〜2。verifierは必要なときだけ）。増やす前に、増やす理由（独立して進められる仕事がある、など）を示す
 - **書く役は分離する。** 役ごとに別のセッションとworktree（issueごとのブランチ）を持ち、担当外のパスは編集しない
 - **セッションは使い捨てる。** 仕事が終わったらセッションを閉じ、次は新しいセッションで始める。残すべきものは、セッションの記憶でなくリポジトリの文書（タスク票・issue・`docs/STATUS.md`）に書く
-- **規則は仕組みで守らせる。** 文章の約束はCI・CODEOWNERS・フックに移す（CI・pr-size・CODEOWNERS・純関数の検査・Claude Codeのフック（`.claude/hooks/guard.ts`。§4.7）は追加済み。役ごとの書き込みパス制限のフックは次のPRで追加する。それまでは文書の約束とレビューで守る）。守れていない約束を見つけたら、文書でなく仕組みを足す
+- **規則は仕組みで守らせる。** 文章の約束はCI・CODEOWNERS・フックに移す（CI・pr-size・CODEOWNERS・純関数の検査・Claude Codeのフック（`.claude/hooks/guard.ts`。§4.7）は追加済み。残りは文書の約束とレビューで守る）。守れていない約束を見つけたら、文書でなく仕組みを足す
 - **作る人と確かめる人を分ける。** 実装した役は自分のPRの最終レビューをしない
 - **文書が正本。** 引き継ぎはチャット履歴でなくリポジトリの文書で行う（`CLAUDE.md`）
 
@@ -33,7 +33,7 @@
 
 ### 3.1 基本：役別のセッションを並べる（手動の並列）
 
-- ownerが、mainと役別のセッションを並べて動かす。各セッションは自分のworktreeで`.claude/agents/<役>.md`を指示として読み、担当パスの中だけで作業する
+- ownerが、mainと役別のセッションを並べて動かす。各セッションは自分のworktreeで`claude --agent <役>`（lead・core・platform・web・verifier）として起動し、`.claude/agents/<役>.md`を指示として読み、担当パスの中だけで作業する。役はフックが`agent_type`で判別して書き込み先を制限するので、`--agent`なしの素のセッションは制限されない（ownerが直接動かす場合だけ使う）
 - mainにはownerが基本の指示を出し、必要なら各役にも直接指示してよい。mainが作るタスク票（§4）は、役別のセッションにそのまま渡せる形にする
 - 役別のセッションは、仕事が終わったら閉じる。mainの文脈が長くなったら、`docs/STATUS.md`を現在地として更新してから閉じ、新しいmainで続ける
 
@@ -64,8 +64,20 @@
 - PRのマージ（`gh pr merge`、`gh api`のmerge）。`gh api`の書き込みは、PR・issueの作成と更新、コメント、レビューだけ許す。`gh repo`の変更、`gh secret`、`gh auth`のトークン表示も止める
 - `.env`など秘密のファイル（`.env.example`などは除く）の読み書き（Bash・Read・Grep・Glob・編集ツール）。`.env*`のようなワイルドカードや、`curl -d @.env`の形も止める
 - ownerだけが付けるラベル`large-pr-approved`（pr-sizeの失敗を自分で解く道を塞ぐ）
+- **役ごとの書き込み先**（`agent_type`で役を判別）。編集ツール（Edit・Write・MultiEdit・NotebookEdit）と、Bashの書き込み（リダイレクト、`tee`・`sed -i`・`cp`・`mv`・`install`・`ln`・`rm`・`unlink`・`rmdir`・`touch`・`mkdir`・`truncate`・`chmod`・`chown`・`dd of=`・`git mv`・`git rm`）に効く。パスは実体（`..`・シンボリックリンクを解いた後）で判定し、書き込み先が属するworktreeのルートからの相対で見る（別のworktreeやgitの外のパスも、そのルートで判定する）。Bashの`cd`は文字どおりの引数だけ追い、行き先が読めない`cd`のあとの相対パスへの書き込みは止める
 
-`settings.json`の`permissions.deny`は補助で、本体はフック。`deny`のBashルールは`git -C . push`や`bash -c`の形を止めないため、フックがコマンド全文を解析する。**限界：** 想定する相手はうっかり。`python -c`の中のgit、別のGitHubクライアント、大文字小文字を区別しないファイルシステム、シンボリックリンク経由の`.env`、`grep -r`のようなディレクトリ全体の検索が`.env`を読むこと、`gh`以外のクライアントでの書き込みなどは止められない。守りの本体はPRの境界（CODEOWNERS・CI・ownerの手動マージ）。
+| 役 | 書いてよい |
+| --- | --- |
+| core | `apps/web/src/{ledger,events,holidays}/`、`apps/web/tests/{ledger,events,holidays}/` |
+| platform | `apps/web/src/{store,ingest,runner,llm}/`、`apps/web/tests/{store,ingest,runner,llm}/`、`apps/web/db/`、`apps/web/scripts/` |
+| web | `apps/web/src/{app,components,view}/`、`apps/web/tests/{app,components,view}/` |
+| verifier | `apps/web/tests/adversarial/` |
+| lead | `docs/`、`README.md`（機能コードと`apps/`は書かない） |
+| code-reviewer・Explore・Plan | 書かない（`/tmp`は可） |
+
+どの役も書けない：`.claude/`・`.github/`・`AGENTS.md`・`CLAUDE.md`・`.tool-versions`・`apps/web/scripts/check-purity.ts`・`apps/web/tests/scripts/`・`apps/web/{package.json,package-lock.json,next.config.ts,tsconfig.json}`（`.github/CODEOWNERS`のownerの承認が要るもの）と、リポジトリの外（`/tmp`と`/dev`は可）。依存の追加などは、ownerが素のセッションで行う。ほかの`agent_type`（`general-purpose`など）は、守りの設定とリポジトリの外だけ制限する。生成物（`node_modules`・`.next`・`coverage`）は書ける。
+
+`settings.json`の`permissions.deny`は補助で、本体はフック。`deny`のBashルールは`git -C . push`や`bash -c`の形を止めないため、フックがコマンド全文を解析する。**限界：** 想定する相手はうっかり。`python -c`の中のgit、別のGitHubクライアント、大文字小文字を区別しないファイルシステム、シンボリックリンク経由の`.env`、`grep -r`のようなディレクトリ全体の検索が`.env`を読むこと、`gh`以外のクライアントでの書き込み、Bashでは`git checkout`/`git apply`・スクリプトの中の書き込み、などは止められない。守りの本体はPRの境界（CODEOWNERS・CI・ownerの手動マージ）。
 
 **実機の確認（ownerが一度行う）：** リポジトリの中で`claude`を起動し、「`git push origin main`を実行して」と頼む。フックが「ブロック：main…」と返せば有効。効かないときは`/status`の`Setting sources`に`Project settings`があるか、フォルダの信頼の確認が出ていれば承認したかを確かめる。
 
