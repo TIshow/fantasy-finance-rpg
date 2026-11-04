@@ -110,7 +110,7 @@ describe("(a) 正規化できる注文は、理由が何であっても orders �
         "suspended",
         async ({ log }) => {
           await ok(log, op("agent.suspended", jst("2026-11-10", 6), { agentId: "alpha", scope: "orders", reason: "x" }));
-          return { at, sheet: s(buy, "bad", "bad", "nope") }; // 停止は run・入力・日付の形より先（注文の形が違うときは下の it.fails）
+          return { at, sheet: s(buy, "bad", "bad", "nope") }; // 停止は run・入力・日付の形より先（注文の形が違うときは下のテスト）
         },
       ],
       [
@@ -223,7 +223,7 @@ describe("(c) 読めない注文の拒否でも、偽の理由は照合で落ち
     expect(await admitAll(await withRejected(log.events, at, { ...base, reason: "invalid_qty" }, [run, src]))).toMatch(/order_sheet\.rejected/);
   });
 
-  it("停止中の読めない拒否：停止中なら suspended と invalid_order のほかの理由は落ちる", async () => {
+  it("停止中の読めない拒否：停止中なら suspended のほかの理由は落ちる", async () => {
     const { log, src, run } = await setup();
     await ok(log, op("agent.suspended", jst("2026-11-10", 6), { agentId: "alpha", scope: "orders", reason: "x" }));
     const at = jst("2026-11-10", 7);
@@ -234,19 +234,49 @@ describe("(c) 読めない注文の拒否でも、偽の理由は照合で落ち
     }
   });
 
-  // 欠陥（低〜中・文書との食い違い）：§3.2 は「停止中なら suspended」、§4 は停止中の注文票に「理由 suspended を残す」と書く。
-  // ところが rejectionOf（append.ts）は注文の形の検査を停止の検査より先に見るので、停止中のAIでも注文の形が違えば invalid_order になる。
-  // 照合の側も、読めない拒否の invalid_order を状態によらず通すので、停止中の invalid_order の記録が照合を通る
-  it.fails("停止中のAIが形の違う注文を出しても、理由は suspended", async () => {
-    for (const orders of ["x", [null], [[1]], { a: 1 }]) {
-      const { log, src, run } = await setup();
-      await ok(log, op("agent.suspended", jst("2026-11-10", 6), { agentId: "alpha", scope: "orders", reason: "x" }));
-      const r = await log.commitSheet(jst("2026-11-10", 7), "alpha", { tradingDate: "2026-11-10", orders: orders as unknown as Order[], runSeq: run, inputSeqs: [src] });
-      expect(r.ok && r.rejected, JSON.stringify(orders)).toBe("suspended");
+  // #78 で見つけ、core が 55b159d で直した欠陥（文書との食い違い）：§3.2 は「停止中なら suspended」、§4 は停止中の注文票に「理由 suspended を残す」と書く。
+  // 直す前は rejectionOf（append.ts）が注文の形の検査を停止の検査より先に見て、停止中のAIでも注文の形が違えば invalid_order になった。
+  // 照合の側も、読めない拒否の invalid_order を状態によらず通していた
+  it("停止中のAIが形の違う注文を出しても、理由は suspended（AIごとの停止・全体の停止）で、照合を通る", async () => {
+    for (const agentId of ["alpha", "*"]) {
+      for (const orders of ["x", [null], [[1]], { a: 1 }, [{ symbol: "AAA", side: "buy", qty: 0.5 }]]) {
+        const { log, src, run } = await setup();
+        await ok(log, op("agent.suspended", jst("2026-11-10", 6), { agentId, scope: "both", reason: "x" }));
+        const r = await log.commitSheet(jst("2026-11-10", 7), "alpha", { tradingDate: "2026-11-10", orders: orders as unknown as Order[], runSeq: run, inputSeqs: [src] });
+        const where = `${agentId} ${JSON.stringify(orders)}`;
+        expect(r.ok && r.rejected, where).toBe("suspended");
+        expect(await admitAll(log.events), where).toBeNull();
+      }
     }
   });
 
-  it.fails("停止中のAIの、理由 invalid_order の拒否の記録は照合で落ちる", async () => {
+  it("投稿だけの停止中・停止を解いた後は、形の違う注文は invalid_order で、読めない拒否の偽の suspended は落ちる", async () => {
+    const states: [string, (log: EventLog) => Promise<unknown>][] = [
+      ["posts だけ", (log) => ok(log, op("agent.suspended", jst("2026-11-10", 6), { agentId: "alpha", scope: "posts", reason: "x" }))],
+      [
+        "停止を解いた後",
+        async (log) => {
+          await ok(log, op("agent.suspended", jst("2026-11-10", 6), { agentId: "alpha", scope: "orders", reason: "x" }));
+          await ok(log, op("agent.resumed", jst("2026-11-10", 6, 1), { agentId: "alpha", scope: "orders", reason: "x" }));
+        },
+      ],
+    ];
+    for (const [name, prepare] of states) {
+      for (const orders of ["x", [null], [{ symbol: "AAA", side: "buy", qty: 0.5 }]]) {
+        const { log, src, run } = await setup();
+        await prepare(log);
+        const at = jst("2026-11-10", 7);
+        const r = await log.commitSheet(at, "alpha", { tradingDate: "2026-11-10", orders: orders as unknown as Order[], runSeq: run, inputSeqs: [src] });
+        const where = `${name} ${JSON.stringify(orders)}`;
+        expect(r.ok && r.rejected, where).toBe(Array.isArray(orders) && orders[0] !== null ? "invalid_qty" : "invalid_order");
+        expect(await admitAll(log.events), where).toBeNull();
+        const fake = { agentId: "alpha", tradingDate: "2026-11-10", runSeq: run, inputSeqs: [src], ordersUnreadable: true, reason: "suspended" };
+        expect(await admitAll(await withRejected(log.events, at + 1, fake, [run, src])), where).toMatch(/order_sheet\.rejected/);
+      }
+    }
+  });
+
+  it("停止中のAIの、理由 invalid_order の拒否の記録は照合で落ちる", async () => {
     const { log, src, run } = await setup();
     await ok(log, op("agent.suspended", jst("2026-11-10", 6), { agentId: "alpha", scope: "orders", reason: "x" }));
     const at = jst("2026-11-10", 7);
