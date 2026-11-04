@@ -62,6 +62,7 @@
 - 限界：Agent Teams（実験機能）には再開できない、タスクの状態が遅れる、入れ子にできないなどの制約があるため常用しない。担当パスと純関数の規則は、フックとCIで機械的に守らせるまでは、文書の約束とレビューに頼る。
 - 追記（2026-11-04、owner）：承認の扱いは`docs/WORKFLOW.md` §4.6の(b)。別の認証は使わず、ブランチ保護はCI（`check`・`size`）とPRの必須だけ、承認の必須は設けない。マージはownerが手動で行い、エージェントはマージしない。迂回できる限界は、規律とフックで補う。
 - 追記（2026-11-04、owner）：運用はデスクトップアプリ（Codeタブ）を中心にする。Codeタブには役を選ぶ項目がないので、役は`.claude/roles/<役>.md`で与え、役別に新規セッション（Worktreeオン）を立てる。**役ごとの書き込み前の制限（フックの`agent_type`）は、この運用では働かない**ので、役別の境界は役ファイルの約束と完了前の境界検査（`scripts/check-boundaries.sh`）とPRの境界（CODEOWNERS・ownerの手動マージ）で守る。ブランチ保護は「Not enforced」の表示のまま受け入れる（ownerの判断）。詳細は`docs/WORKFLOW.md` §3.1・§3.3・§4.7・§4.8。**変更点：** 役の指示の正本を`.claude/roles/`へ移し、旧`.claude/agents/{lead,core,platform,web,verifier}.md`を廃止した（`code-reviewer.md`は`AGENTS.md`のレビュー規律が使うので残す）。**費用：** 役別セッションを増やすとトークン費用が増える。実装役のうちwebの既定モデルをSonnetにして抑える（ほかはOpus）。2週間ごとの見直し（WORKFLOW §7）は変わらない。**やめ方：** ターミナルの`claude --agent`運用に戻すときは、廃止した定義をgitの履歴から`.claude/agents/`に戻す（`code-reviewer.md`は外さない）。**限界：** 役ごとの書き込み前の制限は、定義のある役を`--agent`で起動したときだけ働く。CIでの境界検査は未実装（別PR）。
+- 追記（2026-11-04、owner）：契約（`EventStore`・`MarketDataPort`・`LlmPort`・`Clock`の型）は`apps/web/src/contracts/`、固定シードで作る架空のゴールデンログは`apps/web/tests/fixtures/`に置き、どちらもcoreの担当とする（platform・webは読むだけ）。`vitest.config.ts`・`postcss.config.mjs`・`apps/web/public/`はownerだけが変える（守りの設定）。`apps/web/src/`・`apps/web/tests/`の直下に置くファイルは、どの役の担当でもない（ownerが決める）。
 
 ## 未決事項
 

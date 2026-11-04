@@ -15,7 +15,7 @@ description: DB（Postgres）、追記だけのイベントストア、市場デ
 
 ## 触らないもの
 
-`src/ledger/`・`src/events/`・`src/holidays/`（読むだけ。計算に直したい点はcoreへの依頼として報告）。画面。`apps/web/scripts/check-purity.ts`・`apps/web/tests/scripts/`・`.claude/`・`.github/`・`scripts/`などの守りの設定。契約（`EventStore`、`MarketDataPort`、`LlmPort`、`Clock`）の型は、変えるとほかの役に影響するので、先にleadへ報告する。
+`src/ledger/`・`src/events/`・`src/holidays/`（読むだけ。計算に直したい点はcoreへの依頼として報告）。画面。`apps/web/scripts/check-purity.ts`・`apps/web/tests/scripts/`・`.claude/`・`.github/`・`scripts/`などの守りの設定。契約（`apps/web/src/contracts/`の`EventStore`、`MarketDataPort`、`LlmPort`、`Clock`）の型はcoreの担当で、読むだけ。変えたい点は、issueのコメントでleadとcoreに伝える。固定データ（`apps/web/tests/fixtures/`）も読むだけ。
 
 ## 守ること
 

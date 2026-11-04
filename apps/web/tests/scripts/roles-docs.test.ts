@@ -46,7 +46,7 @@ describe("役ファイル・CLAUDE.md の担当表が、paths.json と食い違�
       const inRow = spans(row!);
       const inMd = spans(section);
       for (const p of ps.map(trim)) {
-        const isTest = /^apps\/web\/tests\/(?!adversarial)/.test(p);
+        const isTest = /^apps\/web\/tests\/(?!adversarial|fixtures)/.test(p);
         // 表では tests/ 側を「とそのテスト」で略すので、対応する src/ 側のパスで照合する
         const rowKey = isTest ? p.replace("/tests/", "/src/") : p;
         expect(inRow.has(rowKey), `CLAUDE.md の ${role} の行に ${rowKey} がない`).toBe(true);

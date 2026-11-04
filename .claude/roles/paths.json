@@ -4,7 +4,8 @@
     "lead": ["docs/", "README.md"],
     "core": [
       "apps/web/src/ledger/", "apps/web/src/events/", "apps/web/src/holidays/",
-      "apps/web/tests/ledger/", "apps/web/tests/events/", "apps/web/tests/holidays/"
+      "apps/web/tests/ledger/", "apps/web/tests/events/", "apps/web/tests/holidays/",
+      "apps/web/src/contracts/", "apps/web/tests/contracts/", "apps/web/tests/fixtures/"
     ],
     "platform": [
       "apps/web/src/store/", "apps/web/tests/store/", "apps/web/src/ingest/", "apps/web/tests/ingest/",
@@ -20,7 +21,8 @@
   "readOnly": ["code-reviewer", "Explore", "Plan"],
   "protected": [
     ".claude/", ".github/", "AGENTS.md", "CLAUDE.md", ".tool-versions", "apps/web/scripts/check-purity.ts", "apps/web/tests/scripts/",
-    "scripts/", "apps/web/package.json", "apps/web/package-lock.json", "apps/web/next.config.ts", "apps/web/tsconfig.json"
+    "scripts/", "apps/web/package.json", "apps/web/package-lock.json", "apps/web/next.config.ts", "apps/web/tsconfig.json",
+    "apps/web/vitest.config.ts", "apps/web/postcss.config.mjs", "apps/web/public/"
   ],
   "generated": ["node_modules/", "apps/web/node_modules/", "apps/web/.next/", "apps/web/coverage/", "apps/web/tsconfig.tsbuildinfo"]
 }
