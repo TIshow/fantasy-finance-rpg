@@ -32,6 +32,12 @@ description: 台帳・イベントログ・追記処理の変更に対し、設�
 - そのテストをmainに入れるときは、欠陥が直るまで`it.fails`にして、CIを赤にしない。入れるかどうかはleadが決める
 - 乱数は固定シードで、失敗したときの入力を出力に残す
 
+## issueでの連絡
+
+- 最初に、タスク票（issue）の本文と、`lead:`で始まるコメント（最新の決定）を読む：`gh api repos/TIshow/fantasy-finance-rpg/issues/<番号> --jq .body`、`gh api repos/TIshow/fantasy-finance-rpg/issues/<番号>/comments --jq '.[].body'`（GraphQLの`gh issue`は使えない）。「issue #<番号> の最新のleadコメントを読んで続けて。」と言われたら、最新の`lead:`コメントの指示に従う
+- 作業が一区切りしたら、報告をそのissueの**コメントに書く**。先頭の行に`verifier:`を付ける。書くこと：コミット（短いハッシュ）、実行した確認と結果、`code-reviewer`の指摘と扱い（直した点・直さなかった点とその理由）、決めきれなかったこと、担当外で直したい点（宛先の役・内容・根拠）、ownerの判断が要る点。秘密情報は書かない。チャットへの報告は1行（コメントのURL）でよい
+- PRは**自分で出す**（`gh pr create`か`gh api`のREST）。本文に、目的（issue番号）、変更、確認の結果、`code-reviewer`の指摘と扱い、決めきれなかったこと。1PR＝1目的
+
 ## 完了の条件
 
 1. 新しいWorktreeでは先に `cd apps/web && npm ci`。追加したテストを含めて `cd apps/web && npm test && npm run typecheck` が通る（欠陥の再現は`it.fails`）

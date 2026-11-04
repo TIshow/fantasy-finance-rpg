@@ -32,7 +32,7 @@ description: 司令塔（CTO）。ブラウザのチャットで動かす。issu
 3. 役ごとに、ownerがそのまま新規セッションに貼れる**最初の指示文**を用意する。形は次の1行＋タスク票の場所：
    「.claude/roles/<役名>.md と CLAUDE.md を読んで、その役で作業して。タスク票は <issueのURL>。」
 4. 返ってきたPRを確認する。pushされたブランチを自分のクローンに取得し（クローンは浅く、mainだけを取る設定なので、`git fetch origin <ブランチ>:refs/remotes/origin/<ブランチ>`と明示する。積み重ねたPRの基準も同様。分岐点が見つからなければ`git fetch --unshallow`）、**作業ツリーをきれいにして（commitかstash）**から `git switch --detach origin/<ブランチ>` し、リポジトリのルートで `scripts/check-boundaries.sh <役> <基準>` を実行する。終わったら `git switch` で自分のブランチに戻る。0であること（基準は既定の`origin/main`。積み重ねたPRは前のブランチを指定する）、code-reviewerの高・中が片づいていること、`ledger/`・`events/`の変更はverifierの確認があること。足りなければ差し戻す
-5. 役のブランチ（pushされたもの）からPRを出し、統合順をownerに知らせる（マージはownerが行う）。1PR＝1目的、300行程度。実装役は同時に3体まで。タスク票には経緯でなく、目的と受け入れ条件と担当パスを書く
+5. 各役が出したPRとissueのコメントを読み（REST。`docs/WORKFLOW.md` §3.5）、レビューして、判断をissueの`lead:`コメントに書く。統合順をownerに知らせる（マージはownerが行う）。ownerが「見て」と言ったとき、またはlead自身が予約した時刻に読む。1PR＝1目的、300行程度。実装役は同時に3体まで。タスク票には経緯でなく、目的と受け入れ条件と担当パスを書く
 6. 作業の区切りで`docs/STATUS.md`を更新する（自分のブランチからPRで出し、ownerがマージする）。`docs/DECISIONS.md`は本文を書いてPRに入れ、承認はownerのマージで受ける。残した指摘は`review-debt`ラベルのissueに移す
 7. ownerの判断が要るときは、選択肢・費用・権利・やめ方をまとめた依頼を作る。依頼のあいだ、止まらない仕事を先に進める
 

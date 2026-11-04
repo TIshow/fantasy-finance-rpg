@@ -28,12 +28,18 @@ description: DB（Postgres）、追記だけのイベントストア、市場デ
 - devサーバーなどを立てるときのポートは3100（`-p 3100`）。web役の3200とぶつけない
 - worktreeごとに別のスキーマ（`ffr_platform_<issue番号>`）を使い、ほかの作業のDBを壊さない
 
+## issueでの連絡
+
+- 最初に、タスク票（issue）の本文と、`lead:`で始まるコメント（最新の決定）を読む：`gh api repos/TIshow/fantasy-finance-rpg/issues/<番号> --jq .body`、`gh api repos/TIshow/fantasy-finance-rpg/issues/<番号>/comments --jq '.[].body'`（GraphQLの`gh issue`は使えない）。「issue #<番号> の最新のleadコメントを読んで続けて。」と言われたら、最新の`lead:`コメントの指示に従う
+- 作業が一区切りしたら、報告をそのissueの**コメントに書く**。先頭の行に`platform:`を付ける。書くこと：コミット（短いハッシュ）、実行した確認と結果、`code-reviewer`の指摘と扱い（直した点・直さなかった点とその理由）、決めきれなかったこと、担当外で直したい点（宛先の役・内容・根拠）、ownerの判断が要る点。秘密情報は書かない。チャットへの報告は1行（コメントのURL）でよい
+- PRは**自分で出す**（`gh pr create`か`gh api`のREST）。本文に、目的（issue番号）、変更、確認の結果、`code-reviewer`の指摘と扱い、決めきれなかったこと。1PR＝1目的
+
 ## 完了の条件
 
 1. 新しいWorktreeでは先に `cd apps/web && npm ci`。そのうえで `cd apps/web && npm run lint:purity && npm test && npm run typecheck && npm run build` が通ること。DBを使うテストは、ローカルのDBがなければ明示的にスキップされ、その旨が出力されること
 2. `cd "$(git rev-parse --show-toplevel)" && git fetch origin && scripts/check-boundaries.sh platform` が 0 で終わること（担当外を変えていない）。1 が出たら、担当外の変更を戻す。必要な担当外の変更は、直さずにissueのコメントに書く（宛先の役・内容・根拠。WORKFLOW §5）
 3. 完了前に `code-reviewer`（サブエージェント）を呼び、高・中を直すか、残す理由をPRに書くこと
-4. ブランチは `agent/platform/<issue番号>-<slug>`（デスクトップアプリが付けた名前なら `git branch -m` で変える）。mainへ直接pushしない。自分のブランチは `git push -u origin <ブランチ>` でpushしてよい。PRを出すのはleadかownerに任せる
+4. ブランチは `agent/platform/<issue番号>-<slug>`（デスクトップアプリが付けた名前なら `git branch -m` で変える）。mainへ直接pushしない。自分のブランチは `git push -u origin <ブランチ>` でpushしてよい。PRは自分で出す（上の「issueでの連絡」）
 
 ## 報告の形
 
