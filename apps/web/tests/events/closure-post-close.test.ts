@@ -6,7 +6,7 @@ import { EventLog, type Draft } from "../../src/events/append";
 import { bodyHash } from "../../src/events/hash";
 import { Ledger, replay, type ValueStore } from "../../src/events/replay";
 import type { HolidayTable } from "../../src/holidays/index";
-import { INITIAL_CASH } from "../../src/ledger/types";
+import { INITIAL_CASH, type Order } from "../../src/ledger/types";
 
 const jst = (date: string, hh: number, mm = 0) => Date.parse(`${date}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00+09:00`);
 const SHA = "d".repeat(64);
@@ -86,6 +86,11 @@ describe("臨時休場のあとの追加の引け後処理（§3.3）", () => {
     // 追加の処理より前には、NEXT の注文票も評価も書けない
     const early = await w.commit(jst(D, 20), NEXT);
     expect(early.ok && early.rejected).toBe("account_not_ready");
+    // 読めない注文でも同じ（validateSheet の後の検査で拒む。照合でも、注文によらずに account_not_ready を出し直せる）
+    const run = await w.add(w.sys("agent.run", jst(D, 20, 1), { agentId: "alpha", purpose: "order", inputSeqs: [], ok: true }));
+    const unread = await w.log.commitSheet(jst(D, 20, 2), "alpha", { tradingDate: NEXT, orders: [{ symbol: "AAA", side: "buy", qty: 100, limit: 0.5 }] as unknown as Order[], runSeq: run, inputSeqs: [] });
+    expect(unread.ok && [unread.rejected, (unread.event.payload as Record<string, unknown>).ordersUnreadable]).toEqual(["account_not_ready", true]);
+    if (unread.ok) await w.ledger.apply(unread.event);
 
     const extra = await w.postClose(jst(D, 21), D, NEXT, [ann], closed);
     expect(extra.ok && extra.event.keys).toEqual([`post_close:alpha:${D}:${closed}`, `ca:alpha:${ann}`]);
