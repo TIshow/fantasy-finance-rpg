@@ -223,10 +223,10 @@ describe("権限（§3 の書ける者・AIの身元）", () => {
 describe("拒否の記録（§3.2「受け取った注文の並びを残す」・§7 の照合）", () => {
   const readable = (e: LogEvent) => e.payload as Record<string, unknown>;
 
-  // 欠陥（中）：理由が invalid_sheet 以外で、runSeq・inputSeqs が前のイベントを指さないと、拒否には seq を残さない（append.ts commitSheet）。
+  // #73 で直った欠陥（中）：理由が invalid_sheet 以外で、runSeq・inputSeqs が前のイベントを指さないと、拒否には seq を残さない（append.ts commitSheet）。
   // すると照合の検査（check の order_sheet.rejected）が理由を invalid_sheet と出し直して記録の理由と合わず、1回目の書き込みが落ちる。
   // commitSheet は ordersUnreadable: true で書き直すので、正規化できる注文の並びが捨てられ、「読めなかった」と偽って残る
-  it.fails("停止中のAIが、存在しない run を指す注文票を出したとき、受け取った注文を残す", async () => {
+  it("停止中のAIが、存在しない run を指す注文票を出したとき、受け取った注文を残す", async () => {
     const { log, src } = await setup();
     await ok(log, op("agent.suspended", jst("2026-11-10", 6), { agentId: "alpha", scope: "orders", reason: "x" }));
     const r = await log.commitSheet(jst("2026-11-10", 7), "alpha", { tradingDate: "2026-11-10", orders: buy, runSeq: 0, inputSeqs: [src] });
@@ -235,7 +235,7 @@ describe("拒否の記録（§3.2「受け取った注文の並びを残す」�
   });
 
   // 同じ欠陥の別の入口：注文の形が違う（invalid_order）とき、inputSeqs が未来の seq を指すと同じことが起きる
-  it.fails("注文の形が違い、inputSeqs が未来の seq を指す注文票でも、受け取った注文を残す", async () => {
+  it("注文の形が違い、inputSeqs が未来の seq を指す注文票でも、受け取った注文を残す", async () => {
     const { log, run } = await setup();
     const orders = [1 as unknown as Order];
     const r = await log.commitSheet(jst("2026-11-10", 7), "alpha", { tradingDate: "2026-11-10", orders, runSeq: run, inputSeqs: [999] });
@@ -243,8 +243,8 @@ describe("拒否の記録（§3.2「受け取った注文の並びを残す」�
     expect(r.ok && readable(r.event)).toMatchObject({ reason: "invalid_order", orders });
   });
 
-  // 欠陥（低）：ordersUnreadable の拒否は、理由を出し直さずに受け入れる。停止していないAIを「停止中で拒否した」と書いた保存済みログが照合を通る
-  it.fails("停止していないAIに、理由 suspended の読めない拒否を足した保存済みログは照合で落ちる", async () => {
+  // #73 で直った欠陥（低）：ordersUnreadable の拒否は、理由を出し直さずに受け入れる。停止していないAIを「停止中で拒否した」と書いた保存済みログが照合を通る
+  it("停止していないAIに、理由 suspended の読めない拒否を足した保存済みログは照合で落ちる", async () => {
     const { log } = await setup();
     expect(await admitAll(log.events)).toBeNull();
     const d = log.events.map(draftOf);
