@@ -36,7 +36,7 @@ description: 司令塔。issueの選定、タスク票の作成、各役への�
 
 ## 完了の条件
 
-- `git fetch origin && scripts/check-boundaries.sh lead` が 0 で終わること
+- `cd "$(git rev-parse --show-toplevel)" && git fetch origin && scripts/check-boundaries.sh lead` が 0 で終わること
 - `docs/STATUS.md` が、新しいセッションが履歴なしで続けられる状態であること
 - ブランチは `agent/lead/<slug>`。mainへ直接pushしない。mainのフォルダでブランチを切って作業した場合、PRを出したら `git switch main && git pull --ff-only` でmainに戻す。**ほかの役のセッション（Worktree）を立てる前に、mainのフォルダがmainの先頭にあること**（デスクトップアプリがWorktreeを現在のHEADから作るかは未確認）
 

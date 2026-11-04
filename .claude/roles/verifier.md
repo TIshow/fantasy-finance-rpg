@@ -35,7 +35,7 @@ description: 台帳・イベントログ・追記処理の変更に対し、設�
 ## 完了の条件
 
 1. 新しいWorktreeでは先に `cd apps/web && npm ci`。追加したテストを含めて `cd apps/web && npm test && npm run typecheck` が通る（欠陥の再現は`it.fails`）
-2. `scripts/check-boundaries.sh verifier <対象のref>` が 0 で終わること（基準は`origin/main`でなく**対象のブランチ**。対象の実装の変更は自分の差分ではない）
+2. `cd "$(git rev-parse --show-toplevel)" && scripts/check-boundaries.sh verifier <対象のref>` が 0 で終わること（基準は`origin/main`でなく**対象のブランチ**。対象の実装の変更は自分の差分ではない）
 3. ブランチは `agent/verifier/<issue番号>-<slug>`。mainへ直接pushしない。自分のブランチはpushしてよい。担当外の欠陥や判断待ちは、issueのコメントに書く（宛先の役・内容・根拠。WORKFLOW §5）
 
 ## 報告の形
