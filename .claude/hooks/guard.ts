@@ -310,26 +310,20 @@ function checkGh(args: string[]): string | null {
 
 // ---- 役ごとの書き込み先 ----
 
-/** 役ごとに書いてよいパス（worktree のルートからの相対。末尾が / ならその下、なければそのファイルだけ）。docs/WORKFLOW.md §2 と .claude/agents/<役>.md に合わせる */
-const ROLE_PATHS: Record<string, string[]> = {
-  lead: ["docs/", "README.md"],
-  core: ["apps/web/src/ledger/", "apps/web/src/events/", "apps/web/src/holidays/", "apps/web/tests/ledger/", "apps/web/tests/events/", "apps/web/tests/holidays/"],
-  platform: [
-    ...["store", "ingest", "runner", "llm"].flatMap((d) => [`apps/web/src/${d}/`, `apps/web/tests/${d}/`]),
-    ...["apps/web/db/", "apps/web/scripts/"],
-  ],
-  web: ["app", "components", "view"].flatMap((d) => [`apps/web/src/${d}/`, `apps/web/tests/${d}/`]),
-  verifier: ["apps/web/tests/adversarial/"],
-};
-/** 書かない役（Bash の書き込みも止める） */
-const READ_ONLY = new Set(["code-reviewer", "Explore", "Plan"]);
-/** どの役も書かない守りの設定（.github/CODEOWNERS の、ownerの承認が要るパスのうち、役が触りうるもの） */
-const PROTECTED = [
-  ".claude/", ".github/", "AGENTS.md", "CLAUDE.md", ".tool-versions", "apps/web/scripts/check-purity.ts", "apps/web/tests/scripts/",
-  "apps/web/package.json", "apps/web/package-lock.json", "apps/web/next.config.ts", "apps/web/tsconfig.json",
-];
-/** 生成物・取得物（書いても履歴に残らない） */
-const GENERATED = ["node_modules/", "apps/web/node_modules/", "apps/web/.next/", "apps/web/coverage/", "apps/web/tsconfig.tsbuildinfo"];
+/** 役の担当パス・読み取り専用の役・守りの設定・生成物。正本は .claude/roles/paths.json。役があるときだけ読む。形が違うもの（空の一覧、配列でない役の表、空の担当など）は、制限が外れる方向に働くので、読み込みの時点で例外にして止める */
+type RolePaths = { roles: Record<string, string[]>; readOnly: string[]; protected: string[]; generated: string[] };
+const strings = (v: unknown, nonEmpty: boolean): v is string[] => Array.isArray(v) && (!nonEmpty || v.length > 0) && v.every((x) => typeof x === "string" && x !== "");
+let pathsCache: RolePaths | undefined;
+function rolePaths(): RolePaths {
+  if (pathsCache === undefined) {
+    const j = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), "../roles/paths.json"), "utf8")) as Record<string, unknown>;
+    const roles = j.roles;
+    const rolesOk = typeof roles === "object" && roles !== null && !Array.isArray(roles) && Object.keys(roles).length > 0 && Object.values(roles).every((v) => strings(v, true));
+    if (!rolesOk || !strings(j.readOnly, true) || !strings(j.protected, true) || !strings(j.generated, false)) throw new Error("paths.json の形が違う");
+    pathsCache = j as unknown as RolePaths;
+  }
+  return pathsCache;
+}
 
 /** list に入るか。末尾が / のものはその下。self なら、そのディレクトリ自身（mkdir -p・rm -rf .claude など）も含める */
 const inList = (rel: string, list: string[], self = false) => list.some((p) => (p.endsWith("/") ? rel.startsWith(p) || (self && rel === p.slice(0, -1)) : rel === p));
@@ -359,13 +353,13 @@ export function checkWrite(role: string | undefined, target: string, cwd: string
   if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
     return [realpathLoose("/tmp"), realpathLoose(tmpdir()), "/dev"].some((t) => abs.startsWith(t + sep)) ? null : `リポジトリの外（${target}）には書かない（/tmp は可）`;
   }
-  if (READ_ONLY.has(role)) return `${role} は読み取り専用の役。ファイルは書かない（${rel}）`;
-  if (inList(rel, GENERATED, true)) return null;
-  const guardedAncestor = rel === "" || PROTECTED.some((p) => p.startsWith(`${rel}/`));
-  const globHit = /[*?[{]/.test(rel) && PROTECTED.some((p) => globToRe(rel).test(p.replace(/\/$/, "")));
-  if (inList(rel, PROTECTED, true) || guardedAncestor || globHit)
+  if (rolePaths().readOnly.includes(role)) return `${role} は読み取り専用の役。ファイルは書かない（${rel}）`;
+  if (inList(rel, rolePaths().generated, true)) return null;
+  const guardedAncestor = rel === "" || rolePaths().protected.some((p) => p.startsWith(`${rel}/`));
+  const globHit = /[*?[{]/.test(rel) && rolePaths().protected.some((p) => globToRe(rel).test(p.replace(/\/$/, "")));
+  if (inList(rel, rolePaths().protected, true) || guardedAncestor || globHit)
     return `${rel || "."} は守りの設定（またはそれを含む場所）で、ownerだけが変更する。必要ならissueのコメントでleadに頼む（WORKFLOW §5）`;
-  const allowed = ROLE_PATHS[role];
+  const allowed = rolePaths().roles[role];
   if (allowed === undefined || inList(rel, allowed, true)) return null;
   return `${role} の担当外のパス（${rel}）。担当：${allowed.join("・")}。必要ならissueのコメントでleadに頼む（WORKFLOW §5）`;
 }

@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -465,5 +465,98 @@ describe("フックの入口：役の判別", () => {
     expect(run({ agent_type: "core", tool_name: "Write", tool_input: { file_path: join(root, "apps/web/src/ledger/x.ts") } }).status).toBe(0);
     expect(run({ tool_name: "Edit", tool_input: { file_path: join(root, "apps/web/src/store/x.ts") } }).status).toBe(0);
     expect(run({ agent_type: "web", tool_name: "Bash", tool_input: { command: "echo x > apps/web/src/ledger/a.ts" } }).status).toBe(2);
+  });
+});
+
+describe("役の担当パスの正本（.claude/roles/paths.json）", () => {
+  const raw = JSON.parse(readFileSync(new URL("../../../../.claude/roles/paths.json", import.meta.url), "utf8")) as {
+    roles: Record<string, string[]>; readOnly: string[]; protected: string[]; generated: string[];
+  };
+  const env = onBranch("agent/x/1-y");
+  /** 担当パスから、書き込み先の絶対パスを作る（末尾が / なら、その下のファイル） */
+  const file = (p: string) => `/repo/${p}${p.endsWith("/") ? "x" : ""}`;
+
+  it("役が5つそろい、パスは相対で、末尾以外に余計な記号がない", () => {
+    expect(Object.keys(raw.roles).sort()).toEqual(["core", "lead", "platform", "verifier", "web"]);
+    for (const p of Object.values(raw.roles).flat()) expect(p).toMatch(/^[A-Za-z0-9_.][A-Za-z0-9_./-]*$/);
+  });
+
+  it("役の担当は互いに重ならない（同じパスや、親子の関係がない）", () => {
+    const all = Object.entries(raw.roles).flatMap(([r, ps]) => ps.map((p) => [r, p] as const));
+    for (const [r1, p1] of all)
+      for (const [r2, p2] of all) {
+        if (r1 === r2 && p1 === p2) continue;
+        const under = p2.endsWith("/") && p1.startsWith(p2);
+        expect(under, `${r1}:${p1} が ${r2}:${p2} の下にある`).toBe(false);
+      }
+  });
+
+  it("守りの設定は、どの役でも書けない（担当パスの中にあっても守りが優先される）", () => {
+    for (const role of Object.keys(raw.roles))
+      for (const p of raw.protected) expect(checkWrite(role, file(p), "/repo", env), `${role} が ${p} に書ける`).not.toBeNull();
+  });
+
+  it("guard.ts は paths.json と同じ判定をする（担当内は通り、ほかの役の担当は止まる）", () => {
+    for (const [role, ps] of Object.entries(raw.roles)) {
+      for (const p of ps) if (!raw.protected.some((q) => p.startsWith(q))) expect(checkWrite(role, file(p), "/repo", env), `${role}:${p}`).toBeNull();
+      for (const [other, qs] of Object.entries(raw.roles))
+        if (other !== role) for (const q of qs) expect(checkWrite(role, file(q), "/repo", env) ?? "", `${role} が ${other}:${q} に書ける`).not.toBe("");
+    }
+    for (const r of raw.readOnly) expect(checkWrite(r, "/repo/docs/x.md", "/repo", env) ?? "").toContain("読み取り専用");
+  });
+
+  it("役と守りの設定の中身を固定する（誤って消すと、ここで気づく）", () => {
+    expect(raw.readOnly.sort()).toEqual(["Explore", "Plan", "code-reviewer"]);
+    for (const p of [".claude/", ".github/", "AGENTS.md", "CLAUDE.md", "apps/web/scripts/check-purity.ts", "apps/web/tests/scripts/"]) expect(raw.protected).toContain(p);
+    expect(raw.roles.core).toEqual(expect.arrayContaining(["apps/web/src/ledger/", "apps/web/src/events/", "apps/web/src/holidays/"]));
+    expect(raw.roles.web).not.toContain("apps/web/src/ledger/");
+    expect(raw.roles.verifier).toEqual(["apps/web/tests/adversarial/"]);
+    for (const [r, ps] of Object.entries(raw.roles)) expect(ps.length, r).toBeGreaterThan(0);
+  });
+});
+
+describe("paths.json が読めない・形が違うとき、役のあるセッションは止まる", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const real = join(here, "..", "..", "..", "..", ".claude");
+  const withPaths = (content: string | null, input: (dir: string) => object) => {
+    const dir = mkdtempSync(join(tmpdir(), "guard-paths-"));
+    try {
+      spawnSync("git", ["init", "-q"], { cwd: dir });
+      mkdirSync(join(dir, ".claude", "hooks"), { recursive: true });
+      mkdirSync(join(dir, ".claude", "roles"), { recursive: true });
+      copyFileSync(join(real, "hooks", "guard.ts"), join(dir, ".claude", "hooks", "guard.ts"));
+      if (content !== null) writeFileSync(join(dir, ".claude", "roles", "paths.json"), content);
+      return spawnSync(process.execPath, [join(dir, ".claude", "hooks", "guard.ts")], { input: JSON.stringify({ cwd: dir, ...input(dir) }), encoding: "utf8" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  // リポジトリの中の書き込み（/tmp は paths.json を読まずに通るので使わない）
+  const edit = (dir: string) => ({ agent_type: "web", tool_name: "Edit", tool_input: { file_path: join(dir, "apps/web/src/app/x.ts") } });
+  const noRole = (dir: string) => ({ tool_name: "Edit", tool_input: { file_path: join(dir, "apps/web/src/app/x.ts") } });
+  const good = JSON.parse(readFileSync(join(real, "roles", "paths.json"), "utf8")) as Record<string, unknown>;
+  const variant = (patch: Record<string, unknown>) => JSON.stringify({ ...good, ...patch });
+
+  it.each([
+    ["ファイルがない", null],
+    ["JSON が壊れている", "{"],
+    ["null", "null"],
+    ["roles が配列", variant({ roles: [] })],
+    ["roles が空", variant({ roles: {} })],
+    ["役の担当が空", variant({ roles: { web: [] } })],
+    ["役の担当が文字列", variant({ roles: { web: "apps/web/src/app/" } })],
+    ["readOnly が空", variant({ readOnly: [] })],
+    ["readOnly が文字列", variant({ readOnly: "code-reviewer" })],
+    ["protected が空", variant({ protected: [] })],
+    ["generated がない", JSON.stringify({ ...good, generated: undefined })],
+  ])("%s", (_name, content) => {
+    const r = withPaths(content, edit);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("内部エラー");
+  });
+
+  it("正しい paths.json なら動く。役がなければ、paths.json がなくても影響しない", () => {
+    expect(withPaths(JSON.stringify(good), edit).status).toBe(0);
+    expect(withPaths(null, noRole).status).toBe(0);
   });
 });

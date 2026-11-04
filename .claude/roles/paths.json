@@ -1,0 +1,26 @@
+{
+  "_comment": "役の担当パスの正本。guard.ts（書き込み前の制限）が読む。完了前の検査（scripts/check-boundaries.sh）も、追加されたらこれを読む。パスはリポジトリのルートからの相対。末尾が / のものはその下すべて。変更はownerだけ（.claude/ は守りの設定）。",
+  "roles": {
+    "lead": ["docs/", "README.md"],
+    "core": [
+      "apps/web/src/ledger/", "apps/web/src/events/", "apps/web/src/holidays/",
+      "apps/web/tests/ledger/", "apps/web/tests/events/", "apps/web/tests/holidays/"
+    ],
+    "platform": [
+      "apps/web/src/store/", "apps/web/tests/store/", "apps/web/src/ingest/", "apps/web/tests/ingest/",
+      "apps/web/src/runner/", "apps/web/tests/runner/", "apps/web/src/llm/", "apps/web/tests/llm/",
+      "apps/web/db/", "apps/web/scripts/"
+    ],
+    "web": [
+      "apps/web/src/app/", "apps/web/tests/app/", "apps/web/src/components/", "apps/web/tests/components/",
+      "apps/web/src/view/", "apps/web/tests/view/"
+    ],
+    "verifier": ["apps/web/tests/adversarial/"]
+  },
+  "readOnly": ["code-reviewer", "Explore", "Plan"],
+  "protected": [
+    ".claude/", ".github/", "AGENTS.md", "CLAUDE.md", ".tool-versions", "apps/web/scripts/check-purity.ts", "apps/web/tests/scripts/",
+    "apps/web/package.json", "apps/web/package-lock.json", "apps/web/next.config.ts", "apps/web/tsconfig.json"
+  ],
+  "generated": ["node_modules/", "apps/web/node_modules/", "apps/web/.next/", "apps/web/coverage/", "apps/web/tsconfig.tsbuildinfo"]
+}
