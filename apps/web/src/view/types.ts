@@ -43,6 +43,8 @@ export interface AgentDay {
   /** 前日（最初の日は初期資金）との差 */
   change: Deciyen;
   changeText: string;
+  /** 評価に、評価日より前の終値で評価した保有を含む（PAPER_TRADING_RULES §6） */
+  stale: boolean;
   /** 評価額の大きい順。同額は同じ順位 */
   rank: number;
 }
