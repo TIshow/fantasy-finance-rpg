@@ -9,7 +9,7 @@
 
 - **少人数。** 同時に動かすのは通常3体まで（lead＋実装1〜2。verifierは必要なときだけ）。増やす前に、増やす理由（独立して進められる仕事がある、など）を示す
 - **書く役は分離する。** 役ごとに別のセッションとworktree（issueごとのブランチ）を持ち、担当外のパスは編集しない。担当パスの正本は`.claude/roles/paths.json`
-- **セッションは使い捨てる**（leadだけは例外で、mainのフォルダ・Worktreeなしで、区切りごとにSTATUSを更新して閉じる）。 仕事が終わったらセッションを閉じ、次は新しいセッションで始める。残すべきものは、セッションの記憶でなくリポジトリの文書（タスク票・issue・`docs/STATUS.md`）に書く
+- **セッションは使い捨てる**（leadは別で、ブラウザのチャット。区切りごとにSTATUSを更新する）。 仕事が終わったらセッションを閉じ、次は新しいセッションで始める。残すべきものは、セッションの記憶でなくリポジトリの文書（タスク票・issue・`docs/STATUS.md`）に書く
 - **規則は仕組みで守らせる。** 文章の約束はCI・CODEOWNERS・フック・検査に移す（CI・pr-size・CODEOWNERS・純関数の検査・Claude Codeのフック（`.claude/hooks/guard.ts`。§4.7）・完了前の境界検査（`scripts/check-boundaries.sh`。§4.8）は追加済み）。**役別セッションの境界は、役ファイルの約束と完了前の境界検査で守り、フックは役を問わない守り（mainへのpush・マージ・秘密のファイル）を担う**（§4.7の限界）。守れていない約束を見つけたら、文書でなく仕組みを足す
 - **作る人と確かめる人を分ける。** 実装した役は自分のPRの最終レビューをしない
 - **文書が正本。** 引き継ぎはチャット履歴でなくリポジトリの文書で行う（`CLAUDE.md`）
@@ -19,8 +19,7 @@
 | 役 | 担当パス | 書かないもの |
 | --- | --- | --- |
 | **owner**（人間） | すべての最終判断 | — |
-| **cto**（claude.aiのチャット） | 戦略・仕様・判断材料・タスク票と指示ファイルの案 | 日々の実装 |
-| **main（`lead`）** | `docs/STATUS.md`、`docs/HISTORY.md`、`docs/DECISIONS.md`（案のみ。承認はowner）、タスク票、マージの順序 | `apps/`の機能コード |
+| **lead**（CTO。ブラウザのチャット） | 戦略・仕様・判断材料、タスク票と指示ファイルの案、`docs/STATUS.md`・`docs/HISTORY.md`・`docs/DECISIONS.md`（PRで出す。承認はowner）、マージ順の提案 | `apps/`の機能コード |
 | **core** | `apps/web/src/{ledger,events,holidays}/`とそのテスト、契約`apps/web/src/contracts/`とそのテスト、固定データ`apps/web/tests/fixtures/` | DB・ネットワーク・UI |
 | **platform** | `apps/web/src/{store,ingest,runner,llm}/`、`apps/web/db/`、`apps/web/scripts/` | `ledger/`・`events/`の中身 |
 | **web** | `apps/web/src/{app,components,view}/` | 台帳の計算、DBへの書き込み |
@@ -33,21 +32,21 @@
 
 ### 3.1 基本：デスクトップアプリで、役別のセッションを並べる
 
-- ownerが、Claude Codeのデスクトップアプリ（Codeタブ）で、leadと役別のセッションを並べて動かす。Codeタブには役を選ぶ項目がない（ownerが画面で確かめた範囲では、選べるのは実行環境・フォルダ・権限モード・モデル）ので、**役はファイルで与える**：新規セッションでWorktreeをオンにしてブランチとフォルダを分け、最初に「`.claude/roles/<役名>.md`と`CLAUDE.md`を読んで、その役で作業して。」と送る
-- leadは、mainのフォルダ（Worktreeオフ）で動かし、タスク票の作成、PRの確認、統合順の連絡、STATUSの更新を担う。ownerはleadに基本の指示を出し、必要なら各役にも直接指示してよい。leadが作るタスク票には、各役の最初の指示文を添える
-- 役別のセッションは、仕事が終わったら閉じる（§3.3）。leadの文脈が長くなったら、`docs/STATUS.md`を現在地として更新してから閉じ、新しいセッションで続ける
+- ownerは、**lead（CTO）をブラウザのチャット**（claude.ai。Claude Codeではない）で、**役別の実装セッションをClaude Codeのデスクトップアプリ（Codeタブ）**で、並べて動かす。Codeタブには役を選ぶ項目がない（ownerが画面で確かめた範囲では、選べるのは実行環境・フォルダ・権限モード・モデル）ので、**役はファイルで与える**：新規セッションでWorktreeをオンにしてブランチとフォルダを分け、最初に「`.claude/roles/<役名>.md`と`CLAUDE.md`を読んで、その役で作業して。」と送る
+- leadは、タスク票の作成、PRの確認、統合順の連絡、STATUS・DECISIONSの更新（PRで出す。§3.4）を担う。デスクトップアプリのセッションは直接動かせないので、**ownerが最初の指示文を貼り、報告をleadに持ってくる**。ownerはleadに基本の指示を出し、必要なら各役にも直接指示してよい。leadが作るタスク票には、各役の最初の指示文を添える
+- 役別のセッションは、仕事が終わったら閉じる（§3.3）。leadのチャットの文脈が長くなったら、`docs/STATUS.md`を現在地として更新（PR）してから、新しいチャットで続ける
 - ターミナルの`claude --agent <役>`は、権限を縛りたい役が出たとき（例：読むだけの監査役）にだけ使う。**そのためには、役の定義`.claude/agents/<役>.md`が要る。いまは`code-reviewer`しか置いていない**（旧lead・core・platform・web・verifierの定義は廃止。復元は`git log --diff-filter=D -- .claude/agents/`で見つけて`git show <コミット>^:.claude/agents/<役>.md`）。フックが`agent_type`で役を判別して書き込みを止められるのは、定義のある役を`--agent`で起動したときと、そのサブエージェントの中だけ（§4.7）
 
 ### 3.2 サブエージェント：差分レビューだけ
 
-- 各役は、完了前に`code-reviewer`サブエージェントを呼ぶ。実装役をleadがサブエージェントとして呼ぶ使い方は、基本にしない（途中の様子が見えにくく、leadの文脈を使う。手元でWorktree内の動作は未確認）
+- 各役は、完了前に`code-reviewer`サブエージェントを呼ぶ。leadはブラウザのチャットなので、実装役をサブエージェントとして呼べない。司令塔のClaude Codeセッションを置く案は§3.5（判断はPR-1・PR-2のあと）
 - subagentは別のsubagentを起動できない
 
 ### 3.3 デスクトップアプリでの手順（セッションごと）
 
 | セッション | モデル | 新規／既存 | 最初に送る文 | 終わったら |
 | --- | --- | --- | --- | --- |
-| lead | Opus | 既存を続ける。文脈が長くなったらSTATUSを更新して閉じ、新規で続ける。mainのフォルダ、Worktreeオフ | 「`.claude/roles/lead.md`と`CLAUDE.md`を読んで、その役で作業して。」 | 区切りごとにSTATUSが最新であれば閉じてよい。mainのフォルダがmainの先頭にあることを確かめてから、役のセッションを立てる |
+| lead | ブラウザのチャットで選ぶ | 既存を続ける。文脈が長くなったらSTATUSを更新（PR）して、新しいチャットで続ける | リポジトリを接続し、「`.claude/roles/lead.md`と`CLAUDE.md`と`docs/STATUS.md`を読んで、leadとして続けて。」 | 区切りごとにSTATUSの更新がPRに入っていれば閉じてよい |
 | core | Opus | タスクごとに新規、Worktreeオン | 「`.claude/roles/core.md`と`CLAUDE.md`を読んで、その役で作業して。タスク票は <issueのURL>。」 | ブランチをpush済みで、報告をleadに渡したら消してよい。差し戻しは新規セッションで同じブランチを続ける |
 | platform | Opus | 同上 | 同上（`platform.md`） | 同上 |
 | web | Sonnet | 同上 | 同上（`web.md`） | 同上 |
@@ -57,6 +56,34 @@
 - 同時に動かす実装役は3体まで（§1）。ownerが貼る文は、leadが作るタスク票に入っているものをそのまま使う
 - セッションを消す前に、未コミット・未pushの変更がないことを確かめる。確かめた結果と報告は、issueのコメントかPRに残す
 - **差し戻しの続き：** 新規セッションのWorktreeはアプリが付けた別のブランチで始まる。同じブランチを続けるには、前のセッションを消してそのWorktreeが外れたこと（`git worktree list`）を確かめてから、`git fetch origin && git switch <agent/…のブランチ>`。外れていなければ、`git switch -c <新しい名前> <agent/…のブランチ>`で続け、PRにそう書く。セッションを消すとWorktreeとローカルのブランチも消えるかは未確認（§6）
+
+### 3.4 leadがGitHubでできること（実測、2026-11-04）と、STATUS・DECISIONSの担当
+
+実測は、leadのチャット（2026-11-04の作業環境）から、RESTの`gh api`と`git`で行った。
+
+- **読める（実測）：** リポジトリ（privateを含む）、ブランチ、ファイル、issue、PR、コメント、CIの結果（check-runs）
+- **書ける（実際に行って成功）：** issueの作成とコメント、ブランチのpush、PRの作成
+- **使えない（実測）：** `gh issue list`などGraphQLを使う命令（RESTの`gh api`で代える）。`gh auth status`は「トークン無効」と出るが、REST呼び出しは通る。**ブランチの削除は、`git push --delete`もREST（`DELETE /git/refs/…`）も、プロキシに拒否された**（書き込みの経路は絞られている。マージやmainへのpushが通るかは試していない）
+- **役のブランチの取り方（実測）：** クローンは浅く（`--is-shallow-repository`が`true`）、mainだけを取る設定（`remote.origin.fetch`が`main`のみ）なので、`git fetch origin`だけでは役のブランチは取れない。**`git fetch origin <ブランチ>:refs/remotes/origin/<ブランチ>`と明示すると取れ、`git merge-base`も使えた**（積み重ねたPRの基準ブランチも同じ方法で取る）。分岐点が見つからないときは`git fetch --unshallow`
+- **検査スクリプトの実行（実測）：** このチャットのNode（v22.23.4。`.tool-versions`は24.16.0）で、`scripts/check-boundaries.sh lead`は最後まで実行でき、違反を検出して結果を返した
+- **見えない：** ownerのデスクトップアプリのセッションの中身（進み具合、止まっている質問）。見えるのはGitHubに残ったものだけ。止まっているかは、ownerの報告か、issueのコメントで知る
+- **権限の強さ：** 認証はリポジトリの管理者権限（`permissions.admin: true`）。そのため、mainへのpush・マージ・設定変更ができる可能性が高い（**試していない・未確認**。上のとおりプロキシが絞っている書き込みもある）。**やらない**（§4.6、`AGENTS.md`）。leadのチャットで`.claude/settings.json`のフックが働くかも**未確認**で、働かない前提で扱う。守るのは規律とownerの手動マージ
+
+STATUS・DECISIONSの更新：
+
+- leadが本文を書き、**自分のブランチ`agent/lead/<issue番号>-<slug>`からPRを出す**。ownerがマージする（DECISIONSの承認はこのマージ）。mainへ直接pushしない
+- PRが出せないとき（権限や接続の不具合）は、leadが本文を返信に書き、ownerか役別セッションがPRで反映する
+- 役別セッションは`docs/STATUS.md`・`docs/DECISIONS.md`を書かない（担当外）。必要なことはissueのコメントに書き、leadが反映する
+- 後始末：試験などでできた不要なブランチは、プロキシが削除を拒否するので、leadは消せない。ownerがGitHubの画面で消す
+
+### 3.5 司令塔のClaude Codeセッションを置く場合の案（いまは追加しない）
+
+leadがブラウザのチャットなので、役別セッションの進み具合を見て次の指示を出すことは、自動ではできない（橋渡しはowner）。それを減らす案として、**mainのフォルダ（Worktreeオフ）で動くClaude Codeのセッションを司令塔として1つ置く**ことが考えられる。
+
+- 司令塔のセッションが、実装役をサブエージェント（`.claude/agents/<役>.md`。廃止した旧定義を復元）として呼び、報告を受けて続きの指示を出す。leadのチャットは、方針・タスク票・文書を担当し続ける
+- 前提（**いずれも未確認**）：サブエージェントのWorktree分離、`code-reviewer`が読み取り専用になっていること、`agent_type`による役の書き込み制限が司令塔の配下で働くこと（§4.7）
+- 費用と懸念：司令塔の文脈とトークン、旧定義の復元と同期、leadチャットと司令塔の役割分担の二重化
+- **判断の時期：** 契約（#56のPR-1）とゴールデンログ（PR-2）を今の運用で通し、ownerの橋渡しがどこで重くなったかを見てから決める（D-033の追記）
 
 ## 4. 仕事の流れ
 
@@ -68,12 +95,12 @@
 6. **マージ。** ownerの承認が必須なのは、台帳・イベントログ・祝日とそのテスト、規則の正本（`docs/DECISIONS.md`・`PAPER_TRADING_RULES.md`・`EVENT_LOG.md`・`WORKFLOW.md`）、ガードレール（`AGENTS.md`・`CLAUDE.md`・`.claude/`・`.github/`・純関数の検査とそのテスト・`package.json`・`next.config.ts`など）。対象の一覧は`.github/CODEOWNERS`。ほかはCIが通り、レビューの高・中が片づいていればleadの判断で進めてよい（ownerが後から確認できるよう、STATUSに書く）
 
    **承認の扱い（ownerの決定、2026-11-04、D-033の追記）：** 別の認証は使わず、ブランチ保護はCIの成功（`check`・`size`）とPRを必須にするだけにする。承認の必須は設けない（CODEOWNERSは通知とレビューの目印）。**マージはownerが手動で行い、エージェントはマージしない**（上の「leadの判断で進めてよい」は、この方式をやめるまで停止する）。
-   **限界：** エージェントはownerのGitHub認証で動くので、技術的にはmainへ直接pushもマージもできてしまう。守るのは、この規律と、Claude Codeの設定・フックでのmainへのpush・force push・マージの禁止（§4.7）。フックは意図した迂回を完全には止められない。改めて固い守りが要るときは、権限を絞った別の認証（fine-grained PATやGitHub App）を使い、ブランチ保護を管理者にも適用する方式へ移る。
+   **限界：** 実装役のエージェントはownerのGitHub認証で動くので、技術的にはmainへ直接pushもマージもできてしまう。守るのは、この規律と、Claude Codeの設定・フックでのmainへのpush・force push・マージの禁止（§4.7）。**leadのチャットはClaude Codeではないので、フックが働かない前提で扱う。leadについて守るのは、規律とownerの手動マージだけ**（実測は§3.4）。フックは意図した迂回を完全には止められない。改めて固い守りが要るときは、権限を絞った別の認証（fine-grained PATやGitHub App）を使い、ブランチ保護を管理者にも適用する方式へ移る。
 7. **記録。** leadが`docs/STATUS.md`を更新する。履歴は`docs/HISTORY.md`（STATUSの分割と一緒に別のPRで作る。それまでは`docs/STATUS.md`の履歴に書く）、レビューで残した指摘は`review-debt`ラベルのissueにする
 
 ### 4.7 フック（`.claude/settings.json`・`.claude/hooks/guard.ts`）
 
-どのセッションでも（役の有無を問わず）、ツールを呼ぶ前に`guard.ts`が走り、次を止める（終了コード2。理由はClaudeに返る）。フックが失敗したときも止める（`onFailure: "block"`）。
+どのClaude Codeのセッションでも（役の有無を問わず）、ツールを呼ぶ前に`guard.ts`が走り、次を止める（終了コード2。理由はClaudeに返る）。フックが失敗したときも止める（`onFailure: "block"`）。
 
 - mainへのpush、強制push・削除・全ブランチのpush（`--force`・`+`・`--delete`・`--all`・`--mirror`・`--prune`、省略形とワイルドカードを含む）。現在のブランチがmainのときの引数なしpushと`HEAD`のpush
 - PRのマージ（`gh pr merge`、`gh api`のmerge）。`gh api`の書き込みは、PR・issueの作成と更新、コメント、レビューだけ許す。`gh repo`の変更、`gh secret`、`gh auth`のトークン表示も止める
@@ -100,7 +127,7 @@
 
 ### 4.8 完了前の境界検査（`scripts/check-boundaries.sh`）
 
-`scripts/check-boundaries.sh <役> [基準]`は、基準ブランチ（既定`origin/main`）との分岐点からの変更（コミット済み・ステージ済み・作業ツリー・未追跡、削除・名前の変更の元と先）が、役の担当パス内かを確かめる。判定は書き込み前のフックと同じ関数と同じ`paths.json`で、**基準ブランチの版**のルール・コードを使う（検査される側が書き換えても変わらない）。終了コード：0=違反なし、1=担当外あり、2=誤り（知らない役・設定が読めない・基準が見つからない・gitの失敗）。積み重ねたPRは基準に前のブランチを、verifierは基準に検証対象のブランチを指定する。leadは、その役のworktreeで実行して確かめる。
+`scripts/check-boundaries.sh <役> [基準]`は、基準ブランチ（既定`origin/main`）との分岐点からの変更（コミット済み・ステージ済み・作業ツリー・未追跡、削除・名前の変更の元と先）が、役の担当パス内かを確かめる。判定は書き込み前のフックと同じ関数と同じ`paths.json`で、**基準ブランチの版**のルール・コードを使う（検査される側が書き換えても変わらない）。終了コード：0=違反なし、1=担当外あり、2=誤り（知らない役・設定が読めない・基準が見つからない・gitの失敗）。積み重ねたPRは基準に前のブランチを、verifierは基準に検証対象のブランチを指定する。leadは、pushされたブランチを自分のクローンに取得して実行して確かめる（`.claude/roles/lead.md`の仕事4）。
 
 **限界：** 実行を忘れる／結果を無視するのは、役が自分で検査する限り防げない。CIで同じ検査を、PRのブランチ名`agent/<役>/…`から役を決めて走らせる案は、別PRで決める（それまでは、leadがPRごとに確認する）。見ないもの：`.gitignore`されたファイル、`assume-unchanged`・`skip-worktree`の変更。
 
