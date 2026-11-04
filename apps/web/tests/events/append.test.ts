@@ -131,9 +131,9 @@ describe("1日の流れ（§3.3）", () => {
 
   it("引け後処理に渡す公表は、権利落ち日が翌営業日のものを seq の昇順で", async () => {
     const { log } = await setup();
-    const a1 = await ok(log, sys("corporate_action.announced", jst("2026-11-09", 23), { symbol: "AAA", exDate: "2026-11-11" }));
-    const a2 = await ok(log, sys("corporate_action.announced", jst("2026-11-09", 23, 1), { symbol: "AAA", exDate: "2026-11-11" }));
-    const other = await ok(log, sys("corporate_action.announced", jst("2026-11-09", 23, 2), { symbol: "AAA", exDate: "2026-11-12" }));
+    const a1 = await ok(log, sys("corporate_action.announced", jst("2026-11-09", 23), { symbol: "AAA", kind: "dividend", exDate: "2026-11-11" }));
+    const a2 = await ok(log, sys("corporate_action.announced", jst("2026-11-09", 23, 1), { symbol: "AAA", kind: "split", exDate: "2026-11-11" }));
+    const other = await ok(log, sys("corporate_action.announced", jst("2026-11-09", 23, 2), { symbol: "AAA", kind: "dividend", exDate: "2026-11-12" }));
     const close = await ok(log, sys("prices.close", jst("2026-11-10", 15, 40), { date: "2026-11-10" }));
     await ok(log, sys("valuation.recorded", jst("2026-11-10", 15, 41), { agentId: "alpha", date: "2026-11-10", closeSeq: close }, [close]));
     const post = (announcedSeqs: number[]) => sys("corporate_actions.applied", jst("2026-11-10", 15, 42), { agentId: "alpha", asOf: "2026-11-10", exDate: "2026-11-11", announcedSeqs }, announcedSeqs);
@@ -295,7 +295,7 @@ describe("祝日の一覧の版と取引対象（§3.5）", () => {
     const later = ["2026-11-20", "2026-11-30", "2026-12-01"];
     const log = await newLog([], [table(["2026-11-11", ...later], G), table(later, G2), { ...table([], OLD), firstYear: 2020, lastYear: 2025 }]);
     const { src, run } = await setup(log); // 開始日 11/10 まで使った
-    await ok(log, sys("corporate_action.announced", jst("2026-11-09", 22, 10), { symbol: "AAA", exDate: "2026-12-01" }));
+    await ok(log, sys("corporate_action.announced", jst("2026-11-09", 22, 10), { symbol: "AAA", kind: "dividend", exDate: "2026-12-01" }));
     await ok(log, op("market.closed", jst("2026-11-09", 22, 20), { date: "2026-11-20" }));
     expect((await log.commitSheet(jst("2026-11-09", 22, 30), "alpha", sheet(run, [src], "2026-11-30"))).rejected).toBe("wrong_trading_date");
     const adopt = (sha: string, at: number) => reason(log.append(op("holidays.adopted", at, { holidaysSha256: sha })));

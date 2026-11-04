@@ -54,9 +54,13 @@ const AGENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
 ]);
 
 /** 営業日を判定するイベント。ほかに営業日を使うのは登録済みのAIのイベントで、登録には一覧が要るので、ここに入れなくてよい */
-const NEEDS_CALENDAR: ReadonlySet<EventType> = new Set<EventType>(["prices.open", "prices.close", "market.closed", "agent.registered"]);
+const NEEDS_CALENDAR: ReadonlySet<EventType> = new Set<EventType>(["prices.open", "prices.close", "market.closed", "agent.registered", "corporate_action.announced"]);
 
-/** 営業日の判定を通した日付の項目（§3.5）。ログが使った一番遅い日付を覚えるのに使う。公表の権利落ち日と臨時休場の日は、判定を通さないので入れない */
+/**
+ * 営業日の判定を通した日付の項目（§3.5）。ログが使った一番遅い日付を覚えるのに使う。臨時休場の日は判定を通さないので入れない。
+ * 公表の権利落ち日は、記録の時点では営業日かを確かめるが、外部の値1つで一覧を替えられなくならないよう入れない
+ * （あとの一覧で休場日になった公表は、§3.5 のとおり運営者が §6.2 の訂正で扱う）
+ */
 const JUDGED_DATES: Partial<Record<EventType, string[]>> = {
   "prices.open": ["date"],
   "prices.close": ["date"],
@@ -88,6 +92,8 @@ export interface Draft {
 }
 
 interface AgentState {
+  /** 開始日（agent.registered の startDate） */
+  startDate: string;
   /** 最後に済んだ引け後処理の営業日（D-030 の accountAsOf） */
   asOf: string;
   valuedDate: string | null;
@@ -297,6 +303,25 @@ export class EventLog {
         if (!isTime(publishedAt) || !isTime(fetchedAt) || publishedAt > fetchedAt || fetchedAt > d.recordedAt) return "need publishedAt <= fetchedAt <= recordedAt";
         return null;
       }
+      case "corporate_action.announced": {
+        // 権利落ち日 X の公表は、どのAIも X の前営業日の引け後処理をまだ済ませていない（または臨時休場の追加の処理をまだ書ける）ときだけ。
+        // 遅れた公表は、どの引け後処理でも反映されないので、黙って残さず拒む（運営者が §6.2 で扱う）
+        // 権利落ち日は、その時点の休場日（臨時休場を含む）で営業日であること。休場日の公表は、どの引け後処理にも渡らない
+        const exDate = p.exDate as string;
+        let before: string;
+        try {
+          if (!isBusinessDay(exDate, H)) return "exDate must be a business day";
+          before = previousBusinessDay(exDate, H);
+        } catch {
+          return "exDate is outside the adopted holiday table";
+        }
+        for (const [id, a] of this.agents) {
+          // 権利落ち日以後に始めたAIは、権利落ち日より前に株を持たないので、この公表を受け取らない
+          if (a.startDate >= exDate || a.asOf < before || (a.asOf === before && a.catchUp?.date === before)) continue;
+          return `agent ${id} already finished the post-close of ${before}`;
+        }
+        return null;
+      }
       case "prices.open":
         if (this.closed.has(p.date as string) || !isBusinessDay(p.date as string, H)) return "market was closed";
         return d.recordedAt >= cutoffOf(p.date as string) ? null : "open prices recorded before the cutoff";
@@ -446,7 +471,7 @@ export class EventLog {
         break;
       }
       case "agent.registered":
-        this.agents.set(agentId, { asOf: previousBusinessDay(p.startDate as string, this.holidays()), valuedDate: null, pending: null, catchUp: null });
+        this.agents.set(agentId, { startDate: p.startDate as string, asOf: previousBusinessDay(p.startDate as string, this.holidays()), valuedDate: null, pending: null, catchUp: null });
         break;
       case "order_sheet.committed":
         st!.pending = { tradingDate: p.tradingDate as string, seq: e.seq };
@@ -537,6 +562,11 @@ function keysOf(type: EventType, p: Record<string, unknown>): string[] | string 
       return k(["date"], () => [`close:${String(p.date)}`]);
     case "market.closed":
       return k(["date"], () => [`closed:${String(p.date)}`]);
+    case "corporate_action.announced":
+      // 同じ銘柄・種類・権利落ち日の公表は1件だけ。内容が変われば §6.2 の訂正で表す
+      if (typeof p.symbol !== "string" || !SYMBOL.test(p.symbol)) return "invalid symbol";
+      if (p.kind !== "split" && p.kind !== "dividend") return "invalid kind";
+      return k(["exDate"], () => [`announce:${String(p.symbol)}:${String(p.kind)}:${String(p.exDate)}`]);
     case "agent.registered":
       return k(["agentId"], () => [`agent:${String(id)}`]);
     case "order_sheet.committed":
