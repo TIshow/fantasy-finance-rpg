@@ -1,6 +1,7 @@
 // docs/EVENT_LOG.md §3・§4 の追記の処理を、架空のAIと銘柄の1日の流れで確かめる。
 import { describe, expect, it } from "vitest";
 import { EventLog, type Draft } from "../../src/events/append";
+import type { HolidayTable } from "../../src/holidays/index";
 import { verifyChain } from "../../src/events/chain";
 import { cutoffOf, newAccount } from "../../src/ledger/ledger";
 import { INITIAL_CASH, type Order } from "../../src/ledger/types";
@@ -10,7 +11,7 @@ const jst = (date: string, hh: number, mm = 0) => Date.parse(`${date}T${String(h
 const H = "a".repeat(64);
 const buy: Order[] = [{ symbol: "AAA", side: "buy", qty: 100 }];
 
-const newLog = (holidays: ReadonlySet<string> = new Set()) => new EventLog({ universe: new Set(["AAA"]), holidays, holidaysSha256: H, accountOf: () => newAccount() });
+const table = (dates: string[], sha = H): HolidayTable => ({ firstYear: 2026, lastYear: 2027, sourceSha256: "0".repeat(64), contentSha256: sha, dates: new Set(dates) });
 
 async function ok(log: EventLog, d: Draft) {
   const r = await log.append(d);
@@ -26,7 +27,16 @@ const reason = async (p: Promise<{ ok: boolean; reason?: string }>) => {
 };
 
 /** 11/9（月）の夜に登録し、11/10（火）から売買できるAI。注文の判断の agent.run の seq を返す */
-async function setup(log = newLog()) {
+/** 祝日の一覧（版 H）を採用し、取引対象を AAA にしたログ */
+async function newLog(holidays: string[] = [], tables: HolidayTable[] = []) {
+  const log = new EventLog({ holidayTables: new Map([table(holidays), ...tables].map((t) => [t.contentSha256, t])), accountOf: () => newAccount() });
+  await ok(log, op("holidays.adopted", 0, { holidaysSha256: H }));
+  await ok(log, op("universe.set", 0, { symbols: ["AAA"] }));
+  return log;
+}
+
+async function setup(given?: EventLog) {
+  const log = given ?? (await newLog());
   await ok(log, op("agent.registered", jst("2026-11-09", 20), { agentId: "alpha", startDate: "2026-11-10", initialCash: INITIAL_CASH }));
   const src = await ok(log, sys("source.captured", jst("2026-11-09", 21), { publishedAt: jst("2026-11-09", 15, 30), fetchedAt: jst("2026-11-09", 21) }));
   const run = await ok(log, sys("agent.run", jst("2026-11-09", 22), { agentId: "alpha", purpose: "order", inputSeqs: [src], ok: true }, [src]));
@@ -64,7 +74,7 @@ describe("1日の流れ（§3.3）", () => {
   });
 
   it("祝日をまたいで、評価と引け後処理は次の営業日へ進む", async () => {
-    const { log } = await setup(newLog(new Set(["2026-11-11"])));
+    const { log } = await setup(await newLog(["2026-11-11"]));
     await finishDay(log, "2026-11-10", "2026-11-12", null);
     expect(await reason(log.append(sys("prices.close", jst("2026-11-11", 15, 40), { date: "2026-11-11" })))).toBe("market was closed");
     const close = await ok(log, sys("prices.close", jst("2026-11-12", 15, 40), { date: "2026-11-12" }));
@@ -136,14 +146,14 @@ describe("1日の流れ（§3.3）", () => {
 
 describe("時点（§3.1・§3.2）", () => {
   it("始値は約定日の締め（8:30）より前と、休場日には記録できない", async () => {
-    const log = newLog();
+    const log = await newLog();
     expect(await reason(log.append(sys("prices.open", jst("2026-11-10", 8, 29), { date: "2026-11-10" })))).toBe("open prices recorded before the cutoff");
     expect(await reason(log.append(sys("prices.open", jst("2026-11-10", 8, 30), { date: "2026-11-10" })))).toBe("ok");
     expect(await reason(log.append(sys("prices.open", jst("2026-11-14", 9), { date: "2026-11-14" })))).toBe("market was closed");
   });
 
   it("出典は publishedAt <= fetchedAt <= recordedAt でなければ記録できない", async () => {
-    const log = newLog();
+    const log = await newLog();
     const t = jst("2026-11-10", 7);
     expect(await reason(log.append(sys("source.captured", t, { publishedAt: t + 1, fetchedAt: t + 1 })))).not.toBe("ok");
     expect(await reason(log.append(sys("source.captured", t, { publishedAt: t - 2, fetchedAt: t + 1 })))).not.toBe("ok");
@@ -168,7 +178,7 @@ describe("時点（§3.1・§3.2）", () => {
   });
 
   it("前の営業日の終値は、翌営業日の注文票の入力に使える（約定日以後の価格は、記録の時刻の決まりで確定より前に書けない）", async () => {
-    const { log, src } = await setup(newLog());
+    const { log, src } = await setup();
     await finishDay(log, "2026-11-10", "2026-11-11", null);
     const close = log.events.find((e) => e.type === "prices.close")!.seq;
     const run = await ok(log, sys("agent.run", jst("2026-11-10", 21), { agentId: "alpha", purpose: "order", inputSeqs: [src, close], ok: true }, [src, close]));
@@ -242,7 +252,7 @@ describe("停止と臨時休場（§3.3・§6.3）", () => {
   });
 
   it("開始日は登録時点の次の約定日だけ。先の日のAIで臨時休場が書けなくなることはない", async () => {
-    const log = newLog();
+    const log = await newLog();
     const reg = (startDate: string) => op("agent.registered", jst("2026-11-09", 20), { agentId: "beta", startDate, initialCash: INITIAL_CASH });
     expect(await reason(log.append(reg("2026-12-01")))).toBe("startDate must be the next trading date");
     expect(await reason(log.append(reg("2026-11-09")))).toBe("startDate must be the next trading date");
@@ -253,5 +263,59 @@ describe("停止と臨時休場（§3.3・§6.3）", () => {
   it("時計が戻った記録は拒む", async () => {
     const { log } = await setup();
     expect(await reason(log.append(sys("source.captured", jst("2026-11-09", 19), { publishedAt: jst("2026-11-09", 15), fetchedAt: jst("2026-11-09", 19) })))).toContain("recordedAt goes backwards");
+  });
+});
+
+describe("祝日の一覧の版と取引対象（§3.5）", () => {
+  it("一覧を採用する前は営業日を使うイベントを書けず、知らない版と同じ版は採用できない", async () => {
+    const log = new EventLog({ holidayTables: new Map([[H, table([])]]), accountOf: () => newAccount() });
+    expect(await reason(log.append(sys("prices.open", jst("2026-11-10", 9), { date: "2026-11-10" })))).toBe("no holiday table adopted");
+    expect(await reason(log.append(op("agent.registered", jst("2026-11-09", 20), { agentId: "alpha", startDate: "2026-11-10", initialCash: INITIAL_CASH })))).toBe("no holiday table adopted");
+    expect(await reason(log.append(op("holidays.adopted", 0, { holidaysSha256: "b".repeat(64) })))).toBe(`unknown holiday table ${"b".repeat(64)}`);
+    await ok(log, op("holidays.adopted", 0, { holidaysSha256: H }));
+    expect(await reason(log.append(op("holidays.adopted", 0, { holidaysSha256: H })))).toBe("this holiday table is already adopted");
+  });
+
+  it("一覧を替えても、ログが使った日付までの休場日は変えられない。その後の日付は直せ、以後の判定は新しい一覧による", async () => {
+    const [B, C, D] = ["b", "c", "d"].map((x) => x.repeat(64)) as [string, string, string];
+    const log = await newLog([], [table(["2026-11-11"], B), table(["2026-11-10"], C), { ...table([], D), firstYear: 2027 }]);
+    const { src, run } = await setup(log); // 開始日 11/10 まで使った
+    const adopt = (sha: string) => reason(log.append(op("holidays.adopted", jst("2026-11-09", 23), { holidaysSha256: sha })));
+    expect(await adopt(C)).toBe("holiday table changes 2026-11-10, which the log already used");
+    expect(await adopt(D)).toBe("holiday table must cover 2026-2026");
+    expect(await adopt(B)).toBe("ok");
+    const sheetSeq = await commit(log, jst("2026-11-10", 8), sheet(run, [src]));
+    expect(log.events.at(-1)!.payload).toMatchObject({ holidaysSha256: B });
+    // 11/11 が休場になったので、11/10 の引け後処理の権利落ち日は 11/12
+    await finishDay(log, "2026-11-10", "2026-11-12", sheetSeq);
+  });
+
+  it("ログが使った日付は、営業日の判定を通した日付だけで進む（公表の権利落ち日・臨時休場の日・拒否した注文票の約定日では進まない）", async () => {
+    const [G, G2, OLD] = ["e", "f", "0"].map((x) => x.repeat(64)) as [string, string, string];
+    const later = ["2026-11-20", "2026-11-30", "2026-12-01"];
+    const log = await newLog([], [table(["2026-11-11", ...later], G), table(later, G2), { ...table([], OLD), firstYear: 2020, lastYear: 2025 }]);
+    const { src, run } = await setup(log); // 開始日 11/10 まで使った
+    await ok(log, sys("corporate_action.announced", jst("2026-11-09", 22, 10), { symbol: "AAA", exDate: "2026-12-01" }));
+    await ok(log, op("market.closed", jst("2026-11-09", 22, 20), { date: "2026-11-20" }));
+    expect((await log.commitSheet(jst("2026-11-09", 22, 30), "alpha", sheet(run, [src], "2026-11-30"))).rejected).toBe("wrong_trading_date");
+    const adopt = (sha: string, at: number) => reason(log.append(op("holidays.adopted", at, { holidaysSha256: sha })));
+    expect(await adopt(OLD, jst("2026-11-09", 23))).toBe("holiday table must cover 2026-2026");
+    // 11/10 の翌日から後は直せる
+    expect(await adopt(G, jst("2026-11-09", 23))).toBe("ok");
+    const sheetSeq = await commit(log, jst("2026-11-10", 8), sheet(run, [src]));
+    await finishDay(log, "2026-11-10", "2026-11-12", sheetSeq); // 引け後処理の権利落ち日 11/12 まで使った
+    expect(await adopt(G2, jst("2026-11-10", 16))).toBe("holiday table changes 2026-11-11, which the log already used");
+  });
+
+  it("取引対象にない銘柄は注文できず、取引対象は重複のない昇順で替え、約定待ちの注文票があれば銘柄を外せない", async () => {
+    const { log, src, run } = await setup();
+    const set = (symbols: unknown) => reason(log.append(op("universe.set", jst("2026-11-09", 23), { symbols })));
+    expect((await log.commitSheet(jst("2026-11-09", 22, 30), "alpha", sheet(run, [src], "2026-11-10", [{ symbol: "BBB", side: "buy", qty: 100 }]))).rejected).toBe("unknown_symbol");
+    expect(await set(["BBB", "AAA"])).toBe("symbols must be distinct symbol codes in ascending order");
+    expect(await set(["AAA"])).toBe("symbols are the same as the current universe");
+    expect(await set(["AAA", "BBB"])).toBe("ok");
+    await commit(log, jst("2026-11-10", 8), sheet(run, [src]));
+    expect(await reason(log.append(op("universe.set", jst("2026-11-10", 8, 1), { symbols: ["AAA", "BBB", "CCC"] })))).toBe("ok");
+    expect(await reason(log.append(op("universe.set", jst("2026-11-10", 8, 2), { symbols: ["BBB"] })))).toBe("agent alpha has a committed sheet that is not filled yet");
   });
 });

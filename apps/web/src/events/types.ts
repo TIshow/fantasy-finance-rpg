@@ -8,6 +8,8 @@ export const EVENT_TYPES = [
   "prices.close",
   "corporate_action.announced",
   "market.closed",
+  "holidays.adopted",
+  "universe.set",
   "agent.registered",
   "agent.run",
   "post.published",
