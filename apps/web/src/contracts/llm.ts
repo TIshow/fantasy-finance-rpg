@@ -26,7 +26,8 @@ export interface LlmMessage {
 
 /**
  * 費用の上限と試運転。
- * dailyCostLimit は 0 以上の安全な整数。外れた値の policy では実装を作れない（実装の作成時に RangeError）。
+ * dailyCostLimit は 0 以上の安全な整数（0 は「呼ばない」で、停止に使える）。外れた値の policy では実装を作れない
+ * （実装の作成時に RangeError）。実装は policy を複製して持ち、作ったあとに呼び出し側が書き換えても効かない。
  * dryRun が true の間は注文を出さない。runner には commitSheet を持たない OrderlessEventStore だけを渡す
  * （保証は runner の工場関数の仕事。event-store.ts の OrderlessEventStore を見る）。投稿と agent.run は書く
  * （費用と下書きを監査できるように）。
@@ -50,7 +51,8 @@ export interface LlmRequest {
    */
   messages: readonly LlmMessage[];
   /**
-   * この呼び出しの費用の上限（呼び出し側の見積もり。出力トークンの上限などから決める）。0 以上の安全な整数。
+   * この呼び出しの費用の上限（呼び出し側の見積もり。出力トークンの上限などから決める）。1 以上の安全な整数
+   * （0 だと予約がなく、上限の保証が成り立たないため）。
    * NaN・負・小数などは、呼ばずに RangeError で断る（complete が拒否される。budget_exceeded ではない）。
    *
    * 予約：実装は、その日の使用済み（予約中を含む）＋maxCost が dailyCostLimit を超えるなら呼ばずに断り
@@ -59,6 +61,7 @@ export interface LlmRequest {
    * 精算：呼び出しが終わったら、予約を実費に置き換える。実費が maxCost を超えても切り捨てず、そのまま
    * usage.cost と spent に記録する。usage.cost > maxCost は異常で、呼び出し側は運用者に知らせる。
    * 課金されたかどうか分からない失敗（timeout など）は、予約した maxCost を費用として残す。
+   * 提供元の費用が比較できない値（NaN・負・小数など）のときも maxCost を費用とする（上限を効かなくする方向には倒さない）。
    */
   maxCost: Deciyen;
 }

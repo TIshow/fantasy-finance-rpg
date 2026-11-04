@@ -5,12 +5,25 @@ import { describe, expect, it } from "vitest";
 import type { Clock, DraftInput, EventReader, EventStore, OrderlessEventStore, PriceObservation } from "../../src/contracts";
 import { EventLog } from "../../src/events/append";
 import { newAccount } from "../../src/ledger/ledger";
-import { describeEventStoreContract, describeLlmContract, describeMarketDataContract } from "./conformance";
+import { describeEventStoreContract, describeLlmContract, describeMarketDataContract, holidayTable, seedAgent } from "./conformance";
 import { FakeClock, FakeLlm, MemoryEventStore, MemoryMarketData, jst, jstDay } from "./fakes";
 
 describeEventStoreContract("MemoryEventStore", (env) => new MemoryEventStore(new EventLog({ holidayTables: env.holidayTables, accountOf: () => newAccount() }), env.clock));
 describeMarketDataContract("MemoryMarketData", (observations, clock) => new MemoryMarketData(observations, clock));
 describeLlmContract("FakeLlm", (policy, clock, backend) => new FakeLlm(policy, clock, backend));
+
+describe("MemoryEventStore だけの確認", () => {
+  it("limit を省くと実装の上限で切れ、返った最後の seq を afterSeq にして続きを読める", async () => {
+    const clock = new FakeClock(0);
+    const store = new MemoryEventStore(new EventLog({ holidayTables: new Map([[holidayTable.contentSha256, holidayTable]]), accountOf: () => newAccount() }), clock, 2);
+    await seedAgent(store, clock); // 5件
+    const first = await store.read();
+    expect(first.map((e) => e.seq)).toEqual([1, 2]);
+    expect((await store.read(first.at(-1)!.seq)).map((e) => e.seq)).toEqual([3, 4]);
+    expect((await store.read(4)).map((e) => e.seq)).toEqual([5]);
+    expect((await store.read(0, 100)).length).toBe(2); // limit が上限より大きくても、上限で切れる
+  });
+});
 
 describe("Clock", () => {
   it("UNIXミリ秒の整数を返し、recordedAt にそのまま使える", () => {

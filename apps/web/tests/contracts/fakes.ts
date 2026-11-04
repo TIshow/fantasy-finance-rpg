@@ -1,8 +1,9 @@
 // 契約（src/contracts）のメモリ上の簡単な偽物。platform・web のテストが、契約だけに依存して使える。
-import type { Clock, CommitResult, DraftInput, EventStore, LlmErrorCode, LlmPolicy, LlmPort, LlmRequest, LlmResult, MarketDataPort, MarketView, PriceObservation, SheetInput } from "../../src/contracts";
+import type { Clock, CommitResult, DraftInput, EventStore, LlmPolicy, LlmPort, LlmRequest, LlmResult, MarketDataPort, MarketView, PriceObservation, SheetInput } from "../../src/contracts";
 import type { EventLog } from "../../src/events/append";
 import type { LogEvent } from "../../src/events/types";
 import type { Deciyen } from "../../src/ledger/types";
+import type { BackendReply, LlmBackend } from "./backend";
 
 /** 日本時間の日時を UNIXミリ秒にする */
 export const jst = (date: string, hh: number, mm = 0) => Date.parse(`${date}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00+09:00`);
@@ -31,7 +32,7 @@ class Serial {
   }
 }
 
-/** この偽物が1回の read で返す件数の上限（limit を省いたとき） */
+/** この偽物が1回の read で返す件数の既定の上限（limit を省いたとき） */
 export const READ_MAX = 1000;
 
 /**
@@ -44,12 +45,13 @@ export class MemoryEventStore implements EventStore {
   constructor(
     private readonly log: EventLog,
     private readonly clock: Clock,
+    private readonly readMax = READ_MAX,
   ) {}
 
-  async read(afterSeq = 0, limit = READ_MAX): Promise<readonly LogEvent[]> {
+  async read(afterSeq = 0, limit = this.readMax): Promise<readonly LogEvent[]> {
     if (!Number.isInteger(afterSeq) || afterSeq < 0) throw new RangeError("afterSeq must be an integer >= 0");
     if (!Number.isInteger(limit) || limit < 1) throw new RangeError("limit must be an integer >= 1");
-    return this.log.events.filter((e) => e.seq > afterSeq).slice(0, Math.min(limit, READ_MAX));
+    return this.log.events.filter((e) => e.seq > afterSeq).slice(0, Math.min(limit, this.readMax));
   }
 
   async last(): Promise<LogEvent | null> {
@@ -67,9 +69,13 @@ export class MemoryEventStore implements EventStore {
 
 const KIND_ORDER = { open: 0, close: 1 } as const;
 
+/** 窓に見せてよい観測：公開時刻・取得時刻が有限の数で、fetchedAt >= publishedAt、かつどちらも at より前 */
+const visibleAt = (o: PriceObservation, at: number) =>
+  Number.isFinite(o.publishedAt) && Number.isFinite(o.fetchedAt) && o.fetchedAt >= o.publishedAt && o.publishedAt < at && o.fetchedAt < at;
+
 /**
- * 観測を持ち、時点 at の窓には publishedAt < at のものだけを見せる。公開時刻が有限の数でない観測は返さない。
- * at が現在時刻より後なら RangeError
+ * 観測を持ち、時点 at の窓には publishedAt < at かつ fetchedAt < at の観測だけを見せる。
+ * 公開時刻・取得時刻が数でない観測や、fetchedAt < publishedAt の観測は返さない。at が現在時刻より後なら RangeError
  */
 export class MemoryMarketData implements MarketDataPort {
   constructor(
@@ -81,7 +87,7 @@ export class MemoryMarketData implements MarketDataPort {
     if (!Number.isFinite(at) || at > this.clock.now()) throw new RangeError("asOf is later than now");
     const visible = (symbol: string) =>
       this.all
-        .filter((o) => o.symbol === symbol && Number.isFinite(o.publishedAt) && o.publishedAt < at)
+        .filter((o) => o.symbol === symbol && visibleAt(o, at))
         .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.publishedAt - b.publishedAt || KIND_ORDER[a.kind] - KIND_ORDER[b.kind]));
     return {
       at,
@@ -94,20 +100,13 @@ export class MemoryMarketData implements MarketDataPort {
   }
 }
 
-/** 提供元の応答の代わり。cost: "unknown" は、課金されたか分からない失敗（timeout など） */
-export type BackendReply =
-  | { ok: true; output: string; cost: Deciyen; respondedModel?: string }
-  | { ok: false; errorCode: Exclude<LlmErrorCode, "budget_exceeded" | "invalid_output">; cost: Deciyen | "unknown" };
-
-/** 提供元を呼ぶ処理。テストは、解決を外から操作できる Promise を返して、呼び出し中の状態を確かめられる */
-export type LlmBackend = (request: LlmRequest) => Promise<BackendReply>;
-
 /** 決まった返事を順に返し、1回の費用は cost の提供元 */
 export function scripted(replies: readonly string[], cost: Deciyen): LlmBackend {
   let n = 0;
-  return async () => ({ ok: true, output: replies[n++ % replies.length] ?? "", cost });
+  return async (request) => ({ ok: true, output: replies[n++ % replies.length] ?? "", cost, respondedModel: `${request.model.modelId}-fake` });
 }
 
+/** 0 以上の安全な整数 */
 const isCost = (v: unknown): v is Deciyen => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
 /**
@@ -119,12 +118,15 @@ export class FakeLlm implements LlmPort {
   readonly calls: LlmRequest[] = [];
   private readonly spentByDay = new Map<string, Deciyen>();
 
+  readonly policy: LlmPolicy;
+
   constructor(
-    readonly policy: LlmPolicy,
+    policy: LlmPolicy,
     private readonly clock: Clock,
     private readonly backend: LlmBackend,
   ) {
     if (!isCost(policy.dailyCostLimit)) throw new RangeError("dailyCostLimit must be a non-negative safe integer");
+    this.policy = Object.freeze({ ...policy }); // 複製して持つ。作ったあとに書き換えても効かない
   }
 
   async spent(day: string): Promise<Deciyen> {
@@ -132,7 +134,7 @@ export class FakeLlm implements LlmPort {
   }
 
   async complete(request: LlmRequest): Promise<LlmResult> {
-    if (!isCost(request.maxCost)) throw new RangeError("maxCost must be a non-negative safe integer");
+    if (!isCost(request.maxCost) || request.maxCost < 1) throw new RangeError("maxCost must be a safe integer >= 1");
     const startedAt = this.clock.now();
     const day = jstDay(startedAt);
     const used = this.spentByDay.get(day) ?? 0;
@@ -147,12 +149,13 @@ export class FakeLlm implements LlmPort {
     } catch {
       reply = { ok: false, errorCode: "provider_error", cost: "unknown" };
     }
-    const cost = reply.cost === "unknown" ? request.maxCost : reply.cost;
+    // 分からない費用と、比較できない費用（NaN・負・小数）は maxCost で数える（上限を効かなくする方向には倒さない）
+    const cost = isCost(reply.cost) ? reply.cost : request.maxCost;
     this.spentByDay.set(day, (this.spentByDay.get(day) ?? 0) - request.maxCost + cost); // 精算：予約を実費に置き換える
     const usage = { inputTokens: 10, outputTokens: reply.ok ? reply.output.length : 0, cost };
     const finishedAt = this.clock.now();
     return reply.ok
-      ? { ok: true, output: reply.output, usage, respondedModel: reply.respondedModel ?? `${request.model.modelId}-fake`, startedAt, finishedAt }
+      ? { ok: true, output: reply.output, usage, respondedModel: reply.respondedModel, startedAt, finishedAt }
       : { ok: false, errorCode: reply.errorCode, usage, startedAt, finishedAt };
   }
 }
