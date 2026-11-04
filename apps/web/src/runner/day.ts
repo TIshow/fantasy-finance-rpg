@@ -1,6 +1,8 @@
-// 1日の流れ（#27 PR-1）。取引日 T について、前の日の引け後の残り → 判断（締めより前）→ 寄り付きの約定 → 引け後の処理と評価、の順に行う。
-// 書くのは保管（EventStore）だけ。約定・評価・引け後の中身は、runner が持つ台帳（Ledger.compute*）で作る。
-// どの段も、ログを見て済んでいれば飛ばすので、同じ日をもう一度回しても二重にならない。外部通信・DB・LLM なし。
+// 1日の流れ（#27 PR-1）。取引日 T について、前の日の残り（始値の約定・引け後）→ 判断（締めより前）→ 寄り付きの約定
+// → 引け後の処理と評価、の順に行う。書くのは保管（EventStore）だけ。約定・評価・引け後の中身は、runner が持つ台帳
+// （Ledger.compute*）で作る。どの段も、ログを見て済んでいる分は飛ばし、欠けている分だけを書くので、同じ日をもう一度
+// 回しても二重にならず、途中で落ちても回し直せば続きから進む。外部通信・DB・LLM なし。
+// 前提：保管に書くのは、1つの runner だけ（runDay の途中に別の書き手が追記すると、写しと合わずに例外になる）。
 import type { Clock, EventStore, MarketDataPort, PriceObservation } from "../contracts";
 import { EventLog } from "../events/append";
 import { canonicalize } from "../events/canonical";
@@ -12,7 +14,7 @@ import { cutoffOf, isBusinessDay, nextBusinessDay, previousBusinessDay } from ".
 import type { Account, Deciyen, Order } from "../ledger/types";
 import type { RunnerValues } from "./values";
 
-/** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引いて渡す */
+/** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引き、凍結した写しを渡す */
 export interface CloseInput {
   seq: number;
   date: string;
@@ -24,14 +26,15 @@ export interface DecisionInput {
   tradingDate: string;
   at: number;
   closes: readonly CloseInput[];
+  /** 口座。根拠のイベント（そのAIの最後の引け後の処理）の seq を inputSeqs に入れる */
   account: Account;
 }
 
 export interface Decision {
   orders: Order[];
   post: { board: string; text: string } | null;
-  /** agent.run の出力（ハッシュだけをログに残す） */
-  output: string;
+  /** 判断の説明（出力の一部としてログの外に残す） */
+  note: string;
 }
 
 /** runner が動かすAI。LLM を使うものも使わないものも、この形で判断を返す */
@@ -60,10 +63,8 @@ const HOUR = 3_600_000;
 /** 判断（締め 8:30 の 1時間半前）・寄り付きの取り込み（9:30）・引けの取り込み（16:30）。日本時間 */
 export const scheduleOf = (date: string) => ({ decideAt: cutoffOf(date) - 1.5 * HOUR, openAt: cutoffOf(date) + HOUR, closeAt: cutoffOf(date) + 8 * HOUR });
 
-/** 段ごとの結果：書いた・済んでいた・待つ（データがまだない、時刻を過ぎたなど）。待った段は、あとで同じ日を回し直せば進む */
+/** 段ごとの結果：書いた・済んでいた・待つ（データがまだない、など）・飛ばした（締めの後など）。待った段は、回し直せば進む */
 export type StageResult = { stage: string; status: "written" | "done" | "waiting" | "skipped"; detail?: string };
-
-const SOURCE = "market";
 
 export async function runDay(date: string, deps: RunnerDeps): Promise<StageResult[]> {
   const day = await Day.load(deps);
@@ -72,7 +73,7 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
   const s = scheduleOf(date);
   const out: StageResult[] = [];
   await deps.waitUntil(s.decideAt);
-  out.push(await day.afterClose(prev));
+  out.push(await day.open(prev), await day.afterClose(prev));
   out.push(await day.decide(date, prev));
   await deps.waitUntil(s.openAt);
   out.push(await day.open(date));
@@ -80,6 +81,13 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
   out.push(await day.afterClose(date));
   return out;
 }
+
+type Payload = Record<string, unknown>;
+const pl = (e: LogEvent) => e.payload as Payload;
+const deepFreeze = <T>(v: T): T => {
+  if (typeof v === "object" && v !== null) for (const x of Object.values(Object.freeze(v))) deepFreeze(x);
+  return v;
+};
 
 /** 保管のログを読み直して作った、検査（EventLog）と台帳（Ledger）の写し。書いたイベントは写しにも当てる */
 class Day {
@@ -105,8 +113,8 @@ class Day {
     return new Day(deps, log, ledger);
   }
 
-  private find(type: LogEvent["type"], match: (p: Record<string, unknown>) => boolean = () => true): LogEvent | undefined {
-    return this.log.events.find((e) => e.type === type && match(e.payload as Record<string, unknown>));
+  private find(type: LogEvent["type"], match: (p: Payload) => boolean = () => true): LogEvent | undefined {
+    return this.log.events.find((e) => e.type === type && match(pl(e)));
   }
 
   private async sync(r: { ok: true; event: LogEvent } | { ok: false; reason: string }, what: string): Promise<LogEvent> {
@@ -117,76 +125,140 @@ class Day {
     return r.event;
   }
 
-  private append(type: Parameters<EventStore["append"]>[0]["type"], actor: Parameters<EventStore["append"]>[0]["actor"], payload: Record<string, unknown>, refs: number[] = []) {
+  private append(type: Parameters<EventStore["append"]>[0]["type"], actor: Parameters<EventStore["append"]>[0]["actor"], payload: Payload, refs: number[] = []) {
     return this.deps.store.append({ type, actor, refs, payload }).then((r) => this.sync(r, type));
   }
 
   /** その日に動くAI（登録済みで、開始日が date 以前） */
   private agentsOn(date: string): string[] {
-    return this.log.events.filter((e) => e.type === "agent.registered" && ((e.payload as Record<string, unknown>).startDate as string) <= date).map((e) => (e.payload as Record<string, unknown>).agentId as string);
+    return this.log.events.filter((e) => e.type === "agent.registered" && (pl(e).startDate as string) <= date).map((e) => pl(e).agentId as string);
   }
 
   private universe(): string[] {
     const u = this.log.events.filter((e) => e.type === "universe.set").at(-1);
-    return u ? ((u.payload as Record<string, unknown>).symbols as string[]) : [];
+    return u ? (pl(u).symbols as string[]) : [];
   }
 
-  /** 窓から全銘柄の date の観測を引いて prices.* と source.captured を書く。1銘柄でもなければ待つ */
+  /** ログの停止・再開から、いまの停止を求める（EventLog と同じ決め方。"*" は全体） */
+  private suspended(agentId: string, scope: "posts" | "orders"): boolean {
+    const on = new Map<string, Set<string>>();
+    for (const e of this.log.events) {
+      if (e.type !== "agent.suspended" && e.type !== "agent.resumed") continue;
+      const p = pl(e);
+      const set = on.get(p.agentId as string) ?? new Set<string>();
+      for (const x of p.scope === "both" ? ["posts", "orders"] : [p.scope as string]) (e.type === "agent.suspended" ? set.add(x) : set.delete(x));
+      on.set(p.agentId as string, set);
+    }
+    return [agentId, "*"].some((id) => on.get(id)?.has(scope) ?? false);
+  }
+
+  /**
+   * 窓から全銘柄の date の観測を引いて prices.* を書き、出典ごとに source.captured を書く。1銘柄でもなければ待つ。
+   * 済んでいれば、その記録の取得時刻までの観測で、欠けた source.captured だけを補う（prices.* の後に落ちたとき）
+   */
   private async ingest(date: string, kind: "open" | "close"): Promise<LogEvent | StageResult> {
     const stage = kind === "open" ? "prices.open" : "prices.close";
-    const done = this.find(stage, (p) => p.date === date);
-    if (done) return done;
-    const view = this.deps.market.asOf(this.deps.clock.now());
+    const recorded = this.find(stage, (p) => p.date === date);
+    const view = this.deps.market.asOf(recorded ? (pl(recorded).fetchedAt as number) + 1 : this.deps.clock.now());
     const obs: PriceObservation[] = [];
     for (const symbol of this.universe()) {
-      const o = await view.latest(symbol, kind);
-      if (o?.date !== date) return { stage, status: "waiting", detail: `no ${kind} of ${symbol} for ${date}` };
+      // 新しい日の観測があっても、その日の最新の版を選ぶ（後から前の日を回し直せるように）
+      const o = (await view.history(symbol)).filter((x) => x.date === date && x.kind === kind).at(-1);
+      if (!o) return { stage, status: "waiting", detail: `no ${kind} of ${symbol} for ${date}` };
       obs.push(o);
     }
     if (obs.length === 0) return { stage, status: "waiting", detail: "no universe" };
-    const fetchedAt = Math.max(...obs.map((o) => o.fetchedAt));
-    const valuesHash = await this.deps.values.putValue(Object.fromEntries(obs.map((o) => [o.symbol, o.price])));
-    const event = await this.append(stage, "system", { date, source: SOURCE, fetchedAt, valuesHash });
-    await this.append("source.captured", "system", { source: SOURCE, publishedAt: Math.max(...obs.map((o) => o.publishedAt)), fetchedAt, contentHash: valuesHash });
+    const sources = [...new Set(obs.map((o) => o.source))].sort();
+    let event = recorded;
+    if (!event) {
+      const valuesHash = await this.deps.values.putValue(Object.fromEntries(obs.map((o) => [o.symbol, o.price])));
+      event = await this.append(stage, "system", { date, source: sources.join(","), fetchedAt: Math.max(...obs.map((o) => o.fetchedAt)), valuesHash });
+    }
+    const contentHash = pl(event).valuesHash;
+    for (const source of sources) {
+      if (this.find("source.captured", (p) => p.contentHash === contentHash && p.source === source)) continue;
+      const mine = obs.filter((o) => o.source === source);
+      await this.append("source.captured", "system", { source, publishedAt: Math.max(...mine.map((o) => o.publishedAt)), fetchedAt: Math.max(...mine.map((o) => o.fetchedAt)), contentHash });
+    }
     return event;
   }
 
-  /** 締めより前に、AIごとに入力を固定して agent.run を書き、投稿と注文票の確定を行う */
+  /**
+   * 締めより前に、AIごとに入力を固定して agent.run を書き、投稿と注文票の確定を行う。
+   * 判断（出力）は、正規化した JSON をログの外に置き、outputHash で引き直せるようにする。run を書いた後に落ちたら、
+   * 回し直しでは判断をやり直さず、記録した run の出力と入力から、欠けた投稿・注文票だけを補う。
+   * 停止中のAIは、投稿を作らない（投稿の停止）・注文票は保管に渡して拒否（suspended）を残す（注文の停止）。
+   * 判断が例外を投げたAIは、失敗の run（ok: false）を残して次のAIへ進む（エラー文は残さない。EVENT_LOG §1）。
+   */
   async decide(date: string, prev: string): Promise<StageResult> {
     const stage = "decide";
-    if (this.find("prices.open", (p) => p.date === date) || this.deps.clock.now() >= cutoffOf(date)) return { stage, status: "skipped", detail: "after the cutoff" };
+    if (this.find("prices.open", (p) => p.date === date)) return { stage, status: "skipped", detail: "after the open" };
     const prevClose = this.find("prices.close", (p) => p.date === prev);
     if (!prevClose) return { stage, status: "waiting", detail: `no close of ${prev}` };
     const closes = this.log.events.filter((e) => e.type === "prices.close").slice(-(this.deps.inputDays ?? 20));
-    const inputs: CloseInput[] = closes.map((e) => {
-      const p = e.payload as Record<string, unknown>;
-      return { seq: e.seq, date: p.date as string, prices: this.deps.values.get(p.valuesHash as string)!.value as CloseInput["prices"] };
-    });
-    const inputSeqs = inputs.map((i) => i.seq);
     let wrote = false;
+    const late: string[] = [];
     for (const agent of this.deps.agents.filter((a) => this.agentsOn(date).includes(a.id))) {
-      if (this.log.events.some((e) => e.seq > prevClose.seq && e.type === "agent.run" && (e.payload as Record<string, unknown>).agentId === agent.id)) continue;
-      const startedAt = this.deps.clock.now();
-      const d = await agent.decide({ agentId: agent.id, tradingDate: date, at: startedAt, closes: inputs, account: this.ledger.account(agent.id) });
-      const run = async (purpose: "post" | "order", output: string) => {
-        const requestHash = await sha256Hex(new TextEncoder().encode(canonicalize({ model: agent.model, prompt: agent.prompt, purpose, inputSeqs })));
-        const outputHash = await this.deps.values.putBody(output);
-        const payload = { agentId: agent.id, purpose, model: agent.model, prompt: agent.prompt, inputSeqs, requestHash, startedAt, finishedAt: this.deps.clock.now(), outputHash, ok: true };
-        return (await this.append("agent.run", "system", payload, inputSeqs)).seq;
+      const id = agent.id;
+      const runs = this.log.events.filter((e) => e.seq > prevClose.seq && e.type === "agent.run" && pl(e).agentId === id);
+      if (runs.some((r) => pl(r).ok !== true)) continue; // 失敗を記録済み
+      const noPosts = this.suspended(id, "posts");
+      if (runs.length === 0 && noPosts && this.suspended(id, "orders")) continue;
+      if (this.deps.clock.now() >= cutoffOf(date)) {
+        late.push(id);
+        continue;
+      }
+      let decision: Decision;
+      let inputSeqs: number[];
+      if (runs.length > 0) {
+        const body = this.deps.values.body(pl(runs[0]!).outputHash as string);
+        if (!body) throw new Error(`output of run ${runs[0]!.seq} is not available`);
+        decision = JSON.parse(body.value) as Decision;
+        inputSeqs = pl(runs[0]!).inputSeqs as number[];
+      } else {
+        const basis = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id).at(-1);
+        inputSeqs = [...closes.map((e) => e.seq), ...(basis ? [basis.seq] : [])];
+        const input = deepFreeze(structuredClone({ agentId: id, tradingDate: date, at: this.deps.clock.now(), closes: closes.map((e) => ({ seq: e.seq, date: pl(e).date as string, prices: this.deps.values.get(pl(e).valuesHash as string)!.value as CloseInput["prices"] })), account: this.ledger.account(id) }));
+        try {
+          const d = await agent.decide(input);
+          decision = { orders: d.orders, post: d.post ?? null, note: d.note ?? "" };
+        } catch {
+          await this.run(agent, "order", date, inputSeqs, input.at, null);
+          wrote = true;
+          continue;
+        }
+      }
+      const runSeq = async (purpose: "post" | "order") => {
+        const recorded = runs.find((r) => pl(r).purpose === purpose);
+        if (recorded) return recorded.seq;
+        wrote = true;
+        return this.run(agent, purpose, date, inputSeqs, this.deps.clock.now(), canonicalize(decision));
       };
-      if (d.post) {
-        const runSeq = await run("post", d.output);
-        const bodyHash = await this.deps.values.putBody(d.post.text);
-        await this.append("post.published", `agent:${agent.id}`, { agentId: agent.id, board: d.post.board, bodyHash, citeSeqs: inputSeqs, runSeq }, [runSeq, ...inputSeqs]);
+      if (decision.post && !noPosts) {
+        const postRun = await runSeq("post");
+        if (!this.find("post.published", (p) => p.runSeq === postRun)) {
+          const bodyHash = await this.deps.values.putBody(decision.post.text);
+          await this.append("post.published", `agent:${id}`, { agentId: id, board: decision.post.board, bodyHash, citeSeqs: inputSeqs, runSeq: postRun }, [postRun, ...inputSeqs]);
+          wrote = true;
+        }
       }
-      const runSeq = await run("order", d.output);
-      if (d.orders.length > 0) {
-        const r = await this.deps.store.commitSheet(agent.id, { tradingDate: date, orders: d.orders, runSeq, inputSeqs });
-        await this.sync(r, `commitSheet ${agent.id}`);
+      const orderRun = await runSeq("order");
+      const sheetDone = this.log.events.some((e) => (e.type === "order_sheet.committed" || e.type === "order_sheet.rejected") && pl(e).runSeq === orderRun);
+      if (decision.orders.length > 0 && !sheetDone) {
+        await this.sync(await this.deps.store.commitSheet(id, { tradingDate: date, orders: decision.orders, runSeq: orderRun, inputSeqs }), `commitSheet ${id}`);
+        wrote = true;
       }
-      wrote = true;
     }
+    if (late.length > 0) return { stage, status: "skipped", detail: `after the cutoff: ${late.join(",")}` };
     return { stage, status: wrote ? "written" : "done" };
+  }
+
+  /** agent.run を書く。output が null なら失敗の run。リクエストのハッシュは、AIに渡したものの識別（入力の seq と約定日）から作る */
+  private async run(agent: RunnerAgent, purpose: "post" | "order", tradingDate: string, inputSeqs: number[], startedAt: number, output: string | null): Promise<number> {
+    const requestHash = await sha256Hex(new TextEncoder().encode(canonicalize({ model: agent.model, prompt: agent.prompt, purpose, tradingDate, inputSeqs })));
+    const base = { agentId: agent.id, purpose, model: agent.model, prompt: agent.prompt, inputSeqs, requestHash, startedAt, finishedAt: this.deps.clock.now() };
+    const payload = output === null ? { ...base, ok: false, errorCode: "provider_error" } : { ...base, outputHash: await this.deps.values.putBody(output), ok: true };
+    return (await this.append("agent.run", "system", payload, inputSeqs)).seq;
   }
 
   /** 始値を取り込み、確定した注文票を約定させる */
@@ -194,8 +266,8 @@ class Day {
     const open = await this.ingest(date, "open");
     if (!("seq" in open)) return open;
     let wrote = false;
-    for (const sheet of this.log.events.filter((e) => e.type === "order_sheet.committed" && (e.payload as Record<string, unknown>).tradingDate === date)) {
-      const agentId = (sheet.payload as Record<string, unknown>).agentId as string;
+    for (const sheet of this.log.events.filter((e) => e.type === "order_sheet.committed" && pl(e).tradingDate === date)) {
+      const agentId = pl(sheet).agentId as string;
       if (this.find("fills.executed", (p) => p.agentId === agentId && p.tradingDate === date)) continue;
       const f = await this.ledger.computeFills(agentId, sheet.seq, open.seq);
       await this.append("fills.executed", "system", { agentId, tradingDate: date, sheetSeq: sheet.seq, openSeq: open.seq, ...f.payload }, [sheet.seq, open.seq]);
@@ -204,11 +276,15 @@ class Day {
     return { stage: "open", status: wrote ? "written" : "done" };
   }
 
-  /** 終値を取り込み、AIごとに評価と引け後の処理（分割・配当の公表は #67 の後） */
+  /** 終値を取り込み、AIごとに評価と引け後の処理。約定待ちの注文票や、企業行動の公表（#67 の後で扱う）があれば待つ */
   async afterClose(date: string): Promise<StageResult> {
+    const stage = "after_close";
+    const unfilled = this.log.events.filter((e) => e.type === "order_sheet.committed" && (pl(e).tradingDate as string) <= date && !this.find("fills.executed", (p) => p.sheetSeq === e.seq));
+    if (unfilled.length > 0) return { stage, status: "waiting", detail: `sheets not filled: ${unfilled.map((e) => e.seq).join(",")}` };
     const close = await this.ingest(date, "close");
     if (!("seq" in close)) return close;
     const exDate = nextBusinessDay(date, this.log.holidays());
+    if (this.find("corporate_action.announced", (p) => p.exDate === exDate)) return { stage, status: "waiting", detail: `corporate actions on ${exDate} are not handled yet (#67)` };
     let wrote = false;
     for (const agentId of this.agentsOn(date)) {
       if (!this.find("valuation.recorded", (p) => p.agentId === agentId && p.date === date)) {
@@ -221,6 +297,6 @@ class Day {
         wrote = true;
       }
     }
-    return { stage: "after_close", status: wrote ? "written" : "done" };
+    return { stage, status: wrote ? "written" : "done" };
   }
 }
