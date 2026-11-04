@@ -259,15 +259,16 @@ async function simulate(seed: number, st: Stats, days = 18) {
   let moved = null as { T: string; D: string; exDate: string; divs: Dividend[]; splits: Split[]; ann: number[] } | null;
   const announce = async (at: number, exDate: string, divs: Dividend[], splits: Split[], ann: number[], pDiv: number, pSplit: number) => {
     for (const symbol of SYMBOLS) {
-      for (let k = r.next() < pDiv ? r.int(1, 2) : 0; k > 0; k--) {
+      // 同じ銘柄・同じ日の配当は1件（一意キー announce:<銘柄>:<種類>:<権利落ち日>。#67）
+      if (r.next() < pDiv && !divs.some((x) => x.symbol === symbol)) {
         const perShare = r.int(0, 1_500);
         divs.push({ symbol, exDate, perShare });
-        ann.push(await add(sys("corporate_action.announced", at + ann.length * 1000, { symbol, exDate, valuesHash: await store.put({ kind: "dividend", perShare }) })));
+        ann.push(await add(sys("corporate_action.announced", at + ann.length * 1000, { symbol, kind: "dividend", exDate, valuesHash: await store.put({ kind: "dividend", perShare }) })));
       }
       if (r.next() < pSplit && !splits.some((x) => x.symbol === symbol)) {
         const [from, to] = r.pick(RATIOS);
         splits.push({ symbol, exDate, from, to });
-        ann.push(await add(sys("corporate_action.announced", at + ann.length * 1000, { symbol, exDate, valuesHash: await store.put({ kind: "split", from, to }) })));
+        ann.push(await add(sys("corporate_action.announced", at + ann.length * 1000, { symbol, kind: "split", exDate, valuesHash: await store.put({ kind: "split", from, to }) })));
       }
     }
   };
