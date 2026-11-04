@@ -78,7 +78,7 @@ AIの「情報の取得 → 発言 → 判断 → 注文 → 約定 → 評価 �
 | --- | --- | --- |
 | `fills.executed` | AIのID、約定日、注文票と始値のイベントの `seq`、`Fill` の並び、約定後の口座のハッシュ | `fills:<id>:<約定日>` |
 | `valuation.recorded` | AIのID、日付、銘柄ごとの株数・評価に使った価格とその `prices.close` の `seq`（直近の終値を使ったか）、現金、総資産 | `valuation:<id>:<日付>` |
-| `corporate_actions.applied` | AIのID、評価日 D、権利落ち日（D の翌営業日）、渡した公表の `seq` の一覧、反映した内容（配当：銘柄・1株配当・株数・金額。分割：銘柄・`from`・`to`・前後の株数・端数の現金・減らした取得原価・使った終値とその `seq`）、反映後の口座のハッシュ。**反映するものがない日も空で記録する** | `post_close:<id>:<D>`（§3.3 の臨時休場の追加分は `post_close:<id>:<D>:<休場のseq>`）と、渡した公表ごとの `ca:<id>:<公表のseq>` |
+| `corporate_actions.applied` | AIのID、評価日 D、権利落ち日（D の翌営業日）、渡した公表の `seq` の一覧、反映した内容（配当：銘柄・1株配当・株数・金額。分割：銘柄・`from`・`to`・前後の株数・端数の現金・減らした取得原価・使った終値とその `seq`）、反映後の口座のハッシュ。**反映するものがない日も空で記録する**。§3.3 の臨時休場の追加分は、休場の `market.closed` の `seq` を `closedSeq` に持つ | `post_close:<id>:<D>`（§3.3 の臨時休場の追加分は `post_close:<id>:<D>:<休場のseq>`）と、渡した公表ごとの `ca:<id>:<公表のseq>` |
 
 - **渡す公表：** その時点で有効な（§6.2 の訂正を当てた）公表のうち、権利落ち日が D の翌営業日のものを、`seq` の昇順で渡す
 - **端数の換金に使う終値：** その銘柄の直近の終値（`docs/PAPER_TRADING_RULES.md` §6）。その `prices.close` の `seq` を記録する。分割の記録の `close` は常に書き、端数が出なかった（終値を使わなかった）ときは `null` とする（§5.1 の「値がない」ではなく「使った終値がない」という値）
@@ -94,7 +94,7 @@ valuation.recorded(D) → corporate_actions.applied(D) → order_sheet.committed
 
 - 注文票を確定しなかった日は `order_sheet.committed` と `fills.executed` を飛ばす。確定した日は、空の注文票でも `fills.executed`（約定の並びが空）を書いてから評価に進む
 - **休場日：** 追記でも再計算でも、休場日は「そのイベントより前の最後の `holidays.adopted` の祝日の一覧」に「そのイベントより前の `market.closed` の日」を足したものとする（§3.5、§4、§7）
-- **臨時休場：** `market.closed`（T）を書いたら、T を休場日として扱い、T の注文票は `fills.executed`（全件失効、理由 `market_closed`）で閉じる。評価と引け後処理は T を飛ばして次の営業日へ進む。T の前営業日 D の引け後処理が済んでいれば、新しい休場日で権利落ち日が D の翌営業日になった公表を、追加の `corporate_actions.applied`（キー `post_close:<id>:<D>:<休場のseq>`）で反映する。これは T の翌営業日の注文票より前に書く。T が権利落ち日だった公表の扱いは、運営者が §6.2 の訂正で決める
+- **臨時休場：** `market.closed`（T）を書いたら、T を休場日として扱い、T の注文票は `fills.executed`（全件失効、理由 `market_closed`）で閉じる。評価と引け後処理は T を飛ばして次の営業日へ進む。T の前営業日 D の引け後処理が済んでいれば、新しい休場日で権利落ち日が D の翌営業日になった公表を、追加の `corporate_actions.applied`（キー `post_close:<id>:<D>:<休場のseq>`）で反映する。反映する公表があるあいだは、T の翌営業日の注文票（理由 `account_not_ready`）と評価を止める（反映する公表がなければ、書かなくても進める）。照合では、`closedSeq` がそのAIに立っている最後の休場であること、`asOf` が D、権利落ち日が D の新しい翌営業日、約定待ちがないことを確かめる。追加の処理の前に次の日も休場になったら、新しい休場の状態で上書きする。T が権利落ち日だった公表の扱いは、運営者が §6.2 の訂正で決める
 
 ### 3.4 訂正・停止
 
@@ -132,7 +132,7 @@ valuation.recorded(D) → corporate_actions.applied(D) → order_sheet.committed
   - `keys` のどれも既に使われていないこと。1つのイベントの一意キーは同じトランザクションで確かめるので、`corporate_actions.applied` が反映済みの公表をもう一度渡せば、口座を変える前に拒まれる
   - `actor` が種類に合うこと（§3）
   - `refs` が前だけを指すこと、§3 の時刻・入力の条件、§3.3 の順序
-  - 停止中でないこと。停止中のAIからの投稿・注文票は書かず、`order_sheet.rejected`（理由 `suspended`）を残す
+  - 停止中でないこと。停止中のAIからの投稿・注文票は書かず、`order_sheet.rejected`（理由 `suspended`）を残す。**拒否の理由の優先順：停止（`suspended`）は、注文の形や中身の検査（`invalid_order` など）より先に判定する**。停止の判定は注文の中身を使わないので、照合でも出し直せる。照合では、停止中のAIの拒否の記録は、注文が読めない記録でも理由 `suspended` だけを認める
 - **注文票の確定：** `validateSheet` を、上で決めた `recordedAt` を `committedAt` として、同じトランザクションの中で実行する。判定の時刻と記録の時刻がずれない
 - 一意キーで、同じ注文票の2回の約定（`fills:`）、同じ日の分割・配当の2回の反映（`post_close:`）、同じ公表の2回の反映（`ca:`。訂正で権利落ち日が変わった場合やカレンダーが変わった場合を含む）、1日に2枚の注文票（`sheet:`）を防ぐ。台帳の関数（`executeSheet`・`applyCorporateActions`）は冪等にせず、純関数のままにする
 - 確定後・約定前に `agent.suspended` が出ても、確定した注文票は約定させる（確定は取り消せない、`docs/PAPER_TRADING_RULES.md` §3）。全体の停止（`*`）でも、価格の取り込みと評価は止めない
