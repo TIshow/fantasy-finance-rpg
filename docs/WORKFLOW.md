@@ -96,7 +96,7 @@
 
 `settings.json`の`permissions.deny`は補助で、本体はフック。`deny`のBashルールは`git -C . push`や`bash -c`の形を止めないため、フックがコマンド全文を解析する。**限界：** 想定する相手はうっかり。`python -c`の中のgit、別のGitHubクライアント、大文字小文字を区別しないファイルシステム、シンボリックリンク経由の`.env`、`grep -r`のようなディレクトリ全体の検索が`.env`を読むこと、`gh`以外のクライアントでの書き込み、Bashでは`git checkout`/`git apply`・スクリプトの中の書き込み、などは止められない。守りの本体はPRの境界（CODEOWNERS・CI・ownerの手動マージ）。
 
-**実機の確認（2026-11-04、ownerが実施。環境の記録は次のとおり）：** (1) リポジトリ内のClaude Codeのセッション（デスクトップアプリかターミナルかは記録していない）で`git push origin main`を頼み、「ブロック：main…」で止まった（B3aが有効）。(2) ターミナルの`claude --agent web`（廃止した旧定義`web.md`があった時点）で、`apps/web/src/ledger/x.ts`をWriteしようとして「web の担当外のパス」で止まった（B3b。**いまは定義がないので再現しない**）。(3) `--agent`なしのセッションでは、同じファイルが作られた（仕様どおり、役がないと制限しない）。**未確認：** デスクトップアプリのWorktreeセッションでフックが発火するか（`${CLAUDE_PROJECT_DIR}`の解決を含む。確かめ方：Worktreeセッションで`git push origin main`を頼む）、Bashからの書き込みの実機、`isolation: worktree`のサブエージェントの中、サブエージェント`code-reviewer`の読み取り専用の制限。
+**実機の確認（2026-11-04、ownerが実施。環境の記録は次のとおり）：** (1) リポジトリ内のClaude Codeのセッション（デスクトップアプリかターミナルかは記録していない）で`git push origin main`を頼み、「ブロック：main…」で止まった（B3aが有効）。(2) ターミナルの`claude --agent web`（廃止した旧定義`web.md`があった時点）で、`apps/web/src/ledger/x.ts`をWriteしようとして「web の担当外のパス」で止まった（B3b。**いまは定義がないので再現しない**）。(3) `--agent`なしのセッションでは、同じファイルが作られた（仕様どおり、役がないと制限しない）。(4) **デスクトップアプリで「新規セッション、Worktreeオン」にしたセッションで、`git push origin main`がフックに止められた**（デスクトップの役別セッション運用でも、役を問わない禁止が働く。ownerが実施）。**未確認：** Bashからの書き込みの実機、`isolation: worktree`のサブエージェントの中、サブエージェント`code-reviewer`の読み取り専用の制限。
 
 ### 4.8 完了前の境界検査（`scripts/check-boundaries.sh`）
 
