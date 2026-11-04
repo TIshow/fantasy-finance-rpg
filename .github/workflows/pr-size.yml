@@ -1,0 +1,41 @@
+name: pr-size
+
+# 実装の差分の大きさ（AGENTS.md：300行程度、1,000行超は常態化させない）。
+# 数えるのは、文書（*.md）・ロックファイル・祝日の一覧を除いた追加＋削除の行。バイナリは数えない。
+# 300行を超えたら警告、1,000行を超えたら、ラベル large-pr-approved（ownerが付ける）がなければ失敗にする。
+# ラベルの付け外しでも走らせる（失敗したあとにラベルを付ければ、再実行なしで通る）。
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-size-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  size:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      BASE_REF: ${{ github.base_ref }}
+      APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'large-pr-approved') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 差分の行数を数える
+        run: |
+          base=$(git merge-base "origin/${BASE_REF}" HEAD)
+          lines=$(git diff --numstat "$base" HEAD -- . \
+            ':!*.md' ':!apps/web/package-lock.json' ':!apps/web/src/holidays/holidays.json' \
+            | awk '{a += $1 + $2} END {print a + 0}')
+          echo "実装の差分：${lines}行（追加＋削除）"
+          if [ "$lines" -gt 1000 ] && [ "$APPROVED" != "true" ]; then
+            echo "::error::差分が1,000行を超えている。分割するか、ownerがラベル large-pr-approved を付ける"
+            exit 1
+          elif [ "$lines" -gt 300 ]; then
+            echo "::warning::差分が300行を超えている（${lines}行）。1PR＝1目的で分けられないか確かめる"
+          fi
