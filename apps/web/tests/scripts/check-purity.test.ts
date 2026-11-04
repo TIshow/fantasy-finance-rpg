@@ -227,12 +227,22 @@ describe("ファイルの種類と実際のソース", () => {
       expect(checkSource(f, "export const a = 1;")).toEqual([{ file: f, line: 1, rule: "対象の層に置けるのは .ts だけ（.tsx・.d.ts・.js などは置けない）" }]);
   });
 
-  it("src/ledger・src/events・src/holidays/table.ts に違反がない", () => expect(checkTree(webRoot)).toEqual([]));
+  it("src/ledger・src/events・src/contracts・src/view・src/holidays/table.ts に違反がない", () => expect(checkTree(webRoot)).toEqual([]));
+
+  it("src/contracts と src/view も対象：時計・乱数・許していない層の import を拒む", () => {
+    for (const f of ["src/contracts/x.ts", "src/view/x.ts"]) {
+      expect(checkSource(f, "export const a = Date.now();").length).toBeGreaterThan(0);
+      expect(checkSource(f, "export const a = Math.random();").length).toBeGreaterThan(0);
+      expect(checkSource(f, 'import { x } from "../store/x";\nexport const a = x;').length).toBeGreaterThan(0);
+      expect(checkSource(f, 'import type { LogEvent } from "../events/types";\nimport { LOT } from "../ledger/types";\nexport const a = LOT;')).toEqual([]);
+    }
+    expect(checkSource("src/view/x.ts", 'import type { Clock } from "../contracts";\nexport const a = 1;').length).toBeGreaterThan(0);
+  });
 
   it("checkTree は層の中の .ts 以外のファイルも見つける", () => {
     const root = mkdtempSync(join(tmpdir(), "purity-"));
     try {
-      for (const f of ["src/ledger/a.ts", "src/ledger/b.d.ts", "src/events/c.ts", "src/holidays/table.ts"]) {
+      for (const f of ["src/ledger/a.ts", "src/ledger/b.d.ts", "src/events/c.ts", "src/contracts/d.ts", "src/view/e.ts", "src/holidays/table.ts"]) {
         mkdirSync(join(root, dirname(f)), { recursive: true });
         writeFileSync(join(root, f), "export const a = 1;\n");
       }

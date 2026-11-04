@@ -48,11 +48,11 @@ cd apps/web
 npm ci
 npm test          # 台帳などの純関数のテスト（Vitest）
 npm run typecheck
-npm run lint:purity   # src/ledger・src/events が純関数の決まりを守っているか（構文木で検査）
+npm run lint:purity   # src/ledger・src/events・src/contracts・src/view が純関数の決まりを守っているか（構文木で検査）
 npm run build
 npm run dev
 npm run holidays:check   # 祝日の一覧（src/holidays/holidays.json）と内閣府のCSVの差を確かめる
 npm run holidays:update  # 一覧を作り直す（差分はPRで人が確認する。D-031）
 ```
 
-新製品のテストは機能と一緒に`apps/web/tests/`へ追加する。`src/ledger/`と`src/events/`は純関数に保つ（Next.js・React・DB・`node:*`・時計に依存しない）。
+新製品のテストは機能と一緒に`apps/web/tests/`へ追加する。`src/ledger/`・`src/events/`・`src/contracts/`・`src/view/`は純関数に保つ（Next.js・React・DB・`node:*`・時計に依存しない）。
