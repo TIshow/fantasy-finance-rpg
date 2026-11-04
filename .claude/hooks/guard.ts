@@ -353,13 +353,25 @@ export function checkWrite(role: string | undefined, target: string, cwd: string
   if (rel === ".." || rel.startsWith("../") || isAbsolute(rel)) {
     return [realpathLoose("/tmp"), realpathLoose(tmpdir()), "/dev"].some((t) => abs.startsWith(t + sep)) ? null : `リポジトリの外（${target}）には書かない（/tmp は可）`;
   }
+  return judgeRel(role, rel);
+}
+
+/** 役が知られているか（paths.json の roles か readOnly にある）。完了前の検査が、綴り違いの役を黙って通さないために使う */
+export function isKnownRole(role: string): boolean {
+  return Object.hasOwn(rolePaths().roles, role) || rolePaths().readOnly.includes(role);
+}
+
+/** リポジトリのルートからの相対パス rel に、role が書いてよいか。だめなら理由。書き込み前のフック（checkWrite）と、完了前の検査（check-boundaries）が共有する判定 */
+export function judgeRel(role: string, rel: string): string | null {
+  // constructor・__proto__ などは役の名前ではない（以前は内部エラーで止まっていた。止める向きを保つ）
+  if (!Object.hasOwn(rolePaths().roles, role) && !rolePaths().readOnly.includes(role) && role in {}) return `不明な役名（${role}）`;
   if (rolePaths().readOnly.includes(role)) return `${role} は読み取り専用の役。ファイルは書かない（${rel}）`;
   if (inList(rel, rolePaths().generated, true)) return null;
   const guardedAncestor = rel === "" || rolePaths().protected.some((p) => p.startsWith(`${rel}/`));
   const globHit = /[*?[{]/.test(rel) && rolePaths().protected.some((p) => globToRe(rel).test(p.replace(/\/$/, "")));
   if (inList(rel, rolePaths().protected, true) || guardedAncestor || globHit)
     return `${rel || "."} は守りの設定（またはそれを含む場所）で、ownerだけが変更する。必要ならissueのコメントでleadに頼む（WORKFLOW §5）`;
-  const allowed = rolePaths().roles[role];
+  const allowed = Object.hasOwn(rolePaths().roles, role) ? rolePaths().roles[role] : undefined;
   if (allowed === undefined || inList(rel, allowed, true)) return null;
   return `${role} の担当外のパス（${rel}）。担当：${allowed.join("・")}。必要ならissueのコメントでleadに頼む（WORKFLOW §5）`;
 }

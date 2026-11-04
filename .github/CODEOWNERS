@@ -23,6 +23,7 @@
 /.claude/                        @TIshow
 /.github/                        @TIshow
 /.tool-versions                  @TIshow
+/scripts/                        @TIshow
 /apps/web/scripts/check-purity.ts @TIshow
 /apps/web/tests/scripts/         @TIshow
 /apps/web/package.json           @TIshow
