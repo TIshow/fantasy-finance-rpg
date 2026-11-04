@@ -66,6 +66,21 @@
 - 追記（2026-11-04、owner）：leadは、デスクトップアプリの中ではなく、ブラウザのチャット（claude.ai。CTO）で動かす。leadはデスクトップアプリの役別セッションを直接は動かせず、見えるのはGitHubに残ったものだけ（`docs/WORKFLOW.md` §3.4。実測では、読み、issueとコメント、ブランチのpush、PRの作成ができ、認証は管理者権限）。`docs/STATUS.md`・`docs/DECISIONS.md`はleadが本文を書き、自分のブランチ`agent/lead/…`からPRで出し、ownerがマージする（DECISIONSの承認はこのマージ）。leadが実装役をサブエージェントで呼ぶ案は、leadがClaude Codeでないので取り下げ、「司令塔のClaude Codeセッションをmainのフォルダに置く場合の案」として§3.5に残す。追加するかは、契約（#56のPR-1）とゴールデンログ（PR-2）を今の運用で通したあとに判断する。
 - 追記（2026-11-04、owner）：連絡の形を変える（`docs/WORKFLOW.md` §3.5）。各役の報告はissueのコメント（先頭に役名）に書き、PRは実装役が自分で出す。leadとownerはissueとPRを読んで現状を把握し、leadの判断はissueの`lead:`コメントに書く。ownerが役のセッションに貼るのは固定の1行（「issue #<番号> の最新のleadコメントを読んで続けて。」）だけにする。ownerの橋渡しを減らすのが目的。司令塔のClaude Codeセッションを置く案は、この形で1往復してから判断する。レビューの修正は最大2回までで、それ以降の指摘は`review-debt`のissueに移す。役ファイル（`.claude/roles/*.md`）と`CLAUDE.md`の変更は、ownerだけが変えるファイルなので別のPR
 
+## D-034：外側とのつなぎ目の契約の規則（Clock・EventStore・MarketDataPort・LlmPort）
+
+- 日付：2026-11-04
+- 状態：**Accepted**（2026-11-04、ownerがPR #61をマージして承認）
+- 決定：契約の型は`apps/web/src/contracts/`、契約テストと偽物は`apps/web/tests/contracts/`（`describeEventStoreContract`・`describeMarketDataContract`・`describeLlmContract`。platformが自分の実装に同じテストを当てる）。規則は次のとおり。
+  - **時刻：** `recordedAt`は保管が持つ`Clock`（1つ）から、直列化した追記の中で一度だけ決める。呼び出し側が実行時に`recordedAt`を渡しても**無視**する。本番の`fetchedAt`は、取得したときに`Clock`から取り、取得元の値や入力から取らず、後から過去の時刻を作らない
+  - **市場データの窓（先読みの防止）：** `asOf(at)`の窓は、`publishedAt < at`かつ`fetchedAt < at`の観測だけを返す（等号を含まない）。公開時刻が不明な観測は返さない。改訂は元を書き換えず、観測した版をすべて残し、改訂の`publishedAt`は取得元の改訂時刻（なければ最初に観測した時刻以上）。バックフィルは、取り込んだ時刻より前の窓には見えない。`at`が現在時刻より後なら`asOf`は同期で`RangeError`
+  - **LLMの費用：** `maxCost`は1以上の安全な整数、`dailyCostLimit`は0以上（0は「呼ばない」）。外れたら呼ばずに`RangeError`。判定と予約は原子的で、提供元の呼び出しは直列にしない。実費は切り捨てずに記録する。課金されたか分からない失敗（例外・通信断を含む）は、`ok:false`で返し、`maxCost`を費用に残す。換算（#21）で切り上げたあと、NaN・負・Infinityのときだけ`maxCost`を費用にする。暦日は`startedAt`（日本時間）で決める
+  - **保管：** 追記だけ（更新・削除の口なし）。`EventReader`が返す`LogEvent`は凍結済みか複製で、書き換えても保管に影響しない（型は深い読み取り専用にしない。`replay`の引数に響くため）。Promiseを返す口の`RangeError`はreject
+  - **試運転：** `OrderlessEventStore`は型の上の便宜で、保証ではない。保証は`runner`（#29）が、`commitSheet`を持たない凍結したオブジェクトを返す工場関数で作る
+- 理由：platformとwebが同じ型だけに依存して並列に進められる。AIの発言・注文・約定を後から検証でき、先読みと費用の取りこぼしを仕組みで防ぐ（`AGENTS.md`の不変条件）。独立した`code-reviewer`を3回通し、高0・中は反映済み
+- 費用：追加の契約・依存なし
+- やめ方：`src/contracts/`と`tests/contracts/`を外せば、型への依存がなくなる。実装は契約に依存するだけなので、置き換えられる
+- 限界：`src/contracts/`は`check-purity.ts`の対象外（純関数の決まりを構文木で検査していない。対象にするかはownerの判断待ち）。試運転の保証と、`settings`・`messages`だけを送るテストは、#29と#21の後
+
 ## 未決事項
 
 - P-001 株価・IRデータの利用権限と公開範囲（#18）
