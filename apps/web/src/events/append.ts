@@ -66,6 +66,9 @@ const JUDGED_DATES: Partial<Record<EventType, string[]>> = {
   "corporate_actions.applied": ["asOf", "exDate"],
 };
 
+/** 注文の中身で決まる拒否の理由（validateSheet の注文ごとの検査） */
+const ORDER_REASONS: ReadonlySet<RejectReason> = new Set<RejectReason>(["invalid_order", "unknown_symbol", "invalid_qty", "insufficient_holdings"]);
+
 /** 銘柄コード（例：7203、130A。テストでは架空の英字） */
 const SYMBOL = /^[0-9A-Z]{3,8}$/;
 
@@ -190,7 +193,8 @@ export class EventLog {
       const r = await this.write(committed);
       if (r.ok) return r;
     }
-    const reason = reject ?? "invalid_sheet";
+    // 検査を通っても書けないのは、注文が正規化できないとき（余分な項目に小数など）。注文の中身の問題として拒む
+    const reason = reject ?? "invalid_order";
     // 元の run と入力は、すべて前のイベントを指すときだけ残す（照合のとき、同じ拒否の理由を出し直せるように）
     const next = this.events.length + 1;
     const seqsKept = seqsOk && [sheet.runSeq, ...sheet.inputSeqs].every((s) => s >= 1 && s < next);
@@ -207,20 +211,25 @@ export class EventLog {
     return r.ok ? { ...r, rejected: reason } : r;
   }
 
-  /** 注文票を拒む理由（形の検査、停止、validateSheet など）。AIの出力から来る値なので、形が違っても例外にしない */
-  private rejectionOf(d: Draft): RejectReason | null {
-    const p = d.payload;
-    if (!seqsShapeOk(p.runSeq, p.inputSeqs)) return "invalid_sheet";
-    if (!Array.isArray(p.orders) || !p.orders.every((o) => typeof o === "object" && o !== null && !Array.isArray(o))) return "invalid_order";
-    return this.sheetRejection(d);
-  }
-
-  private sheetRejection(d: Draft): RejectReason | null {
+  /**
+   * 注文票を拒む理由（形の検査、停止、validateSheet など）。AIの出力から来る値なので、形が違っても例外にしない。
+   * 優先順は 停止 → 注文の形 → run と入力の形 → ほか（EVENT_LOG §4）。停止と注文の形は注文の中身や run・入力を使わないので、
+   * 拒否の記録が run と入力を外して残しても（commitSheet）、照合で同じ理由を出し直せる。
+   * final を false にすると、約定待ち・評価済みの検査（validateSheet の後）を飛ばす（読めない注文の拒否の照合で使う）
+   */
+  private rejectionOf(d: Draft, final = true): RejectReason | null {
     const p = d.payload;
     const agentId = String(p.agentId);
     const st = this.agents.get(agentId);
     if (!st) return null; // append が理由を返す
     if (this.isSuspended(agentId, "orders")) return "suspended";
+    if (!Array.isArray(p.orders) || !p.orders.every((o) => typeof o === "object" && o !== null && !Array.isArray(o))) return "invalid_order";
+    return this.sheetRejection(d, agentId, st, final);
+  }
+
+  private sheetRejection(d: Draft, agentId: string, st: AgentState, final: boolean): RejectReason | null {
+    const p = d.payload;
+    if (!seqsShapeOk(p.runSeq, p.inputSeqs)) return "invalid_sheet";
     const tradingDate = p.tradingDate;
     if (!isValidDate(tradingDate) || !Array.isArray(p.orders)) return "invalid_sheet";
     if (p.holidaysSha256 !== this.calendar?.table.contentSha256) return "invalid_sheet";
@@ -233,8 +242,27 @@ export class EventLog {
     );
     if (!v.ok) return v.reason;
     // 前の注文票が約定していない、またはその日以後をもう評価した口座では確定できない（§3.3 の順序）
-    if (st.pending || (st.valuedDate !== null && st.valuedDate >= tradingDate)) return "account_not_ready";
+    if (final && this.notReady(st, tradingDate)) return "account_not_ready";
     return null;
+  }
+
+  private notReady(st: AgentState, tradingDate: string): boolean {
+    return st.pending !== null || (st.valuedDate !== null && st.valuedDate >= tradingDate);
+  }
+
+  /**
+   * 読めない注文の拒否（ordersUnreadable）の理由が、その時点の状態と矛盾しないか。注文の中身は分からないので、
+   * 注文を空にして、注文によらない検査を出し直す。停止中なら理由は suspended だけ。ほかで拒むなら、理由はそれか
+   * invalid_order（注文の形の検査が先）。拒まないなら、理由は注文の中身で決まるもの（約定待ち・評価済みなら account_not_ready も）
+   */
+  private unreadableRejectionProblem(d: Draft): string | null {
+    const p = d.payload;
+    const reason = p.reason;
+    const pre = this.rejectionOf({ ...d, type: "order_sheet.committed", payload: { agentId: p.agentId, tradingDate: p.tradingDate, orders: [], runSeq: p.runSeq, inputSeqs: p.inputSeqs, holidaysSha256: this.calendar?.table.contentSha256 } }, false);
+    if ((pre !== null && reason === pre) || (pre !== "suspended" && reason === "invalid_order")) return null;
+    const notReady = isValidDate(p.tradingDate) && this.notReady(this.agents.get(String(p.agentId))!, p.tradingDate);
+    if (pre === null && (ORDER_REASONS.has(reason as RejectReason) || (reason === "account_not_ready" && notReady))) return null;
+    return `rejection reason ${String(reason)} does not fit unreadable orders (${String(pre)} without orders)`;
   }
 
   private check(d: Draft): string | null {
@@ -312,7 +340,8 @@ export class EventLog {
       case "order_sheet.rejected": {
         const allowed = ["agentId", "tradingDate", "reason", "runSeq", "inputSeqs", "orders", "ordersUnreadable"];
         if (Object.keys(p).some((k) => !allowed.includes(k))) return "unknown field in a rejected sheet";
-        if (p.ordersUnreadable === true) return typeof p.reason === "string" && p.orders === undefined ? null : "invalid rejected sheet";
+        if (p.ordersUnreadable === true) return p.orders === undefined ? this.unreadableRejectionProblem(d) : "invalid rejected sheet";
+        if (p.ordersUnreadable !== undefined || p.orders === undefined) return "invalid rejected sheet";
         // 受け取った注文票から、同じ時点・同じ検査で拒否の理由を出し直し、記録と同じであること
         const again = this.rejectionOf({ ...d, type: "order_sheet.committed", payload: { agentId: p.agentId, tradingDate: p.tradingDate, orders: p.orders, runSeq: p.runSeq, inputSeqs: p.inputSeqs, holidaysSha256: this.calendar?.table.contentSha256 } });
         return again !== null && again === p.reason ? null : `rejection reason ${String(p.reason)} does not match ${String(again)}`;

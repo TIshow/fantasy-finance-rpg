@@ -170,8 +170,11 @@ describe("照合で止まるもの", () => {
     const at = log.events.at(-1)!.recordedAt + 1;
     const base = { recordedAt: at, keys: [], refs: [] };
     // 停止していないAIを、停止中として拒否した記録
-    const fakeReject = await forge(log.events, { ...base, type: "order_sheet.rejected", actor: "system", payload: { agentId: "alpha", tradingDate: "2026-11-11", reason: "suspended" } });
+    const fakeReject = await forge(log.events, { ...base, type: "order_sheet.rejected", actor: "system", payload: { agentId: "alpha", tradingDate: "2026-11-11", reason: "suspended", orders: [] } });
     await expect(replay(fakeReject, store, CTX)).rejects.toThrow("rejection reason suspended does not match invalid_sheet");
+    // 受け取った注文も「読めない」の印もない拒否は、commitSheet が書かない形
+    const noOrders = await forge(log.events, { ...base, type: "order_sheet.rejected", actor: "system", payload: { agentId: "alpha", tradingDate: "2026-11-11", reason: "invalid_sheet" } });
+    await expect(replay(noOrders, store, CTX)).rejects.toThrow("invalid rejected sheet");
     const run = log.events.find((e) => e.type === "agent.run")!.seq;
     const nullOrder = await forge(log.events, { ...base, type: "order_sheet.committed", actor: "agent:alpha", keys: ["sheet:alpha:2026-11-11"], refs: [run], payload: { agentId: "alpha", tradingDate: "2026-11-11", orders: [null], runSeq: run, inputSeqs: [], holidaysSha256: A } });
     await expect(replay(nullOrder, store, CTX)).rejects.toThrow("(order_sheet.committed): invalid_order");
