@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DraftInput } from "../../src/contracts";
 import type { ValueStore } from "../../src/events/replay";
+import type { LogEvent } from "../../src/events/types";
 import { InMemoryEventStore } from "../../src/store/memory-store";
 import { describeEventStoreContract, holidayTable, seedAgent } from "../contracts/conformance";
 import { FakeClock, jst } from "../contracts/fakes";
@@ -38,25 +39,58 @@ describe("InMemoryEventStore の作り直しと台帳", async () => {
     await expect(InMemoryEventStore.fromEvents(g.events, noValues, g.holidayTables, new FakeClock(lastAt))).rejects.toThrow("values are not available");
   });
 
-  it("同時に呼ばれた追記は1件ずつ直列になり、seq と recordedAt の順が崩れない", async () => {
+  it("同時に呼ばれた追記は1件ずつ直列になり、recordedAt は直列の中で時計から取るので seq の順に増える", async () => {
     const clock = new FakeClock(0);
     const store = new InMemoryEventStore(noValues, tables, clock);
     await seedAgent(store, clock);
+    let t = jst("2026-11-09", 22);
+    const ticking = { now: () => (t += 1_000) }; // 呼ばれるたびに進む時計
+    const s2 = await InMemoryEventStore.fromEvents(await store.read(), noValues, tables, ticking);
     const results = await Promise.all(
-      Array.from({ length: 5 }, () => store.append({ type: "source.captured", actor: "system", refs: [], payload: { publishedAt: jst("2026-11-09", 15, 30), fetchedAt: jst("2026-11-09", 21) } })),
+      Array.from({ length: 5 }, () => s2.append({ type: "source.captured", actor: "system", refs: [], payload: { publishedAt: jst("2026-11-09", 15, 30), fetchedAt: jst("2026-11-09", 21) } })),
     );
-    expect(results.map((r) => r.ok && r.event.seq)).toEqual([6, 7, 8, 9, 10]);
+    const events = results.map((r) => (r.ok ? r.event : null));
+    expect(events.map((e) => e?.seq)).toEqual([6, 7, 8, 9, 10]);
+    const times = events.map((e) => e!.recordedAt);
+    expect(times).toEqual([...times].sort((a, b) => a - b));
+    expect(new Set(times).size).toBe(5);
   });
 
-  it("台帳に当てられないイベント（ログの外の値がない終値）が書かれたら、その後の追記を断る", async () => {
+  it("台帳が断るイベント（ログの外の値がない終値）は書かずに断り、保管はそのまま使える", async () => {
     const clock = new FakeClock(0);
     const store = new InMemoryEventStore(noValues, tables, clock);
     await seedAgent(store, clock);
     clock.set(jst("2026-11-10", 16));
     const close: DraftInput = { type: "prices.close", actor: "system", refs: [], payload: { date: "2026-11-10", source: "fixture", fetchedAt: jst("2026-11-10", 16), valuesHash: "b".repeat(64) } };
-    await expect(store.append(close)).rejects.toThrow("values are not available");
-    await expect(store.append({ type: "universe.set", actor: "operator:owner", refs: [], payload: { symbols: ["TSTA"] } })).rejects.toThrow("store stopped");
-    expect(() => store.account("ai-a")).toThrow("ledger stopped");
+    expect(await store.append(close)).toEqual({ ok: false, reason: "values are not available" });
+    expect((await store.last())?.seq).toBe(5);
+    const next = await store.append({ type: "source.captured", actor: "system", refs: [], payload: { publishedAt: jst("2026-11-10", 15, 30), fetchedAt: jst("2026-11-10", 16) } });
+    expect(next.ok && next.event.seq).toBe(6);
+    expect(store.account("ai-a").cash).toBeGreaterThan(0);
+  });
+
+  it("再計算と違う約定、値がない始値は書かずに断り、正しいものは書ける", async () => {
+    const at = (type: LogEvent["type"]) => g.events.findIndex((e) => e.type === type && (type !== "prices.open" || e.seq > 4));
+    const draftOf = (e: LogEvent): DraftInput => ({ type: e.type as DraftInput["type"], actor: e.actor, refs: [...e.refs], payload: { ...(e.payload as Record<string, unknown>) } });
+
+    const f = at("fills.executed");
+    const fe = g.events[f]!;
+    const s1 = await InMemoryEventStore.fromEvents(g.events.slice(0, f), g.values, g.holidayTables, new FakeClock(fe.recordedAt));
+    const wrong = draftOf(fe);
+    wrong.payload.accountHash = "c".repeat(64);
+    expect(await s1.append(wrong)).toEqual({ ok: false, reason: "fills do not match the ledger" });
+    expect((await s1.append(draftOf(fe))).ok && (await s1.last())?.hash).toBe(fe.hash);
+
+    const o = at("prices.open");
+    const oe = g.events[o]!;
+    const hidden: ValueStore = { get: (h) => (h === (oe.payload as Record<string, unknown>).valuesHash ? undefined : g.values.get(h)) };
+    const s2 = await InMemoryEventStore.fromEvents(g.events.slice(0, o), hidden, g.holidayTables, new FakeClock(oe.recordedAt));
+    expect(await s2.append(draftOf(oe))).toEqual({ ok: false, reason: "values are not available" });
+    expect((await s2.last())?.seq).toBe(o);
+  });
+
+  it("時計が最後のイベントより前なら作り直さない", async () => {
+    await expect(InMemoryEventStore.fromEvents(g.events, g.values, g.holidayTables, new FakeClock(lastAt - 1))).rejects.toThrow(RangeError);
   });
 
   it("読み取りの上限が範囲外なら作れない", () => {
