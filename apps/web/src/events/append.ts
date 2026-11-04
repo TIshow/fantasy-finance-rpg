@@ -36,7 +36,7 @@ const WRITERS: Record<EventType, Writer> = {
 };
 
 /** 中身で他のイベントを指す項目。すべて refs にも入っていなければならない */
-const SEQ_FIELDS = ["runSeq", "sheetSeq", "openSeq", "closeSeq", "targetSeq", "correctionSeq", "replyTo"];
+const SEQ_FIELDS = ["runSeq", "sheetSeq", "openSeq", "closeSeq", "closedSeq", "targetSeq", "correctionSeq", "replyTo"];
 const SEQ_LIST_FIELDS = ["inputSeqs", "announcedSeqs", "citeSeqs"];
 
 /** 登録済みのAIについてのイベント（agent.suspended・agent.resumed は全体の "*" も可） */
@@ -93,6 +93,11 @@ interface AgentState {
   valuedDate: string | null;
   /** 確定して、まだ約定していない注文票 */
   pending: { tradingDate: string; seq: number } | null;
+  /**
+   * 臨時休場の追加の引け後処理（§3.3）を書ける状態。D（asOf）の引け後処理のあとで、D の翌営業日を臨時休場にしたとき。
+   * 追加の処理、評価、次の注文票の確定のどれかで消える
+   */
+  catchUp: { date: string; closedSeq: number } | null;
 }
 
 /** 臨時休場の日を足した休場日の集合（calendar は has() だけを使う） */
@@ -247,7 +252,13 @@ export class EventLog {
   }
 
   private notReady(st: AgentState, tradingDate: string): boolean {
-    return st.pending !== null || (st.valuedDate !== null && st.valuedDate >= tradingDate);
+    return st.pending !== null || (st.valuedDate !== null && st.valuedDate >= tradingDate) || this.catchUpDue(st);
+  }
+
+  /** 臨時休場の追加の引け後処理が、まだ反映していない公表のために要るか（§3.3。翌営業日の注文票と評価より前に書く） */
+  private catchUpDue(st: AgentState): boolean {
+    if (!st.catchUp) return false;
+    return (this.announced.get(nextBusinessDay(st.catchUp.date, this.holidays())) ?? []).length > 0;
   }
 
   /**
@@ -356,12 +367,17 @@ export class EventLog {
       case "valuation.recorded": {
         if (st!.pending) return "the committed sheet is not filled yet";
         if (p.date !== nextBusinessDay(st!.asOf, H) || st!.valuedDate === p.date) return "valuation must be for the day after the last post-close";
+        if (this.catchUpDue(st!)) return "apply corporate actions moved by the market closure first";
         const close = this.closes.get(p.date as string);
         return close !== undefined && p.closeSeq === close ? null : "closeSeq must be prices.close of the date";
       }
       case "corporate_actions.applied": {
         if (st!.pending) return "the committed sheet is not filled yet";
-        if (st!.valuedDate !== p.asOf || st!.asOf === p.asOf) return "value the day before applying corporate actions";
+        if (p.closedSeq !== undefined) {
+          // 臨時休場の追加分（§3.3）：D の引け後処理のあと、D の翌営業日を休場にした、その休場について1回だけ
+          const c = st!.catchUp;
+          if (!c || c.closedSeq !== p.closedSeq || c.date !== p.asOf) return "no market closure to catch up for this agent and date";
+        } else if (st!.valuedDate !== p.asOf || st!.asOf === p.asOf) return "value the day before applying corporate actions";
         if (p.exDate !== nextBusinessDay(p.asOf as string, H)) return "exDate must be the next business day";
         // 渡す公表は、権利落ち日がこの日の公表だけを、seq の昇順で（§3.3）
         const seqs = p.announcedSeqs as unknown[];
@@ -418,14 +434,23 @@ export class EventLog {
         this.announced.set(String(p.exDate), list);
         break;
       }
-      case "market.closed":
-        this.closed.set(p.date as string, e.seq);
+      case "market.closed": {
+        const date = p.date as string;
+        const before = previousBusinessDay(date, this.holidays());
+        const moved = nextBusinessDay(before, this.holidays()) === date;
+        this.closed.set(date, e.seq);
+        // 休場の前営業日 D の引け後処理が済んだAIは、権利落ち日が D の翌営業日にずれた公表を、追加の処理で反映する（§3.3）。
+        // もともと休みの日（土日・祝日）を休場にしても、D の翌営業日は変わらないので要らない。
+        // 追加の処理の前に次の日も休場にしたら、新しい休場で上書きする（前の休場の翌営業日が権利落ち日の公表は、§6.2 の訂正で扱う）
+        if (moved) for (const a of this.agents.values()) if (a.asOf === before) a.catchUp = { date: before, closedSeq: e.seq };
         break;
+      }
       case "agent.registered":
-        this.agents.set(agentId, { asOf: previousBusinessDay(p.startDate as string, this.holidays()), valuedDate: null, pending: null });
+        this.agents.set(agentId, { asOf: previousBusinessDay(p.startDate as string, this.holidays()), valuedDate: null, pending: null, catchUp: null });
         break;
       case "order_sheet.committed":
         st!.pending = { tradingDate: p.tradingDate as string, seq: e.seq };
+        st!.catchUp = null;
         this.commits.add(`${agentId}:${String(p.tradingDate)}`);
         break;
       case "fills.executed":
@@ -433,9 +458,11 @@ export class EventLog {
         break;
       case "valuation.recorded":
         st!.valuedDate = p.date as string;
+        st!.catchUp = null;
         break;
       case "corporate_actions.applied":
         st!.asOf = p.asOf as string;
+        st!.catchUp = null;
         break;
       case "agent.suspended":
       case "agent.resumed": {
@@ -520,7 +547,10 @@ function keysOf(type: EventType, p: Record<string, unknown>): string[] | string 
       return k(["agentId", "date"], () => [`valuation:${String(id)}:${String(p.date)}`]);
     case "corporate_actions.applied": {
       if (!Array.isArray(p.announcedSeqs)) return "invalid announcedSeqs";
-      return k(["agentId", "asOf"], () => [`post_close:${String(id)}:${String(p.asOf)}`, ...(p.announcedSeqs as unknown[]).map((s) => `ca:${String(id)}:${String(s)}`)]);
+      if (p.closedSeq !== undefined && !Number.isSafeInteger(p.closedSeq)) return "invalid closedSeq";
+      // 臨時休場の追加分は post_close:<id>:<D>:<休場のseq>（§3.3）
+      const day = p.closedSeq === undefined ? String(p.asOf) : `${String(p.asOf)}:${String(p.closedSeq)}`;
+      return k(["agentId", "asOf"], () => [`post_close:${String(id)}:${day}`, ...(p.announcedSeqs as unknown[]).map((s) => `ca:${String(id)}:${String(s)}`)]);
     }
     case "ledger.adjusted":
       if (!Number.isSafeInteger(p.correctionSeq)) return "invalid correctionSeq";
