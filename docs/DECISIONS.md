@@ -65,6 +65,7 @@
 - 追記（2026-11-04、owner）：契約（`EventStore`・`MarketDataPort`・`LlmPort`・`Clock`の型）は`apps/web/src/contracts/`、固定シードで作る架空のゴールデンログは`apps/web/tests/fixtures/`に置き、どちらもcoreの担当とする（platform・webは読むだけ）。`vitest.config.ts`・`postcss.config.mjs`・`apps/web/public/`はownerだけが変える（守りの設定）。`apps/web/src/`・`apps/web/tests/`の直下に置くファイルは、どの役の担当でもない（ownerが決める）。
 - 追記（2026-11-04、owner）：leadは、デスクトップアプリの中ではなく、ブラウザのチャット（claude.ai。CTO）で動かす。leadはデスクトップアプリの役別セッションを直接は動かせず、見えるのはGitHubに残ったものだけ（`docs/WORKFLOW.md` §3.4。実測では、読み、issueとコメント、ブランチのpush、PRの作成ができ、認証は管理者権限）。`docs/STATUS.md`・`docs/DECISIONS.md`はleadが本文を書き、自分のブランチ`agent/lead/…`からPRで出し、ownerがマージする（DECISIONSの承認はこのマージ）。leadが実装役をサブエージェントで呼ぶ案は、leadがClaude Codeでないので取り下げ、「司令塔のClaude Codeセッションをmainのフォルダに置く場合の案」として§3.5に残す。追加するかは、契約（#56のPR-1）とゴールデンログ（PR-2）を今の運用で通したあとに判断する。
 - 追記（2026-11-04、owner）：連絡の形を変える（`docs/WORKFLOW.md` §3.5）。各役の報告はissueのコメント（先頭に役名）に書き、PRは実装役が自分で出す。leadとownerはissueとPRを読んで現状を把握し、leadの判断はissueの`lead:`コメントに書く。ownerが役のセッションに貼るのは固定の1行（「issue #<番号> の最新のleadコメントを読んで続けて。」）だけにする。ownerの橋渡しを減らすのが目的。司令塔のClaude Codeセッションを置く案は、この形で1往復してから判断する。レビューの修正は最大2回までで、それ以降の指摘は`review-debt`のissueに移す。役ファイル（`.claude/roles/*.md`）と`CLAUDE.md`の変更は、ownerだけが変えるファイルなので別のPR
+- 追記（2026-11-04、owner）：同時に動かす役のセッションは6体まで（実装役とverifierの合計。以前は3体）。純関数の検査（`check-purity.ts`）の対象に、`src/contracts/`（契約の型）と`src/view/`（表示用のデータ）を加える。「今」の時刻が要る表示は、画面の側（`src/app`）で時計を読んで引数で渡す
 
 ## D-034：外側とのつなぎ目の契約の規則（Clock・EventStore・MarketDataPort・LlmPort）
 
