@@ -24,6 +24,7 @@
 - どの役も、`.claude/`・`.github/`・`scripts/`・`AGENTS.md`・`CLAUDE.md`・`.tool-versions`・`apps/web/{package.json,package-lock.json,next.config.ts,tsconfig.json,vitest.config.ts,postcss.config.mjs}`・`apps/web/public/`・`apps/web/scripts/check-purity.ts`・`apps/web/tests/scripts/`を変えない（ownerだけ）
 - 役別セッション（lead以外）は、新しいWorktreeでは先に`cd apps/web && npm ci`。完了前に、リポジトリのルートで`git fetch origin && scripts/check-boundaries.sh <役名>`を実行し、0で終わらせる（積み重ねたPRは基準に前のブランチを指定。verifierは検証対象のブランチ）
 - 役別セッション（lead以外）は、完了前に`code-reviewer`サブエージェントを呼ぶ。どの役もmainへ直接pushしない。マージはownerが手動で行う
+- 役別セッション（lead以外）は、報告をissueのコメント（先頭に`core:`など役名）に書き、PRは自分で出す。leadはissueとPRを読んで、判断を`lead:`コメントに書く。ownerが貼るのは「issue #<番号> の最新のleadコメントを読んで続けて。」の1行（`docs/WORKFLOW.md` §3.5）
 - 役別セッション（lead以外）は、仕事が終わったらセッションを閉じる。引き継ぎは、タスク票・issue・`docs/STATUS.md`に書く
 
 - **限界：** この運用の役別セッションは`--agent`で起動しないので、書き込み前のフック（`agent_type`で役を見分ける）による役ごとの制限は**働かない**。守るのは、この表と役ファイルの約束、完了前の`check-boundaries.sh`、CODEOWNERSとownerの手動マージ。mainへのpush・`.env`・`gh pr merge`などの役を問わない禁止は、フックが働く（デスクトップアプリの新規セッション・Worktreeオンで`git push origin main`が止まることを確認済み。`docs/WORKFLOW.md` §4.7）

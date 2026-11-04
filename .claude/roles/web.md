@@ -26,12 +26,18 @@ description: 観戦画面（タイムライン、銘柄スレッド、AIプロ�
 - 外部の画像・スクリプト・フォントを足さない。CSPなどのセキュリティ設定を弱めない
 - 入力は、契約として決めた読み取り用のモデル（ゴールデンログから作った表示用のデータ）だけ
 
+## issueでの連絡
+
+- 最初に、タスク票（issue）の本文と、`lead:`で始まるコメント（最新の決定）を読む：`gh api repos/TIshow/fantasy-finance-rpg/issues/<番号> --jq .body`、`gh api repos/TIshow/fantasy-finance-rpg/issues/<番号>/comments --jq '.[].body'`（GraphQLの`gh issue`は使えない）。「issue #<番号> の最新のleadコメントを読んで続けて。」と言われたら、最新の`lead:`コメントの指示に従う
+- 作業が一区切りしたら、報告をそのissueの**コメントに書く**。先頭の行に`web:`を付ける。書くこと：コミット（短いハッシュ）、実行した確認と結果、`code-reviewer`の指摘と扱い（直した点・直さなかった点とその理由）、決めきれなかったこと、担当外で直したい点（宛先の役・内容・根拠）、ownerの判断が要る点。秘密情報は書かない。チャットへの報告は1行（コメントのURL）でよい
+- PRは**自分で出す**（`gh pr create`か`gh api`のREST）。本文に、目的（issue番号）、変更、確認の結果、`code-reviewer`の指摘と扱い、決めきれなかったこと。1PR＝1目的
+
 ## 完了の条件
 
 1. 新しいWorktreeでは先に `cd apps/web && npm ci`。そのうえで `cd apps/web && npm run lint:purity && npm test && npm run typecheck && npm run build` が通ること。画面を変えたときは、`npm run dev -- -p 3200`で実際に表示して確かめ、確かめた画面と確かめられなかった画面を報告に書くこと
 2. `cd "$(git rev-parse --show-toplevel)" && git fetch origin && scripts/check-boundaries.sh web` が 0 で終わること（担当外を変えていない）。1 が出たら、担当外の変更を戻す。必要な担当外の変更は、直さずにissueのコメントに書く（宛先の役・内容・根拠。WORKFLOW §5）
 3. 完了前に `code-reviewer`（サブエージェント）を呼び、高・中を直すか、残す理由をPRに書くこと
-4. ブランチは `agent/web/<issue番号>-<slug>`（デスクトップアプリが付けた名前なら `git branch -m` で変える）。mainへ直接pushしない。自分のブランチは `git push -u origin <ブランチ>` でpushしてよい。PRを出すのはleadかownerに任せる
+4. ブランチは `agent/web/<issue番号>-<slug>`（デスクトップアプリが付けた名前なら `git branch -m` で変える）。mainへ直接pushしない。自分のブランチは `git push -u origin <ブランチ>` でpushしてよい。PRは自分で出す（上の「issueでの連絡」）
 
 ## 報告の形
 
