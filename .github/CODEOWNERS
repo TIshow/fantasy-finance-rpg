@@ -1,0 +1,31 @@
+# 台帳・イベントログ・規則の正本・ガードレールの変更は owner の承認が必須（docs/WORKFLOW.md §4）。
+# ブランチ保護の「Code ownersのレビューを必須にする」を有効にして初めて効く。
+# 検査そのもの（CI・純関数の検査・その設定やテスト）を、承認なしで弱められないようにする。
+
+# 台帳・イベントログ・祝日と、そのテスト
+/apps/web/src/ledger/            @TIshow
+/apps/web/src/events/            @TIshow
+/apps/web/src/holidays/          @TIshow
+/apps/web/tests/ledger/          @TIshow
+/apps/web/tests/events/          @TIshow
+/apps/web/tests/holidays/        @TIshow
+/apps/web/tests/adversarial/     @TIshow
+
+# 規則の正本
+/docs/DECISIONS.md               @TIshow
+/docs/PAPER_TRADING_RULES.md     @TIshow
+/docs/EVENT_LOG.md               @TIshow
+/docs/WORKFLOW.md                @TIshow
+
+# ガードレール：指示、CI、検査、依存、セキュリティ設定、実行環境
+/AGENTS.md                       @TIshow
+/CLAUDE.md                       @TIshow
+/.claude/                        @TIshow
+/.github/                        @TIshow
+/.tool-versions                  @TIshow
+/apps/web/scripts/check-purity.ts @TIshow
+/apps/web/tests/scripts/         @TIshow
+/apps/web/package.json           @TIshow
+/apps/web/package-lock.json      @TIshow
+/apps/web/next.config.ts         @TIshow
+/apps/web/tsconfig.json          @TIshow
