@@ -1,4 +1,4 @@
-// src/ledger と src/events（と src/holidays/table.ts）が純関数の決まり（AGENTS.md）を守っているか確かめる。
+// src/ledger・src/events・src/contracts・src/view（と src/holidays/table.ts）が純関数の決まり（AGENTS.md）を守っているか確かめる。
 //   node scripts/check-purity.ts   違反があれば一覧を出して終了コード1
 // 守る決まり：Next.js・React・DB・node:*・時計・乱数・通信・実行環境に依存しない。importは相対パスで、許した層の中だけ。
 // TypeScript の構文木で調べる（コメント・文字列・正規表現リテラルに惑わされない）。解析できないファイルは違反とする。
@@ -19,6 +19,10 @@ export const LAYERS: { root: string; allow: string[] }[] = [
   { root: "src/ledger", allow: ["src/ledger/"] },
   { root: "src/events", allow: ["src/events/", "src/ledger/", "src/holidays/table"] },
   { root: "src/holidays/table.ts", allow: [] },
+  // 契約の型（D-034）：型だけの層。外側の口の形を定め、実装は置かない
+  { root: "src/contracts", allow: ["src/contracts/", "src/events/", "src/ledger/"] },
+  // 表示用のデータ：記録を写して整形するだけ。「今」の時刻は画面の側（src/app）で読んで引数で渡す
+  { root: "src/view", allow: ["src/view/", "src/events/", "src/ledger/"] },
 ];
 
 /** 宣言を許さない名前（宣言すると、組み込みの Date などを隠せてしまう） */
