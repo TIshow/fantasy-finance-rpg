@@ -2,7 +2,7 @@
 // 期待は実装ではなく文書から書く。欠陥の再現は it.fails にして、直ったら it に戻す。
 import { describe, expect, it } from "vitest";
 import { EventLog, type Draft } from "../../src/events/append";
-import { sealEvent } from "../../src/events/chain";
+import { sealEvent, verifyChain } from "../../src/events/chain";
 import { EVENT_TYPES, type EventType, type LogEvent } from "../../src/events/types";
 import type { HolidayTable } from "../../src/holidays/table";
 import { cutoffOf, newAccount } from "../../src/ledger/ledger";
@@ -81,7 +81,7 @@ describe("先読み（§3.1・§3.2）", () => {
     expect(r.rejected).toBe("invalid_sheet");
   });
 
-  it("確定を始値のあとへ入れ替えた保存済みログは、連鎖を作り直しても照合で落ちる", async () => {
+  it("確定を始値のあとへ入れ替えた保存済みログは、連鎖を作り直しても締めの検査（after_cutoff）で落ちる", async () => {
     const { log, src, run } = await setup();
     await log.commitSheet(jst("2026-11-10", 8), "alpha", { tradingDate: "2026-11-10", orders: buy, runSeq: run, inputSeqs: [src] });
     await ok(log, sys("prices.open", jst("2026-11-10", 9), { date: "2026-11-10" }));
@@ -90,16 +90,19 @@ describe("先読み（§3.1・§3.2）", () => {
     const [sheet, open] = [d.at(-2)!, d.at(-1)!];
     // 時刻が減らないように、確定の時刻を始値の時刻にそろえて入れ替える
     const swapped = await forge([...d.slice(0, -2), open, { ...sheet, recordedAt: open.recordedAt }]);
-    expect(await admitAll(swapped)).toMatch(/order_sheet\.committed/);
+    // 入れ替えそのものではなく、時刻が減らないことと締めの検査で落ちる
+    expect(await admitAll(swapped)).toMatch(/order_sheet\.committed\): after_cutoff/);
   });
 
-  it("締めより後に公開された出典を入力にした注文票は、連鎖を作り直しても照合で落ちる", async () => {
+  // 注文票の側の検査（inputProblem の input published after the cutoff）は、時刻が減らない限り
+  // 公開 ≤ 記録 < 確定 < 締め なので届かない（多重の守り）。ここでは手前の §3.1 が照合の入口でも働くことを確かめる
+  it("公開時刻を締めの後に書き換えた出典は、連鎖を作り直しても照合（§3.1）で落ちる", async () => {
     const { log } = await setup();
     const d = log.events.map(draftOf);
     // 出典の公開時刻だけを、約定日の締めのあとに書き換える（記録の時刻より後になる）
     const srcIdx = d.findIndex((x) => x.type === "source.captured");
     d[srcIdx] = { ...d[srcIdx]!, payload: { ...d[srcIdx]!.payload, publishedAt: cutoffOf("2026-11-10") + 1, fetchedAt: cutoffOf("2026-11-10") + 1 } };
-    expect(await admitAll(await forge(d))).toMatch(/source\.captured/);
+    expect(await admitAll(await forge(d))).toMatch(/source\.captured\): need publishedAt <= fetchedAt <= recordedAt/);
   });
 });
 
@@ -110,20 +113,28 @@ describe("二重反映（§4 の一意キー）", () => {
     const first = await log.commitSheet(jst("2026-11-10", 7), "alpha", s);
     expect(first.ok && first.event.type).toBe("order_sheet.committed");
     const second = await log.commitSheet(jst("2026-11-10", 7, 1), "alpha", { ...s, orders: [] });
-    expect(second.ok && second.event.type).toBe("order_sheet.rejected");
+    expect(second.rejected).toBe("already_committed");
     expect(log.events.filter((e) => e.type === "order_sheet.committed")).toHaveLength(1);
+    // 1枚目はそのまま約定できる
+    const sheetSeq = first.ok ? first.event.seq : -1;
+    const open = await ok(log, sys("prices.open", jst("2026-11-10", 9), { date: "2026-11-10" }));
+    await ok(log, sys("fills.executed", jst("2026-11-10", 9, 1), { agentId: "alpha", tradingDate: "2026-11-10", sheetSeq, openSeq: open }, [sheetSeq, open]));
   });
 
-  it("同じ公表は、日を替えて別の引け後処理に渡しても2回は反映できない（ca: のキー）", async () => {
+  // 追記の処理では、別の日の引け後処理に同じ公表を渡すと、手前の exDate の検査で先に落ちる（ca: のキーに届くのは訂正で
+  // 権利落ち日が変わった場合で、訂正の実装は別のPR）。ここではキーそのものが、連鎖の検査と封じる処理で効くことを確かめる
+  it("同じ公表の ca: キーを2回使った保存済みログは、連鎖の検査で落ち、封じる処理も拒む", async () => {
     const { log } = await setup();
     const ann = await ok(log, sys("corporate_action.announced", jst("2026-11-09", 23), { symbol: "AAA", exDate: "2026-11-11" }));
     const close = await ok(log, sys("prices.close", jst("2026-11-10", 15, 40), { date: "2026-11-10" }));
     await ok(log, sys("valuation.recorded", jst("2026-11-10", 15, 41), { agentId: "alpha", date: "2026-11-10", closeSeq: close }, [close]));
-    await ok(log, sys("corporate_actions.applied", jst("2026-11-10", 15, 42), { agentId: "alpha", asOf: "2026-11-10", exDate: "2026-11-11", announcedSeqs: [ann] }, [ann]));
-    // 保存済みログに、同じ公表をもう一度渡した引け後処理を足す
+    const applied = await log.append(sys("corporate_actions.applied", jst("2026-11-10", 15, 42), { agentId: "alpha", asOf: "2026-11-10", exDate: "2026-11-11", announcedSeqs: [ann] }, [ann]));
+    expect(applied.ok && applied.event.keys).toContain(`ca:alpha:${ann}`);
     const d = log.events.map(draftOf);
-    const again = { ...d.at(-1)!, recordedAt: jst("2026-11-11", 15, 42), keys: ["post_close:alpha:2026-11-11", `ca:alpha:${ann}`], payload: { ...d.at(-1)!.payload, asOf: "2026-11-11", exDate: "2026-11-12" } };
-    expect(await admitAll(await forge([...d, again]))).not.toBeNull();
+    const again = { ...d.at(-1)!, recordedAt: jst("2026-11-11", 15, 42), keys: ["post_close:alpha:2026-11-11", `ca:alpha:${ann}`], payload: { ...d.at(-1)!.payload, asOf: "2026-11-11" } };
+    const forged = [...log.events, await sealEvent(log.events.at(-1)!, again)];
+    expect(await verifyChain(forged)).toContainEqual(expect.stringMatching(new RegExp(`duplicate key ca:alpha:${ann}$`)));
+    await expect(sealEvent(log.events.at(-1)!, again, new Set(log.events.flatMap((e) => e.keys)))).rejects.toThrow(`duplicate key ca:alpha:${ann}`);
   });
 
   it("同じ日付の始値・終値・臨時休場は2回書けない", async () => {
@@ -173,8 +184,10 @@ describe("権限（§3 の書ける者・AIの身元）", () => {
     for (const actor of ["system", "operator:owner", "agent:beta"] as const) {
       expect(await admitAll(await forge([...d.slice(0, -1), { ...d.at(-1)!, actor }])), actor).not.toBeNull();
     }
-    const rejected = { ...d.at(-1)!, type: "order_sheet.rejected" as const, actor: "agent:alpha" as const, keys: [], payload: { agentId: "alpha", tradingDate: "2026-11-10", reason: "suspended" } };
-    expect(await admitAll(await forge([...d.slice(0, -1), rejected]))).not.toBeNull();
+    for (const actor of ["agent:alpha", "operator:owner"] as const) {
+      const rejected = { ...d.at(-1)!, type: "order_sheet.rejected" as const, actor, keys: [], payload: { agentId: "alpha", tradingDate: "2026-11-10", reason: "suspended" } };
+      expect(await admitAll(await forge([...d.slice(0, -1), rejected])), actor).toMatch(/must be written by system/);
+    }
   });
 
   it("投稿は、中身のAIのIDと身元が違えば、また他のAIの agent.run を元にしては書けない", async () => {
@@ -210,7 +223,7 @@ describe("権限（§3 の書ける者・AIの身元）", () => {
 describe("拒否の記録（§3.2「受け取った注文の並びを残す」・§7 の照合）", () => {
   const readable = (e: LogEvent) => e.payload as Record<string, unknown>;
 
-  // 欠陥（中）：runSeq・inputSeqs が前のイベントを指さないと、拒否には seq を残さない（append.ts commitSheet）。
+  // 欠陥（中）：理由が invalid_sheet 以外で、runSeq・inputSeqs が前のイベントを指さないと、拒否には seq を残さない（append.ts commitSheet）。
   // すると照合の検査（check の order_sheet.rejected）が理由を invalid_sheet と出し直して記録の理由と合わず、1回目の書き込みが落ちる。
   // commitSheet は ordersUnreadable: true で書き直すので、正規化できる注文の並びが捨てられ、「読めなかった」と偽って残る
   it.fails("停止中のAIが、存在しない run を指す注文票を出したとき、受け取った注文を残す", async () => {
@@ -233,6 +246,7 @@ describe("拒否の記録（§3.2「受け取った注文の並びを残す」�
   // 欠陥（低）：ordersUnreadable の拒否は、理由を出し直さずに受け入れる。停止していないAIを「停止中で拒否した」と書いた保存済みログが照合を通る
   it.fails("停止していないAIに、理由 suspended の読めない拒否を足した保存済みログは照合で落ちる", async () => {
     const { log } = await setup();
+    expect(await admitAll(log.events)).toBeNull();
     const d = log.events.map(draftOf);
     const fake = { type: "order_sheet.rejected" as const, recordedAt: jst("2026-11-10", 7), actor: "system" as const, refs: [], keys: [], payload: { agentId: "alpha", tradingDate: "2026-11-10", reason: "suspended", ordersUnreadable: true } };
     expect(await admitAll(await forge([...d, fake]))).not.toBeNull();

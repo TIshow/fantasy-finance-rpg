@@ -172,9 +172,11 @@ describe("正規化の境界（§5.1）", () => {
     const getter = Object.defineProperty({}, "x", { get: () => 1, enumerable: true });
     for (const v of [withProto, new Array<number>(2), getter, { x: undefined }, [undefined], { f: () => 1 }, new Date(0), new Map(), Symbol("s")]) rejects({ v });
     const log = new EventLog({ holidayTables: new Map([[SHA, TABLE]]), accountOf: () => newAccount() });
+    const control = new EventLog({ holidayTables: new Map([[SHA, TABLE]]), accountOf: () => newAccount() });
+    expect((await control.append({ type: "source.captured", recordedAt: 0, actor: "system", refs: [], payload: { publishedAt: 0, fetchedAt: 0, v: { x: 1 } } })).ok).toBe(true);
     for (const v of [withProto, getter, { x: 0.5 }, { s: "e\u0301" }]) {
       const r = await log.append({ type: "source.captured", recordedAt: 0, actor: "system", refs: [], payload: { publishedAt: 0, fetchedAt: 0, v } });
-      expect(r.ok).toBe(false);
+      expect(r.ok === false && r.reason).toMatch(/not a plain object|accessor|not a safe integer|not NFC/);
     }
     expect(log.events).toEqual([]);
   });
