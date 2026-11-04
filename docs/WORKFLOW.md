@@ -10,7 +10,7 @@
 - **少人数。** 同時に動かすのは通常3体まで（main＋実装1〜2。verifierは必要なときだけ）。増やす前に、増やす理由（独立して進められる仕事がある、など）を示す
 - **書く役は分離する。** 役ごとに別のセッションとworktree（issueごとのブランチ）を持ち、担当外のパスは編集しない
 - **セッションは使い捨てる。** 仕事が終わったらセッションを閉じ、次は新しいセッションで始める。残すべきものは、セッションの記憶でなくリポジトリの文書（タスク票・issue・`docs/STATUS.md`）に書く
-- **規則は仕組みで守らせる。** 文章の約束はCI・CODEOWNERS・フックに移す（CIとCODEOWNERSは追加済み。フックは別のPRで追加する。それまでは文書の約束とレビューで守る）。守れていない約束を見つけたら、文書でなく仕組みを足す
+- **規則は仕組みで守らせる。** 文章の約束はCI・CODEOWNERS・フックに移す（CI・pr-size・CODEOWNERS・純関数の検査は追加済み。フックは別のPRで追加する。それまでは文書の約束とレビューで守る）。守れていない約束を見つけたら、文書でなく仕組みを足す
 - **作る人と確かめる人を分ける。** 実装した役は自分のPRの最終レビューをしない
 - **文書が正本。** 引き継ぎはチャット履歴でなくリポジトリの文書で行う（`CLAUDE.md`）
 
@@ -47,7 +47,7 @@
 
 1. **issue → タスク票。** mainが、次を書いた票を作る（GitHubのissue本文かコメントに書く）：目的、受け入れ条件、担当パス、触ってはいけないパス、テスト計画、依存するissue、PRの行数の見込み、**ownerに聞かずに決めてよいことの既定値**
 2. **実装。** 担当の役が自分のworktreeで`agent/<役>/<issue番号>-<slug>`のブランチを切って実装する。テストは機能と一緒に書く。mainブランチへ直接pushしない
-3. **自己点検。** `cd apps/web && npm test && npm run typecheck && npm run build`
+3. **自己点検。** `cd apps/web && npm run lint:purity && npm test && npm run typecheck && npm run build`
 4. **レビュー。** code-reviewer（差分）→ 台帳・イベントログを変える場合はverifier。高・中は直すか、残す理由をPRに書く（`AGENTS.md`）
 5. **PR。** mainが出す。1 PR = 1目的、300行程度（`AGENTS.md`）。大きい仕事は積み重ねたPR（前のPRの上に次のPR）に分ける
 6. **マージ。** ownerの承認が必須なのは、台帳・イベントログ・祝日とそのテスト、規則の正本（`docs/DECISIONS.md`・`PAPER_TRADING_RULES.md`・`EVENT_LOG.md`・`WORKFLOW.md`）、ガードレール（`AGENTS.md`・`CLAUDE.md`・`.claude/`・`.github/`・純関数の検査とそのテスト・`package.json`・`next.config.ts`など）。対象の一覧は`.github/CODEOWNERS`。ほかはCIが通り、レビューの高・中が片づいていればmainの判断で進めてよい（ownerが後から確認できるよう、STATUSに書く）
