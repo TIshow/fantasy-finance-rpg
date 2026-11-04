@@ -198,12 +198,19 @@ class Day {
     const closes = this.log.events.filter((e) => e.type === "prices.close").slice(-(this.deps.inputDays ?? 20));
     let wrote = false;
     const late: string[] = [];
+    const notReady: string[] = [];
     for (const agent of this.deps.agents.filter((a) => this.agentsOn(date).includes(a.id))) {
       const id = agent.id;
       const runs = this.log.events.filter((e) => e.seq > prevClose.seq && e.type === "agent.run" && pl(e).agentId === id);
       if (runs.some((r) => pl(r).ok !== true)) continue; // 失敗を記録済み
       const noPosts = this.suspended(id, "posts");
       if (runs.length === 0 && noPosts && this.suspended(id, "orders")) continue;
+      // 前の日の引け後の処理が済むまで判断しない（古い口座で判断すると、注文票が account_not_ready で拒否されて戻せない）
+      const registered = this.find("agent.registered", (p) => p.agentId === id)!;
+      if (runs.length === 0 && (pl(registered).startDate as string) < date && !this.find("corporate_actions.applied", (p) => p.agentId === id && p.asOf === prev)) {
+        notReady.push(id);
+        continue;
+      }
       if (this.deps.clock.now() >= cutoffOf(date)) {
         late.push(id);
         continue;
@@ -216,8 +223,9 @@ class Day {
         decision = JSON.parse(body.value) as Decision;
         inputSeqs = pl(runs[0]!).inputSeqs as number[];
       } else {
-        const basis = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id).at(-1);
-        inputSeqs = [...closes.map((e) => e.seq), ...(basis ? [basis.seq] : [])];
+        // 口座の根拠：最後の引け後の処理（まだなければ登録）
+        const basis = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id).at(-1) ?? registered;
+        inputSeqs = [...closes.map((e) => e.seq), basis.seq];
         const input = deepFreeze(structuredClone({ agentId: id, tradingDate: date, at: this.deps.clock.now(), closes: closes.map((e) => ({ seq: e.seq, date: pl(e).date as string, prices: this.deps.values.get(pl(e).valuesHash as string)!.value as CloseInput["prices"] })), account: this.ledger.account(id) }));
         try {
           const d = await agent.decide(input);
@@ -238,7 +246,9 @@ class Day {
         const postRun = await runSeq("post");
         if (!this.find("post.published", (p) => p.runSeq === postRun)) {
           const bodyHash = await this.deps.values.putBody(decision.post.text);
-          await this.append("post.published", `agent:${id}`, { agentId: id, board: decision.post.board, bodyHash, citeSeqs: inputSeqs, runSeq: postRun }, [postRun, ...inputSeqs]);
+          // 引用は終値だけ（口座の根拠は出典ではない）
+          const citeSeqs = inputSeqs.filter((seq) => this.log.events[seq - 1]?.type === "prices.close");
+          await this.append("post.published", `agent:${id}`, { agentId: id, board: decision.post.board, bodyHash, citeSeqs, runSeq: postRun }, [postRun, ...citeSeqs]);
           wrote = true;
         }
       }
@@ -249,6 +259,7 @@ class Day {
         wrote = true;
       }
     }
+    if (notReady.length > 0) return { stage, status: "waiting", detail: `post-close of ${prev} not done: ${notReady.join(",")}` };
     if (late.length > 0) return { stage, status: "skipped", detail: `after the cutoff: ${late.join(",")}` };
     return { stage, status: wrote ? "written" : "done" };
   }
@@ -285,6 +296,10 @@ class Day {
     if (!("seq" in close)) return close;
     const exDate = nextBusinessDay(date, this.log.holidays());
     if (this.find("corporate_action.announced", (p) => p.exDate === exDate)) return { stage, status: "waiting", detail: `corporate actions on ${exDate} are not handled yet (#67)` };
+    // 前の日の引け後の処理が済んでいないAIがいれば、この日の評価もできない（順に1日ずつ進む）
+    const prev = previousBusinessDay(date, this.log.holidays());
+    const behind = this.agentsOn(prev).filter((id) => !this.find("corporate_actions.applied", (p) => p.agentId === id && p.asOf === prev));
+    if (behind.length > 0) return { stage, status: "waiting", detail: `post-close of ${prev} not done: ${behind.join(",")}` };
     let wrote = false;
     for (const agentId of this.agentsOn(date)) {
       if (!this.find("valuation.recorded", (p) => p.agentId === agentId && p.date === date)) {

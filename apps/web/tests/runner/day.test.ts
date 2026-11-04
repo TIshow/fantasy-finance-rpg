@@ -95,7 +95,10 @@ describe("runDay（1日の流れ）", async () => {
         const input = events[seq - 1]!;
         expect(input.seq).toBeLessThan(run.seq);
         if (input.type === "prices.close") expect((p(input).date as string) < jstDay(run.recordedAt)).toBe(true);
-        else expect([input.type, p(input).agentId]).toEqual(["corporate_actions.applied", p(run).agentId]);
+        else {
+          expect(["corporate_actions.applied", "agent.registered"]).toContain(input.type);
+          expect(p(input).agentId).toBe(p(run).agentId);
+        }
       }
     }
   });
@@ -149,6 +152,36 @@ describe("runDay の回し直しと失敗", () => {
     expect(JSON.stringify(runs)).not.toContain("secret");
     expect(calls).toBe(1);
     expect(events.filter((e) => e.type === "fills.executed").map((e) => p(e).agentId)).toEqual(["ai-b"]);
+  });
+
+  it("終値の後、source.captured の前で落ちても、回し直せば出典の記録を補う", async () => {
+    let fail = false;
+    const s = await setup([scripted("ai-a")], (store) => ({
+      read: (a, l) => store.read(a, l),
+      last: () => store.last(),
+      commitSheet: (id, sheet) => store.commitSheet(id, sheet),
+      append: (d) => (d.type === "source.captured" && fail ? ((fail = false), Promise.reject(new Error("crash"))) : store.append(d)),
+    }));
+    fail = true; // 準備（前営業日の取り込み）の後から落とす
+    await expect(runDay(TRADING_DAYS[0], s.deps)).rejects.toThrow("crash");
+    await runDay(TRADING_DAYS[0], s.deps);
+    const events = await s.all();
+    const prices = events.filter((e) => e.type === "prices.open" || e.type === "prices.close");
+    for (const e of prices) expect(events.filter((x) => x.type === "source.captured" && p(x).contentHash === p(e).valuesHash).length).toBe(1);
+  });
+
+  it("前の日の引け後の処理が済んでいないAIは、判断を待つ（拒否の注文票を残さない）", async () => {
+    const s = await setup();
+    // 権利落ち日が T1 の公表があると、T0 の引け後の処理は（#67 まで）待つ
+    const valuesHash = await s.values.putValue({ kind: "dividend", perShare: 100 });
+    await s.store.append({ type: "corporate_action.announced", actor: "system", refs: [], payload: { symbol: "TSTA", exDate: TRADING_DAYS[1], source: "fixture", valuesHash } });
+    await runDay(TRADING_DAYS[0], s.deps);
+    const before = (await s.all()).filter((e) => e.type === "agent.run").length;
+    const day = await runDay(TRADING_DAYS[1], s.deps);
+    expect(day.find((r) => r.stage === "decide")).toMatchObject({ status: "waiting" });
+    const events = await s.all();
+    expect(events.filter((e) => e.type === "agent.run").length).toBe(before);
+    expect(events.filter((e) => e.type === "order_sheet.rejected")).toEqual([]);
   });
 
   it("注文の run を書いた後で落ちても、回し直せば同じ run から注文票を確定する（判断はやり直さない）", async () => {
