@@ -10,7 +10,7 @@
 - **少人数。** 同時に動かすのは通常3体まで（main＋実装1〜2。verifierは必要なときだけ）。増やす前に、増やす理由（独立して進められる仕事がある、など）を示す
 - **書く役は分離する。** 役ごとに別のセッションとworktree（issueごとのブランチ）を持ち、担当外のパスは編集しない
 - **セッションは使い捨てる。** 仕事が終わったらセッションを閉じ、次は新しいセッションで始める。残すべきものは、セッションの記憶でなくリポジトリの文書（タスク票・issue・`docs/STATUS.md`）に書く
-- **規則は仕組みで守らせる。** 文章の約束はCI・CODEOWNERS・フックに移す（CI・pr-size・CODEOWNERS・純関数の検査は追加済み。フックは別のPRで追加する。それまでは文書の約束とレビューで守る）。守れていない約束を見つけたら、文書でなく仕組みを足す
+- **規則は仕組みで守らせる。** 文章の約束はCI・CODEOWNERS・フックに移す（CI・pr-size・CODEOWNERS・純関数の検査・Claude Codeのフック（`.claude/hooks/guard.ts`。§4.7）は追加済み。役ごとの書き込みパス制限のフックは次のPRで追加する。それまでは文書の約束とレビューで守る）。守れていない約束を見つけたら、文書でなく仕組みを足す
 - **作る人と確かめる人を分ける。** 実装した役は自分のPRの最終レビューをしない
 - **文書が正本。** 引き継ぎはチャット履歴でなくリポジトリの文書で行う（`CLAUDE.md`）
 
@@ -53,8 +53,21 @@
 6. **マージ。** ownerの承認が必須なのは、台帳・イベントログ・祝日とそのテスト、規則の正本（`docs/DECISIONS.md`・`PAPER_TRADING_RULES.md`・`EVENT_LOG.md`・`WORKFLOW.md`）、ガードレール（`AGENTS.md`・`CLAUDE.md`・`.claude/`・`.github/`・純関数の検査とそのテスト・`package.json`・`next.config.ts`など）。対象の一覧は`.github/CODEOWNERS`。ほかはCIが通り、レビューの高・中が片づいていればmainの判断で進めてよい（ownerが後から確認できるよう、STATUSに書く）
 
    **承認の扱い（ownerの決定、2026-11-04、D-033の追記）：** 別の認証は使わず、ブランチ保護はCIの成功（`check`・`size`）とPRを必須にするだけにする。承認の必須は設けない（CODEOWNERSは通知とレビューの目印）。**マージはownerが手動で行い、エージェントはマージしない**（上の「mainの判断で進めてよい」は、この方式をやめるまで停止する）。
-   **限界：** エージェントはownerのGitHub認証で動くので、技術的にはmainへ直接pushもマージもできてしまう。守るのは、この規律と、Claude Codeの設定・フックでのmainへのpush・force pushの禁止（次のPR）。フックはBash経由の迂回を完全には止められない。改めて固い守りが要るときは、権限を絞った別の認証（fine-grained PATやGitHub App）を使い、ブランチ保護を管理者にも適用する方式へ移る。
+   **限界：** エージェントはownerのGitHub認証で動くので、技術的にはmainへ直接pushもマージもできてしまう。守るのは、この規律と、Claude Codeの設定・フックでのmainへのpush・force push・マージの禁止（§4.7）。フックは意図した迂回を完全には止められない。改めて固い守りが要るときは、権限を絞った別の認証（fine-grained PATやGitHub App）を使い、ブランチ保護を管理者にも適用する方式へ移る。
 7. **記録。** mainが`docs/STATUS.md`を更新する。履歴は`docs/HISTORY.md`（STATUSの分割と一緒に別のPRで作る。それまでは`docs/STATUS.md`の履歴に書く）、レビューで残した指摘は`review-debt`ラベルのissueにする
+
+### 4.7 フック（`.claude/settings.json`・`.claude/hooks/guard.ts`）
+
+どの役のセッションでも、ツールを呼ぶ前に`guard.ts`が走り、次を止める（終了コード2。理由はClaudeに返る）。フックが失敗したときも止める（`onFailure: "block"`）。
+
+- mainへのpush、強制push・削除・全ブランチのpush（`--force`・`+`・`--delete`・`--all`・`--mirror`・`--prune`、省略形とワイルドカードを含む）。現在のブランチがmainのときの引数なしpushと`HEAD`のpush
+- PRのマージ（`gh pr merge`、`gh api`のmerge）。`gh api`の書き込みは、PR・issueの作成と更新、コメント、レビューだけ許す。`gh repo`の変更、`gh secret`、`gh auth`のトークン表示も止める
+- `.env`など秘密のファイル（`.env.example`などは除く）の読み書き（Bash・Read・Grep・Glob・編集ツール）。`.env*`のようなワイルドカードや、`curl -d @.env`の形も止める
+- ownerだけが付けるラベル`large-pr-approved`（pr-sizeの失敗を自分で解く道を塞ぐ）
+
+`settings.json`の`permissions.deny`は補助で、本体はフック。`deny`のBashルールは`git -C . push`や`bash -c`の形を止めないため、フックがコマンド全文を解析する。**限界：** 想定する相手はうっかり。`python -c`の中のgit、別のGitHubクライアント、大文字小文字を区別しないファイルシステム、シンボリックリンク経由の`.env`、`grep -r`のようなディレクトリ全体の検索が`.env`を読むこと、`gh`以外のクライアントでの書き込みなどは止められない。守りの本体はPRの境界（CODEOWNERS・CI・ownerの手動マージ）。
+
+**実機の確認（ownerが一度行う）：** リポジトリの中で`claude`を起動し、「`git push origin main`を実行して」と頼む。フックが「ブロック：main…」と返せば有効。効かないときは`/status`の`Setting sources`に`Project settings`があるか、フォルダの信頼の確認が出ていれば承認したかを確かめる。
 
 ## 5. 役のあいだの連絡と、ownerへの質問
 
