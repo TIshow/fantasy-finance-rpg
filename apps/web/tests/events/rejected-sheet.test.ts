@@ -60,7 +60,13 @@ describe("拒否した注文票の記録（§3.2・§7）", () => {
     await ok(log, op("agent.suspended", jst("2026-11-10", 6), { agentId: "alpha", scope: "orders", reason: "x" }));
     const bad = await log.commitSheet(jst("2026-11-10", 7), "alpha", { tradingDate: "2026-11-10", orders: buy, runSeq: "x" as unknown as number, inputSeqs: [src] });
     expect(bad.ok && [bad.rejected, bad.event.payload]).toEqual(["suspended", { agentId: "alpha", tradingDate: "2026-11-10", reason: "suspended", orders: buy }]);
+    // 停止は注文の形より先（§4）。形の違う注文でも、読めない注文でも理由は suspended
+    const shape = await log.commitSheet(jst("2026-11-10", 7, 1), "alpha", { tradingDate: "2026-11-10", orders: "x" as unknown as Order[], runSeq: 0, inputSeqs: [src] });
+    const unread = await log.commitSheet(jst("2026-11-10", 7, 2), "alpha", { tradingDate: "2026-11-10", orders: unreadable, runSeq: 0, inputSeqs: [src] });
+    expect([shape.rejected, unread.rejected]).toEqual(["suspended", "suspended"]);
     expect(await admitAll(log.events)).toBeNull();
+    // 停止中に、読めない拒否の理由を invalid_order と書いた記録は落ちる
+    expect(await admitAll(await withUnreadable(log.events, jst("2026-11-10", 7, 3), { reason: "invalid_order" }))).toMatch(/order_sheet\.rejected/);
   });
 
   it("読めない注文の拒否も、照合で理由を確かめて通す（株数・日付・締めの後・停止）", async () => {
@@ -75,6 +81,17 @@ describe("拒否した注文票の記録（§3.2・§7）", () => {
     expect(committed.ok && committed.event.type).toBe("order_sheet.committed");
     expect([r1, r2, r3, r4].map((r) => r.rejected)).toEqual(["invalid_qty", "after_cutoff", "wrong_trading_date", "suspended"]);
     for (const r of [r1, r2, r3, r4]) expect(r.ok && r.event.payload).toMatchObject({ ordersUnreadable: true });
+    expect(await admitAll(log.events)).toBeNull();
+  });
+
+  it("全体の停止（*）でも、形の違う注文・読めない注文・日付の誤りは理由 suspended で、照合を通る", async () => {
+    const { log, src } = await setup();
+    await ok(log, op("agent.suspended", jst("2026-11-10", 6), { agentId: "*", scope: "orders", reason: "x" }));
+    const rs = [];
+    for (const [i, [tradingDate, orders]] of ([["nope", buy], ["2026-11-10", [null]], ["2026-11-10", unreadable]] as [string, Order[]][]).entries()) {
+      rs.push(await log.commitSheet(jst("2026-11-10", 7, i), "alpha", { tradingDate, orders, runSeq: 999, inputSeqs: [src] }));
+    }
+    expect(rs.map((r) => r.ok && r.rejected)).toEqual(["suspended", "suspended", "suspended"]);
     expect(await admitAll(log.events)).toBeNull();
   });
 
