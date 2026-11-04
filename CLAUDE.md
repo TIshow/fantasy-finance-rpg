@@ -26,4 +26,4 @@
 - 完了前に`code-reviewer`サブエージェントを呼ぶ。mainへ直接pushしない。マージはownerが手動で行う
 - 仕事が終わったらセッションを閉じる。引き継ぎは、タスク票・issue・`docs/STATUS.md`に書く
 
-- **限界：** この運用の役別セッションは`--agent`で起動しないので、書き込み前のフック（`agent_type`で役を見分ける）による役ごとの制限は**働かない**。守るのは、この表と役ファイルの約束、完了前の`check-boundaries.sh`、CODEOWNERSとownerの手動マージ。mainへのpush・`.env`・`gh pr merge`などの役を問わない禁止は、フックが働くはず（デスクトップアプリのWorktreeセッションでの発火は未確認。`docs/WORKFLOW.md` §4.7）
+- **限界：** この運用の役別セッションは`--agent`で起動しないので、書き込み前のフック（`agent_type`で役を見分ける）による役ごとの制限は**働かない**。守るのは、この表と役ファイルの約束、完了前の`check-boundaries.sh`、CODEOWNERSとownerの手動マージ。mainへのpush・`.env`・`gh pr merge`などの役を問わない禁止は、フックが働く（デスクトップアプリの新規セッション・Worktreeオンで`git push origin main`が止まることを確認済み。`docs/WORKFLOW.md` §4.7）
