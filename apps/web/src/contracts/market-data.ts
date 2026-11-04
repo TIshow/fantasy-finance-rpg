@@ -14,8 +14,16 @@ interface ObservationBase {
   date: string;
   /** 0.1円単位の整数。値がない日は null（EVENT_LOG §5.1 の null と同じ意味） */
   price: Deciyen | null;
-  /** 市場がこの値を公開した時刻（UNIXミリ秒）。窓はこれで絞る */
+  /**
+   * 市場（取得元）がこの値を公開した時刻（UNIXミリ秒）。窓はこれで絞る。
+   * 公開時刻が分からない観測は返さない（EVENT_LOG §3.1。判断の入力に使えない）。
+   */
   publishedAt: number;
+  /**
+   * 私たちがこの値を取得した時刻（UNIXミリ秒）。source.captured の publishedAt <= fetchedAt <= recordedAt を
+   * 満たすために持つ（EVENT_LOG §3.1）。publishedAt 以上でなければならない。
+   */
+  fetchedAt: number;
   /** 出典の識別子（取得元・利用条件をたどれるもの） */
   source: string;
 }
@@ -35,8 +43,10 @@ export type PriceObservation = OpenObservation | CloseObservation;
 
 /**
  * 時点 at より前に公開されたデータだけの窓。返す観測は、すべて publishedAt < at。
- * 取得元が値を改訂したら、元の観測を書き換えず、より後の publishedAt を持つ新しい観測として返す
- * （過去の窓には改訂後の値が見えない）。
+ *
+ * 改訂：取得元が値を改訂したら、元の観測を書き換えず、新しい観測として足す。その publishedAt は、
+ * 取得元が改訂の時刻を出すならその時刻、出さないなら**こちらが最初に観測した時刻以上**にする
+ * （名目の古い時刻を入れて、過去の窓に改訂後の値を見せない）。過去の窓を作れるよう、観測した版はすべて残す。
  */
 export interface MarketView {
   /** この窓の時点（UNIXミリ秒） */
