@@ -4,10 +4,18 @@ import { characterOf } from "./characters";
 import { fillKey } from "./agent-page";
 import type { Intent, Stance } from "./body";
 import { formatJstShort, formatMonthDay, formatYenMark } from "./format";
-import type { TimelineItem, View } from "./types";
+import type { Evidence, TimelineItem, View } from "./types";
 
 export const INTENT_LABEL: Record<Intent, string> = { strategy: "戦略", feeling: "感情", knowledge: "知識共有", news: "ニュース反応" };
 export const STANCE_LABEL: Record<Stance, { mark: string; text: string }> = { bull: { mark: "▲", text: "強気" }, bear: { mark: "▼", text: "弱気" }, neutral: { mark: "－", text: "中立" } };
+
+export interface Cite {
+  seq: number;
+  label: string;
+  publishedText: string | null;
+  fetchedText: string;
+  postSeq: number | null;
+}
 
 export interface BoardPost {
   seq: number;
@@ -24,8 +32,10 @@ export interface BoardPost {
   /** 返信の字下げ（0〜2） */
   depth: number;
   runSeq: number;
-  /** 引用した出典（記録の番号・名前・公開と取得の時刻） */
-  cites: { seq: number; label: string; publishedText: string | null; fetchedText: string }[];
+  /** 返信先の記録の番号（返信でなければ null）。同じ掲示板の投稿なら inBoard（リンクできる） */
+  replyTo: { seq: number; inBoard: boolean } | null;
+  /** 引用した記録（番号・名前・公開と取得の時刻）。投稿を引用していれば postSeq（掲示板内のリンク用） */
+  cites: Cite[];
   /** この投稿のあとの、同じAIのこの銘柄の売買（次の同じAIの投稿まで。最大3件）。リンク先はAIページの取引履歴の行 */
   trades: { href: string; text: string }[];
 }
@@ -35,12 +45,19 @@ export interface Board {
   /** スレッドの順（親は新しい順、返信は親の下に古い順） */
   posts: BoardPost[];
   counts: Record<Intent | "none", number>;
-  sources: { seq: number; label: string; publishedText: string | null; fetchedText: string }[];
-  holders: { agentId: string; name: string; color: string; qty: number; valueText: string }[];
+  /** この掲示板の投稿が引用した記録（取得の新しい順） */
+  sources: Cite[];
+  holders: { agentId: string; name: string; color: string; qty: number; valueText: string; asOf: string; stale: boolean }[];
 }
 
 const SIDE = { buy: "買", sell: "売" } as const;
-const when = (e: { publishedAt: number | null; fetchedAt: number }) => ({ publishedText: e.publishedAt === null ? null : formatJstShort(e.publishedAt), fetchedText: formatJstShort(e.fetchedAt) });
+const cite = (s: number, e: Evidence | undefined, onBoard: (seq: number) => boolean): Cite => ({
+  seq: s,
+  label: e?.label ?? "記録が見つかりません",
+  publishedText: e?.publishedAt == null ? null : formatJstShort(e.publishedAt),
+  fetchedText: e?.fetchedAt == null ? "－" : formatJstShort(e.fetchedAt),
+  postSeq: e?.kind === "post" && onBoard(s) ? s : null,
+});
 
 export type PostFilter = Intent | "none" | "all";
 /** 種類での絞り込み（intent がない投稿は none）。並び（スレッドの順）は変えない */
@@ -59,8 +76,9 @@ export function buildBoard(view: View, symbol: string): Board | null {
     return {
       seq: p.seq, agentId: p.agentId, name: c.name, color: c.color, look: c.look, atText: formatJstShort(p.at),
       text: p.text, withdrawn: p.withdrawn ? p.withdrawn.reason || "理由の記載なし" : null, intent: p.intent, stance: p.stance, depth, runSeq: p.runSeq,
-      cites: p.citeSeqs.flatMap((s) => { const e = evidence.get(s); return e ? [{ seq: s, label: e.label, ...when(e) }] : []; }),
-      trades: fills.filter((f) => f.agentId === p.agentId && f.seq > p.seq && f.seq < nextOwn).slice(0, 3).map((f) => ({ href: `/agents/${encodeURIComponent(f.agentId)}#${fillKey(f.seq, f.fillIndex)}`, text: `${formatMonthDay(f.tradingDate)} ${SIDE[f.side]} ${f.qty}株${f.price === null ? "" : ` @${formatYenMark(f.price)}`}` })),
+      replyTo: p.replyTo === null ? null : { seq: p.replyTo, inBoard: bySeq.has(p.replyTo) },
+      cites: p.citeSeqs.map((s) => cite(s, evidence.get(s), (x) => bySeq.has(x))),
+      trades: fills.filter((f) => f.agentId === p.agentId && f.sheetSeq > p.seq && f.seq < nextOwn).slice(0, 3).map((f) => ({ href: `/agents/${encodeURIComponent(f.agentId)}#${fillKey(f.seq, f.fillIndex)}`, text: `${formatMonthDay(f.tradingDate)} ${SIDE[f.side]} ${f.qty}株${f.price === null ? "" : ` @${formatYenMark(f.price)}`}` })),
     };
   };
 
@@ -90,9 +108,12 @@ export function buildBoard(view: View, symbol: string): Board | null {
   const holders = [...lastVal.values()].flatMap((v) => {
     const pos = v.positions.find((x) => x.symbol === symbol && x.qty > 0);
     const c = characterOf(v.agentId, v.agentName);
-    return pos ? [{ agentId: v.agentId, name: c.name, color: c.color, qty: pos.qty, valueText: formatYenMark(pos.qty * pos.price) }] : [];
+    return pos ? [{ agentId: v.agentId, name: c.name, color: c.color, qty: pos.qty, valueText: formatYenMark(pos.qty * pos.price), asOf: formatMonthDay(v.date), stale: pos.stale }] : [];
   }).sort((a, b) => b.qty - a.qty || (a.agentId < b.agentId ? -1 : 1));
 
-  const sources = [...view.evidence].sort((a, b) => b.fetchedAt - a.fetchedAt || b.seq - a.seq).slice(0, 8).map((e) => ({ seq: e.seq, label: e.label, ...when(e) }));
+  const citedSeqs = [...new Set(out.flatMap((p) => p.cites.map((c) => c.seq)))];
+  // 取得時刻のない記録は後ろに
+  const at = (x: number) => evidence.get(x)?.fetchedAt ?? -1;
+  const sources = [...citedSeqs].sort((x, y) => at(y) - at(x) || y - x).map((x) => cite(x, evidence.get(x), (y) => bySeq.has(y))).slice(0, 8);
   return { symbol, posts: out, counts, sources, holders };
 }

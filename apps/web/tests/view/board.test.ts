@@ -30,13 +30,15 @@ describe("buildBoard（手で組んだ小さなログ）", () => {
     post("ai-ma5", "X1", "h1", { citeSeqs: [3, 4, 99] }, 10), // 5 根
     post("ai-hold", "X1", "h2", { replyTo: 5 }, 11), // 6 返信
     post("ai-ma5", "X1", "h3", { replyTo: 6 }, 12), // 7 返信の返信
-    post("ai-hold", "X1", "h4", { replyTo: 7 }, 13), // 8 深さは2まで
+    post("ai-hold", "X1", "h4", { replyTo: 7, citeSeqs: [5, 1] }, 13), // 8 深さは2まで。投稿 5 と登録の記録を引用
     post("ai-hold", "X2", "h5", { replyTo: 5 }, 14), // 9 親が別の掲示板 → 根
     post("ai-hold", "X1", "h6", {}, 15), // 10 根（新しい）
-    ev("fills.executed", { agentId: "ai-ma5", sheetSeq: 0, tradingDate: "2026-11-10", fills: [{ symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }, { symbol: "X2", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }] }, T("2026-11-10", 9)), // 11
+    ev("fills.executed", { agentId: "ai-ma5", sheetSeq: 10, tradingDate: "2026-11-10", fills: [{ symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }, { symbol: "X2", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }] }, T("2026-11-10", 9)), // 11
     ev("content.withdrawn", { targetSeq: 10, reason: "誤り", textRemoved: false }, T("2026-11-10", 10)), // 12
     ev("valuation.recorded", { agentId: "ai-ma5", date: "2026-11-10", cash: 0, positions: [{ symbol: "X1", qty: 100, price: 120, closeSeq: 4 }], total: 12_000 }, T("2026-11-10", 16)),
     ev("valuation.recorded", { agentId: "ai-hold", date: "2026-11-10", cash: 1000, positions: [{ symbol: "X1", qty: 300, price: 120, closeSeq: 4 }, { symbol: "X3", qty: 0, price: 1, closeSeq: 4 }], total: 1000 }, T("2026-11-10", 16)),
+    // 投稿（seq 5〜10）より前に確定した注文票（seq 2）の約定。seq は投稿より後でも、「このあとの売買」にしない
+    ev("fills.executed", { agentId: "ai-ma5", sheetSeq: 2, tradingDate: "2026-11-11", fills: [{ symbol: "X1", side: "sell", requestedQty: 100, qty: 100, price: 110, amount: 11_000, status: "filled" }] }, T("2026-11-11", 9)),
   ];
   const bodies: Record<string, unknown> = { h1: { text: "戦略の話", intent: "strategy", stance: "bull" }, h2: "返信", h3: { text: "感情", intent: "feeling" }, h4: "深い返信", h5: "別の板", h6: "取り消し予定" };
   const v = buildView(events, (h) => bodies[h]);
@@ -67,17 +69,22 @@ describe("buildBoard（手で組んだ小さなログ）", () => {
   it("引用は記録にある出典だけ（公開・取得の時刻つき）。この投稿のあとの同じAIのこの銘柄の売買へのリンク", () => {
     const p5 = b.posts.find((p) => p.seq === 5)!;
     expect(p5.cites).toEqual([
-      { seq: 3, label: "news:x", publishedText: "11/09 07:00", fetchedText: "11/09 08:00" },
-      { seq: 4, label: "終値 11/06（fixture:synthetic）", publishedText: null, fetchedText: "11/06 16:00" },
+      { seq: 3, label: "news:x", publishedText: "11/09 07:00", fetchedText: "11/09 08:00", postSeq: null },
+      { seq: 4, label: "終値 11/06（fixture:synthetic）", publishedText: null, fetchedText: "11/06 16:00", postSeq: null },
+      { seq: 99, label: "記録が見つかりません", publishedText: null, fetchedText: "－", postSeq: null }, // 落とさず、見つからないと出す
     ]);
+    // 出典でない記録（投稿・登録）の引用も残す。投稿ならこの掲示板の中でリンクできる
+    expect(b.posts.find((p) => p.seq === 8)!.cites).toMatchObject([{ seq: 5, label: "記録（post.published）", postSeq: 5 }, { seq: 1, label: "記録（agent.registered）", postSeq: null }]);
+    expect(b.posts.find((p) => p.seq === 6)!.replyTo).toEqual({ seq: 5, inBoard: true });
+    expect(buildBoard(v, "X2")!.posts[0]!.replyTo).toEqual({ seq: 5, inBoard: false });
     // ai-ma5 の売買は X1 の1件だけ（X2 は別の銘柄）。売買（seq 11）は、ai-ma5 の次の投稿（seq 7）より後なので、seq 5 にはつかず、最後の投稿（seq 7）につく
     expect(p5.trades).toEqual([]);
     expect(b.posts.find((p) => p.seq === 7)!.trades).toEqual([{ href: "/agents/ai-ma5#f11-0", text: "11/10 買 100株 @¥10" }]);
   });
 
-  it("右の列：この銘柄を持つAI（株数の多い順）と、読んだ情報（新しい順）", () => {
-    expect(b.holders.map((h) => [h.agentId, h.qty, h.valueText])).toEqual([["ai-hold", 300, "¥3,600"], ["ai-ma5", 100, "¥1,200"]]);
-    expect(b.sources.map((s) => s.seq)).toEqual([3, 4]); // 取得の新しい順（3 は 11/09、4 は 11/06）
+  it("右の列：この銘柄を持つAI（株数の多い順・基準日つき）と、投稿が引用した記録", () => {
+    expect(b.holders.map((h) => [h.agentId, h.qty, h.valueText, h.asOf, h.stale])).toEqual([["ai-hold", 300, "¥3,600", "11/10", true], ["ai-ma5", 100, "¥1,200", "11/10", true]]); // 終値は11/06のもの（closeSeq 4）なので、直近の終値で評価した印
+    expect(b.sources.map((s) => s.seq)).toEqual([3, 4, 99, 5, 1]); // 投稿が引用した記録。取得の新しい順で、取得時刻のないものは後ろ（seq の大きい順）
   });
 
   it("返信の輪になっていても、すべての投稿が1回ずつ出る", () => {

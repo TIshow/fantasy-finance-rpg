@@ -65,15 +65,28 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
         break;
       }
       case "source.captured":
-        evidence.push({ seq: e.seq, kind: "source", label: String(p.source), publishedAt: p.publishedAt, fetchedAt: p.fetchedAt });
+        evidence.push({ seq: e.seq, kind: "source", label: typeof p.source === "string" ? p.source : "出典の記載なし", publishedAt: typeof p.publishedAt === "number" ? p.publishedAt : null, fetchedAt: typeof p.fetchedAt === "number" ? p.fetchedAt : null });
         break;
       case "prices.close":
-        evidence.push({ seq: e.seq, kind: "close", label: `終値 ${formatMonthDay(String(p.date))}${typeof p.source === "string" ? `（${p.source}）` : ""}`, publishedAt: null, fetchedAt: typeof p.fetchedAt === "number" ? p.fetchedAt : e.recordedAt });
+        evidence.push({ seq: e.seq, kind: "close", label: `終値 ${formatMonthDay(String(p.date))}${typeof p.source === "string" ? `（${p.source}）` : ""}`, publishedAt: null, fetchedAt: typeof p.fetchedAt === "number" ? p.fetchedAt : null });
         break;
       case "agent.suspended":
       case "agent.resumed":
         timeline.push({ ...base(p.agentId), kind: "suspension", action: e.type === "agent.suspended" ? "suspended" : "resumed", scope: p.scope, reason: p.reason });
         break;
+    }
+  }
+
+  // 投稿が引用した記録のうち、出典・終値でないもの（他の投稿・評価など）も落とさず、種類つきで残す
+  const bySeq = new Map(events.map((e) => [e.seq, e]));
+  const known = new Set(evidence.map((x) => x.seq));
+  for (const it of timeline) {
+    if (it.kind !== "post") continue;
+    for (const s of it.citeSeqs) {
+      if (known.has(s)) continue;
+      known.add(s);
+      const src = bySeq.get(s);
+      evidence.push(src ? { seq: s, kind: src.type === "post.published" ? "post" : "other", label: `記録（${src.type}）`, publishedAt: null, fetchedAt: null } : { seq: s, kind: "other", label: "記録が見つかりません", publishedAt: null, fetchedAt: null });
     }
   }
 

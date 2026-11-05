@@ -61,11 +61,13 @@ export interface AgentPerformance {
 /** AIが読める情報の記録（source.captured と終値）。投稿の citeSeqs が指す */
 export interface Evidence {
   seq: number;
-  kind: "source" | "close";
+  /** other は、投稿が引用した出典以外の記録（投稿・評価など）。post は引用された投稿 */
+  kind: "source" | "close" | "post" | "other";
   label: string;
   /** 終値の記録には公開時刻がない */
   publishedAt: number | null;
-  fetchedAt: number;
+  /** 記録に取得時刻がなければ null（記録時刻を取得時刻として見せない） */
+  fetchedAt: number | null;
 }
 
 export interface View {

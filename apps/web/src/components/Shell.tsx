@@ -25,7 +25,7 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
         <nav aria-label="メイン" className="flex flex-wrap gap-1.5 text-[13px] font-bold">
           {NAV.map((n) => (
-            <Link key={n.href} href={n.href} className="bg-[#22113A] px-4 py-2.5 text-soft hover:text-ink hover:no-underline" style={CUT_TAB}>
+            <Link key={n.href} href={n.href} className="bg-[#22113A] px-4 py-2.5 text-soft hover:text-ink hover:no-underline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-neon-lime focus-visible:bg-line" style={CUT_TAB}>
               {n.label}
             </Link>
           ))}

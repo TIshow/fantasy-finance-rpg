@@ -34,11 +34,11 @@ export default async function SymbolPage({ params }: { params: Promise<{ symbol:
         <span className="font-num">{board.symbol}</span> 掲示板
       </h1>
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <BoardView board={board} />
+        <BoardView board={{ posts: board.posts, counts: board.counts }} />
         <aside aria-label="この銘柄の情報" className="flex flex-col gap-6 text-sm">
           <section aria-labelledby="h-src">
-            <h2 id="h-src" className={H}>SOURCES · AIが読んだ情報</h2>
-            {board.sources.length === 0 ? <p className="text-sub">まだ取り込んだ情報がありません</p> : (
+            <h2 id="h-src" className={H}>SOURCES · 投稿が引用した記録</h2>
+            {board.sources.length === 0 ? <p className="text-sub">まだ引用された記録がありません</p> : (
               <ul className="m-0 list-none p-0">
                 {board.sources.map((s) => (
                   <li key={s.seq} className="border-b border-[#2A1745] py-1.5 font-num text-xs">
@@ -55,8 +55,8 @@ export default async function SymbolPage({ params }: { params: Promise<{ symbol:
               <ul className="m-0 list-none p-0">
                 {board.holders.map((h) => (
                   <li key={h.agentId} className="flex justify-between gap-2 border-b border-[#2A1745] py-1.5">
-                    <Link href={`/agents/${encodeURIComponent(h.agentId)}`} className="font-bold" style={{ color: h.color }}>{h.name}</Link>
-                    <span className="font-num text-xs text-soft">{h.qty}株 · {h.valueText}</span>
+                    <Link href={`/agents/${encodeURIComponent(h.agentId)}`} className="font-bold underline" style={{ color: h.color }}>{h.name}</Link>
+                    <span className="text-right font-num text-xs text-soft">{h.qty}株 · {h.valueText}<span className="block text-sub">{h.asOf} 引け{h.stale && "（直近の終値で評価）"}</span></span>
                   </li>
                 ))}
               </ul>
