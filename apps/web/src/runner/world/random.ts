@@ -19,7 +19,9 @@ export function normal(rand: () => number): number {
   return sum - 6;
 }
 
-/** シードと番号から、別の列のシードを作る（企業ごとに列を分け、1社の数が変わっても他社の列が変わらないように） */
-export function subSeed(seed: number, index: number): number {
-  return (Math.imul(seed | 0, 0x9e3779b1) ^ Math.imul(index + 1, 0x85ebca6b)) | 0;
+/** シードと名前（銘柄コードなど）から、別の列のシードを作る（名前で決まるので、会社を足しても並べ替えても他社の列は変わらない） */
+export function subSeed(seed: number, name: string): number {
+  let h = Math.imul(seed | 0, 0x9e3779b1) ^ 0x811c9dc5;
+  for (let i = 0; i < name.length; i++) h = Math.imul(h ^ name.charCodeAt(i), 0x01000193);
+  return h | 0;
 }

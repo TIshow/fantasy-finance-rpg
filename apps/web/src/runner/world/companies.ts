@@ -48,7 +48,7 @@ export const COMPANIES: readonly Company[] = [
   { symbol: "MRH1", name: "ミラハ電力", sector: "utilities", sharesOutstanding: 80_000_000, description: "架空の地方で電気を売る会社", baseRevenue: 90_000_000_000 },
   { symbol: "SLN1", name: "ソルネ水道", sector: "utilities", sharesOutstanding: 10_000_000, description: "架空の町の水道を運営する会社", baseRevenue: 5_000_000_000 },
   { symbol: "QON1", name: "クオネ・ソフト", sector: "software", sharesOutstanding: 30_000_000, description: "会社向けの会計ソフトを売る架空の会社", baseRevenue: 8_000_000_000 },
-  { symbol: "LPO1", name: "ラピオ通信", sector: "software", sharesOutstanding: 15_000_000, description: "店の予約のアプリを運営する架空の会社", baseRevenue: 3_000_000_000 },
+  { symbol: "LPO1", name: "ラピオ・ラボ", sector: "software", sharesOutstanding: 15_000_000, description: "店の予約のアプリを運営する架空の会社", baseRevenue: 3_000_000_000 },
 ];
 
 /** 1四半期の業績。売上・純利益は円、1株あたり利益と配当は0.1円単位 */
@@ -58,7 +58,7 @@ export interface Quarter {
   revenue: number;
   netIncome: number;
   eps: Deciyen;
-  /** 1株あたり配当。半期（index が偶数の四半期）だけ、その半期の利益に配当性向を掛けて出す。赤字なら0 */
+  /** 1株あたり配当。半期（index が 2, 4, … の四半期）だけ、その半期の利益に配当性向を掛けて出す。赤字なら0 */
   dividendPerShare: Deciyen;
 }
 
@@ -67,11 +67,11 @@ const perShare = (yen: number, shares: number): Deciyen => Math.round((yen * 10)
 
 /**
  * 企業の業績を count 四半期分作る（index 0 から）。売上は前の四半期から「業種の伸び＋ぶれ」で動き、
- * 利益率は業種の平均のまわりでぶれる（赤字もありうる）。seed と企業の番号から企業ごとの乱数の列を作る
+ * 利益率は業種の平均のまわりでぶれる（赤字もありうる）。seed と銘柄コードから企業ごとの乱数の列を作る
  */
 export function quarters(seed: number, company: Company, count: number): Quarter[] {
   const sector = SECTORS[company.sector];
-  const rand = mulberry32(subSeed(seed, COMPANIES.findIndex((c) => c.symbol === company.symbol)));
+  const rand = mulberry32(subSeed(seed, company.symbol));
   const out: Quarter[] = [];
   let revenue = company.baseRevenue;
   for (let index = 0; index < count; index++) {
@@ -79,7 +79,8 @@ export function quarters(seed: number, company: Company, count: number): Quarter
     const margin = sector.margin + sector.marginVol * normal(rand);
     const netIncome = Math.round(revenue * margin);
     const eps = perShare(netIncome, company.sharesOutstanding);
-    const half = index % 2 === 0 ? eps + (out.at(-1)?.eps ?? eps) : 0;
+    // 上場の前の四半期（index 0）は配当なし。index 2, 4, … で、その半期（前の四半期と合わせた2四半期）の利益から出す
+    const half = index > 0 && index % 2 === 0 ? eps + out.at(-1)!.eps : 0;
     const dividendPerShare = Math.max(0, Math.round(half * sector.payout));
     out.push({ index, revenue, netIncome, eps, dividendPerShare });
   }
@@ -88,7 +89,8 @@ export function quarters(seed: number, company: Company, count: number): Quarter
 
 /**
  * 業績から決まる目安の価格（0.1円単位、1円の刻みに丸める。最低1円）。直近4四半期の1株あたり利益の合計 × 業種の株価収益率。
- * 4四半期に足りなければ、ある分を年に引き延ばす。利益が売上の1%を下回るとき（赤字を含む）は、売上の1%を利益とみなす
+ * 4四半期に足りなければ、ある分を年に引き延ばす。利益が売上の1%を下回るとき（赤字を含む）は、売上の1%を利益とみなす。
+ * 段階0の暫定の式（金利を入れていない）。マーケットメイカーの理論価格（PR-3）に使う前に、金利の扱いを lead と決める
  */
 export function fairPrice(company: Company, recent: readonly Quarter[]): Deciyen {
   const last = recent.slice(-4);

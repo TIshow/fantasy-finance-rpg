@@ -46,6 +46,11 @@ describe("業績のモデル", () => {
       expect(quarters(7, c, 12)).not.toEqual(quarters(8, c, 12));
       expect(quarters(7, c, 20).slice(0, 12)).toEqual(quarters(7, c, 12));
     }
+    // 列は銘柄コードで決まる：会社ごとに違い、会社を足しても並べ替えても変わらない
+    const [a, b] = COMPANIES;
+    expect(quarters(7, { ...a!, symbol: "ZZZ9" }, 8)).not.toEqual(quarters(7, a!, 8));
+    expect(quarters(7, { ...b!, baseRevenue: a!.baseRevenue, sharesOutstanding: a!.sharesOutstanding, sector: a!.sector }, 8)).not.toEqual(quarters(7, a!, 8));
+    expect(quarters(7, { ...a! }, 8)).toEqual(quarters(7, a!, 8));
   });
 
   it("値は整数。1株あたり利益は純利益 ÷ 株数（0.1円単位）、配当は半期だけで負にならない", () => {
@@ -54,7 +59,11 @@ describe("業績のモデル", () => {
         for (const v of [q.revenue, q.netIncome, q.eps, q.dividendPerShare]) expect(Number.isSafeInteger(v)).toBe(true);
         expect(q.eps).toBe(Math.round((q.netIncome * 10) / c.sharesOutstanding));
         expect(q.dividendPerShare).toBeGreaterThanOrEqual(0);
-        if (q.index % 2 === 1) expect(q.dividendPerShare).toBe(0);
+        if (q.index % 2 === 1 || q.index === 0) expect(q.dividendPerShare).toBe(0);
+        if (q.index > 0 && q.index % 2 === 0) {
+          const half = quarters(5, c, q.index + 1).at(-2)!.eps + q.eps;
+          expect(q.dividendPerShare).toBe(Math.max(0, Math.round(half * SECTORS[c.sector].payout)));
+        }
       }
     }
   });
@@ -85,7 +94,7 @@ describe("最初の価格と目安の価格", () => {
       const price = listingPrice(11, c);
       expect(price % 10).toBe(0);
       expect(price).toBeGreaterThan(0);
-      if (q0!.netIncome >= q0!.revenue * 0.01) expect(price).toBe(Math.round((SECTORS[c.sector].per * q0!.eps * 4) / 10) * 10);
+      if (q0!.eps * 4 >= Math.round((q0!.revenue * 4 * 0.01 * 10) / c.sharesOutstanding)) expect(price).toBe(Math.round((SECTORS[c.sector].per * q0!.eps * 4) / 10) * 10);
       expect(listingPrice(11, c)).toBe(price);
     }
   });
@@ -98,6 +107,10 @@ describe("最初の価格と目安の価格", () => {
     const better = { ...good, netIncome: 4_000_000_000, eps: 800 };
     expect(fairPrice(c, [better])).toBeGreaterThan(fairPrice(c, [good]));
     expect(() => fairPrice(c, [])).toThrow();
+    // 4四半期に足りなければ年に引き延ばす（3四半期なら 4/3 倍）。どんなに小さくても1円
+    const three = [good, good, good].map((x, index) => ({ ...x, index }));
+    expect(fairPrice(c, three)).toBe(Math.round((15 * 720 * 3 * (4 / 3)) / 10) * 10);
+    expect(fairPrice(c, [{ ...q, revenue: 1, netIncome: 0, eps: 0 }])).toBe(10);
   });
 });
 
