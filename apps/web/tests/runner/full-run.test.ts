@@ -6,6 +6,7 @@ import type { LogEvent } from "../../src/events/types";
 import { IngestedMarketData, type SourceQuote, staticSource } from "../../src/ingest/market-data";
 import { INITIAL_CASH } from "../../src/ledger/types";
 import { type RunnerDeps, runDay, scheduleOf } from "../../src/runner/day";
+import { adjustCloses } from "../../src/runner/adjust";
 import { ruleAgents } from "../../src/runner/rule-agents";
 import { RunnerValues } from "../../src/runner/values";
 import { InMemoryEventStore } from "../../src/store/memory-store";
@@ -42,7 +43,7 @@ function quotes(seed: number, lateFetchAt: number): { fetchedAt: number; quote: 
 }
 
 /** AIが受け取った入力（先読みの検査に使う） */
-type Seen = { agentId: string; tradingDate: string; at: number; closes: { seq: number; date: string }[] };
+type Seen = { agentId: string; tradingDate: string; at: number; closes: { seq: number; date: string; prices: Readonly<Record<string, number | null>> }[]; splitSeqs: number[] };
 
 /**
  * 保管・取り込み・runner を組み、前営業日から10営業日を回す。取り込みは取得の時刻に staticSource から行う。
@@ -70,7 +71,7 @@ async function run(seed: number, opts: { lateFetchAt?: number; interrupt?: boole
   const agents = (await ruleAgents()).map((a) => ({
     ...a,
     decide: (input: Parameters<typeof a.decide>[0]) => {
-      seen.push({ agentId: a.id, tradingDate: input.tradingDate, at: input.at, closes: input.closes.map((c) => ({ seq: c.seq, date: c.date })) });
+      seen.push({ agentId: a.id, tradingDate: input.tradingDate, at: input.at, closes: input.closes.map((c) => ({ seq: c.seq, date: c.date, prices: c.prices })), splitSeqs: input.splits.map((x) => x.seq) });
       return a.decide(input);
     },
   }));
@@ -105,6 +106,10 @@ describe("規則のAI 3体で10営業日を通す", async () => {
     expect(await verifyChain(r.events)).toEqual([]);
     expect(of("valuation.recorded").length).toBe(DAYS.length * 3);
     expect(of("order_sheet.rejected")).toEqual([]);
+    // 売買しない日も、全員が毎日注文票を確定し、約定（空なら空）を残す
+    expect(of("order_sheet.committed").length).toBe(DAYS.length * 3);
+    expect(of("fills.executed").length).toBe(DAYS.length * 3);
+    expect(of("order_sheet.committed").some((e) => (p(e).orders as unknown[]).length === 0)).toBe(true);
     const traded = (id: string) => of("fills.executed").filter((e) => p(e).agentId === id && (p(e).fills as { qty: number }[]).some((f) => f.qty > 0)).length;
     for (const id of ids) expect(traded(id), id).toBeGreaterThan(0);
     expect(of("fills.executed").some((e) => (p(e).fills as { side: string; qty: number }[]).some((f) => f.side === "sell" && f.qty > 0))).toBe(true);
@@ -126,6 +131,34 @@ describe("規則のAI 3体で10営業日を通す", async () => {
       return x.qty * x.price;
     };
     expect(Math.abs(tstc(DAYS[6]!) - tstc(DAYS[5]!))).toBeLessThan(tstc(DAYS[5]!) * 0.15);
+  });
+
+  it("分割の後の判断には、調整した終値の列を渡し、分割の公表と、それを反映した引け後の処理を入力に残す", () => {
+    const split = of("corporate_action.announced").find((e) => p(e).kind === "split")!;
+    const after = r.seen.filter((x) => x.tradingDate >= DAYS[6]! && x.closes.some((c) => c.date < DAYS[6]!));
+    expect(after.length).toBeGreaterThan(0);
+    for (const x of after) {
+      expect(x.splitSeqs).toEqual([split.seq]);
+      const run = of("agent.run").find((e) => p(e).agentId === x.agentId && p(e).startedAt === x.at)!;
+      const inputs = p(run).inputSeqs as number[];
+      expect(inputs).toContain(split.seq);
+      const applied = of("corporate_actions.applied").find((e) => p(e).agentId === x.agentId && p(e).exDate === DAYS[6])!;
+      expect(inputs).toContain(applied.seq);
+      // 列が分割の日の前後で続いている（1日の値動きは10%に収まる。調整しなければ半分になる）
+      const xs = x.closes.map((c) => c.prices.TSTC as number);
+      for (let i = 1; i < xs.length; i++) expect(Math.abs(xs[i]! - xs[i - 1]!)).toBeLessThan(xs[i - 1]! * 0.15);
+    }
+    // AIが受け取った列は、run の入力の seq（終値と分割の公表）とログの外の値だけから作り直せる
+    for (const x of r.seen) {
+      const run = of("agent.run").find((e) => p(e).agentId === x.agentId && p(e).startedAt === x.at)!;
+      const inputs = (p(run).inputSeqs as number[]).map((s) => r.events[s - 1]!);
+      const value = (e: LogEvent) => r.values.get(p(e).valuesHash as string)!.value as Record<string, number>;
+      const raw = inputs.filter((e) => e.type === "prices.close").map((e) => ({ seq: e.seq, date: p(e).date as string, prices: value(e) }));
+      const splits = inputs.filter((e) => e.type === "corporate_action.announced").map((e) => ({ seq: e.seq, symbol: p(e).symbol as string, exDate: p(e).exDate as string, from: value(e).from!, to: value(e).to! }));
+      expect(adjustCloses(raw, splits)).toEqual(x.closes);
+    }
+    // 分割より前の判断には、分割を渡さない
+    expect(r.seen.filter((x) => x.tradingDate < DAYS[6]!).every((x) => x.splitSeqs.length === 0)).toBe(true);
   });
 
   it("(b) replay で先頭から作り直した台帳が、記録（保管の口座）と一致する", async () => {

@@ -12,6 +12,7 @@ import type { LogEvent } from "../events/types";
 import type { HolidayTable } from "../holidays/table";
 import { cutoffOf, isBusinessDay, nextBusinessDay, previousBusinessDay } from "../ledger/ledger";
 import type { Account, Deciyen, Order } from "../ledger/types";
+import { type SplitInput, adjustCloses } from "./adjust";
 import type { RunnerValues } from "./values";
 
 /** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引き、凍結した写しを渡す */
@@ -25,7 +26,10 @@ export interface DecisionInput {
   agentId: string;
   tradingDate: string;
   at: number;
+  /** 終値。値は分割で調整済み（権利落ち日より前の値を from/to 倍。splits から adjustCloses で作り直せる） */
   closes: readonly CloseInput[];
+  /** 終値の列の間（最初の終値の日より後、判断の日まで）が権利落ち日の分割。公表の seq を inputSeqs に入れる */
+  splits: readonly SplitInput[];
   /** 口座。根拠のイベント（そのAIの最後の引け後の処理）の seq を inputSeqs に入れる */
   account: Account;
 }
@@ -225,8 +229,19 @@ class Day {
       } else {
         // 口座の根拠：最後の引け後の処理（まだなければ登録）
         const basis = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id).at(-1) ?? registered;
-        inputSeqs = [...closes.map((e) => e.seq), basis.seq];
-        const input = deepFreeze(structuredClone({ agentId: id, tradingDate: date, at: this.deps.clock.now(), closes: closes.map((e) => ({ seq: e.seq, date: pl(e).date as string, prices: this.deps.values.get(pl(e).valuesHash as string)!.value as CloseInput["prices"] })), account: this.ledger.account(id) }));
+        // 分割を知っていたことを残す：列の間の分割の公表と、それを反映したそのAIの引け後の処理を入力に入れる
+        const first = closes[0] ? (pl(closes[0]).date as string) : date;
+        // 権利落ち日が休場になった公表は、どの引け後の処理にも渡らない（§6.2 で運営者が決める）ので、列も調整しない
+        const H = this.log.holidays();
+        const inRange = (exDate: string) => first < exDate && exDate <= date && isBusinessDay(exDate, H);
+        const splits = this.log.events.filter((e) => e.type === "corporate_action.announced" && pl(e).kind === "split" && inRange(pl(e).exDate as string)).map((e) => {
+          const v = this.deps.values.get(pl(e).valuesHash as string)!.value as { from: number; to: number };
+          return { seq: e.seq, symbol: pl(e).symbol as string, exDate: pl(e).exDate as string, from: v.from, to: v.to };
+        });
+        const applied = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id && inRange(pl(e).exDate as string) && (pl(e).announcedSeqs as number[]).some((s) => splits.some((x) => x.seq === s)));
+        inputSeqs = [...new Set([...closes.map((e) => e.seq), ...splits.map((x) => x.seq), ...applied.map((e) => e.seq), basis.seq])];
+        const raw = closes.map((e) => ({ seq: e.seq, date: pl(e).date as string, prices: this.deps.values.get(pl(e).valuesHash as string)!.value as CloseInput["prices"] }));
+        const input = deepFreeze(structuredClone({ agentId: id, tradingDate: date, at: this.deps.clock.now(), closes: adjustCloses(raw, splits), splits, account: this.ledger.account(id) }));
         try {
           const d = await agent.decide(input);
           decision = { orders: d.orders, post: d.post ?? null, note: d.note ?? "" };
@@ -254,7 +269,8 @@ class Day {
       }
       const orderRun = await runSeq("order");
       const sheetDone = this.log.events.some((e) => (e.type === "order_sheet.committed" || e.type === "order_sheet.rejected") && pl(e).runSeq === orderRun);
-      if (decision.orders.length > 0 && !sheetDone) {
+      // 売買しない日も空の注文票を確定する（締めより前に「売買しない」と決めたことを残す。約定は空の fills.executed）
+      if (!sheetDone) {
         await this.sync(await this.deps.store.commitSheet(id, { tradingDate: date, orders: decision.orders, runSeq: orderRun, inputSeqs }), `commitSheet ${id}`);
         wrote = true;
       }

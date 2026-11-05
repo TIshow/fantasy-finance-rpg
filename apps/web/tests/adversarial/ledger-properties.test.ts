@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { EventLog, type Draft } from "../../src/events/append";
 import { bodyHash } from "../../src/events/hash";
 import { Ledger, replay, type ValueStore } from "../../src/events/replay";
+import type { LogEvent } from "../../src/events/types";
 import type { HolidayTable } from "../../src/holidays/table";
 import { applyCorporateActions, type CorporateEvent, type Dividend, type Split } from "../../src/ledger/corporate";
 import { executeSheet, invariantViolations, newAccount, nextBusinessDay } from "../../src/ledger/ledger";
@@ -221,16 +222,105 @@ class Store implements ValueStore {
   }
 }
 
+// ---- Ledger.check（#85）：当てる前に毎回 check を呼び、apply の結果と比べる ----
+type Corruptible = Pick<LogEvent, "type" | "payload">;
+/** 台帳が中身を確かめるイベントを1か所だけ壊す（どれも台帳が断るはずのもの）。壊せない種類は null */
+async function corruptDraft(r: Rng, e: Corruptible, store: Store): Promise<Corruptible | null> {
+  const p = e.payload as Record<string, unknown>;
+  const bad = (patch: Record<string, unknown>) => ({ type: e.type, payload: { ...p, ...patch } });
+  switch (e.type) {
+    case "agent.registered":
+      return bad({ initialCash: (p.initialCash as number) - 1 });
+    case "prices.open":
+    case "prices.close":
+      return r.pick([
+        () => bad({ valuesHash: "0".repeat(64) }),
+        async () => bad({ valuesHash: await store.put({ AAA: "x" }) }),
+        async () => bad({ valuesHash: await store.put([1]) }),
+        () => bad({ valuesHash: undefined }),
+      ])();
+    case "corporate_action.announced":
+      return r.pick([
+        () => bad({ valuesHash: "0".repeat(64) }),
+        () => bad({ kind: p.kind === "split" ? "dividend" : "split" }),
+        async () => bad({ valuesHash: await store.put({ kind: p.kind }) }),
+      ])();
+    case "fills.executed": {
+      const fills = p.fills as Fill[];
+      if (fills.length === 0 || r.next() < 0.3) return bad({ accountHash: "f".repeat(64) });
+      const i = r.int(0, fills.length - 1);
+      return bad({ fills: fills.map((f, j) => (j === i ? { ...f, qty: f.qty + LOT } : f)) });
+    }
+    case "corporate_actions.applied": {
+      const actions = p.actions as unknown[];
+      if (actions.length === 0 || r.next() < 0.3) return bad({ accountHash: "f".repeat(64) });
+      return bad({ actions: actions.slice(1) });
+    }
+    case "valuation.recorded":
+      return r.pick([
+        () => bad({ total: (p.total as number) + 1 }),
+        () => bad({ cash: (p.cash as number) - 1 }),
+        // 保有があるときだけ、銘柄の並びを消す（もともと空なら壊したことにならない）
+        () => ((p.positions as unknown[]).length > 0 ? bad({ positions: [] }) : bad({ total: (p.total as number) - 1 })),
+      ])();
+    default:
+      return null;
+  }
+}
+
+/** 台帳の観察できる状態（口座）。check の前後で変わらないことを確かめる */
+const snapshot = (ledger: Ledger) =>
+  JSON.stringify(
+    AGENTS.map((id) => {
+      try {
+        return ledger.account(id);
+      } catch {
+        return null; // まだ登録していないAI
+      }
+    }),
+  );
+
+/** check の答えを出してから apply し、両者が一致することを確かめる（通るなら通る、断るなら同じ理由） */
+async function checkThenApply(ledger: Ledger, e: LogEvent, at: string) {
+  const before = snapshot(ledger);
+  const why = await ledger.check({ type: e.type, payload: e.payload });
+  expect(snapshot(ledger), `${at}: check changed the ledger`).toBe(before);
+  if (why === null) await ledger.apply(e);
+  else await expect(ledger.apply(e), at).rejects.toThrow(why);
+  return why;
+}
+
 /** seed の日々を最後まで書き、ログ・値・台帳・模型を返す。途中で模型や不変条件と合わなければ、その場で落とす */
-async function simulate(seed: number, st: Stats, days = 18) {
+async function simulate(seed: number, st: Stats, days = 18, corruptions = false) {
   const r = rng(seed);
   const store = new Store();
   const ledger = new Ledger(store);
   const log = new EventLog({ ...CTX, accountOf: (id) => ledger.account(id) });
+  // 壊したイベントを試す乱数は、日々の乱数と分ける（判断の乱数列は変えない。壊した値も store に置くので、ログのハッシュは変わる）
+  const cr = rng(seed * 7919 + 1);
   const add = async (d: Draft) => {
+    // 書く前に確かめる（保管の使い方）。正しいイベントなので、check は通り、apply も通るはず
+    const why = await ledger.check({ type: d.type, payload: d.payload });
     const res = await log.append(d);
     if (!res.ok) throw new Error(`seed ${seed}: ${d.type} ${JSON.stringify(d.payload)}: ${res.reason}`);
-    await ledger.apply(res.event);
+    expect(why, `seed ${seed} seq ${res.event.seq} ${d.type}: check refused a valid event`).toBeNull();
+    // 1か所壊した同じイベントを、ときどき check し、同じ時点まで当てた別の台帳の apply と比べる
+    if (corruptions && cr.next() < 0.03) {
+      const bad = await corruptDraft(cr, res.event, store);
+      if (bad) {
+        const before = snapshot(ledger);
+        const badWhy = await ledger.check(bad);
+        const at = `seed ${seed} seq ${res.event.seq} corrupted ${bad.type} ${JSON.stringify(bad.payload)}`;
+        expect(snapshot(ledger), `${at}: check changed the ledger`).toBe(before);
+        // 理由は台帳の照合の文（その seq の検査で断った）であること。評価中の別の例外（TypeError など）で断ったのではない
+        expect(badWhy, at).toMatch(new RegExp(`^seq ${res.event.seq}\\b`));
+        const fresh = new Ledger(store);
+        for (const e of log.events.slice(0, -1)) await fresh.apply(e);
+        await expect(fresh.apply({ ...res.event, payload: bad.payload } as LogEvent), at).rejects.toThrow(badWhy!);
+        bump(st, `check refused corrupted ${bad.type}`);
+      }
+    }
+    await checkThenApply(ledger, res.event, `seed ${seed} seq ${res.event.seq} ${d.type}`);
     return res.event.seq;
   };
   const sys = (type: Draft["type"], at: number, payload: Record<string, unknown>, refs: number[] = []): Draft => ({ type, recordedAt: at, actor: "system", refs, payload });
@@ -300,7 +390,7 @@ async function simulate(seed: number, st: Stats, days = 18) {
           const run = await add(sys("agent.run", jst(D, 10, 4 * i), { agentId: id, purpose: "order", inputSeqs: [], ok: true }));
           const c = await log.commitSheet(jst(D, 10, 4 * i + 1), id, { tradingDate: mv.exDate, orders: [], runSeq: run, inputSeqs: [] });
           expect(c.ok && c.rejected, `seed ${seed} ${D} ${id} sheet before the catch-up`).toBe("account_not_ready");
-          if (c.ok) await ledger.apply(c.event);
+          if (c.ok) await checkThenApply(ledger, c.event, `seed ${seed} ${D} ${id} rejected sheet`);
           bump(st, "sheet blocked until the catch-up");
         }
         if (mv.ann.length === 0 && r.next() < 0.5) continue;
@@ -359,7 +449,7 @@ async function simulate(seed: number, st: Stats, days = 18) {
       const orders = randomOrders(r, ledger.account(id));
       const c = await log.commitSheet(jst(D, 20, 2 * i + 1), id, { tradingDate: nextBusinessDay(D, H()), orders, runSeq: run, inputSeqs: [] });
       if (!c.ok || c.rejected) throw new Error(`seed ${seed} ${D} ${id}: sheet rejected ${c.ok ? c.rejected : c.reason} ${JSON.stringify(orders)}`);
-      await ledger.apply(c.event);
+      await checkThenApply(ledger, c.event, `seed ${seed} ${D} ${id} sheet`);
       pending.set(id, { seq: c.event.seq, orders, date: D });
     }
     D = nextBusinessDay(D, H());
@@ -371,13 +461,14 @@ describe("追記・台帳・replay をつないだ無作為な日々（20シー�
   it("どの時点でも口座・約定・分割配当・評価が模型と一致し、保存したログを replay すると同じ口座になり、同じシードは同じログになる", async () => {
     const st: Stats = {};
     for (let seed = 1; seed <= 20; seed++) {
-      const a = await simulate(seed, st);
+      const a = await simulate(seed, st, 18, true);
       const replayed = await replay(a.log.events, a.store, CTX);
       for (const id of AGENTS) expect(replayed.account(id), `seed ${seed} ${id}`).toEqual(a.ledger.account(id));
-      const b = await simulate(seed, {});
+      // 壊したイベントの値も store に置く（store の salt は件数で決まる）ので、同じ手順で作り直して比べる
+      const b = await simulate(seed, {}, 18, true);
       expect(b.log.events.at(-1)!.hash, `seed ${seed}`).toBe(a.log.events.at(-1)!.hash);
     }
-    for (const k of ["filled:", "reduced:insufficient_cash", "expired:no_open_price", "sheet closed by market.closed", "buy listed before a sell", "split with cash in lieu", "catch-up with actions", "catch-up without actions", "catch-up split with cash in lieu", "sheet blocked until the catch-up"]) {
+    for (const k of ["filled:", "reduced:insufficient_cash", "expired:no_open_price", "sheet closed by market.closed", "buy listed before a sell", "split with cash in lieu", "catch-up with actions", "catch-up without actions", "catch-up split with cash in lieu", "sheet blocked until the catch-up", ...["prices.open", "prices.close", "corporate_action.announced", "fills.executed", "corporate_actions.applied", "valuation.recorded"].map((t) => `check refused corrupted ${t}`)]) {
       expect(st[k] ?? 0, `path ${k} ${JSON.stringify(st)}`).toBeGreaterThan(0);
     }
   }, 120_000);
