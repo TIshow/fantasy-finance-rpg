@@ -62,8 +62,11 @@ describe("画面の部品（ゴールデンログ）", async () => {
   it("成績・銘柄スレッドの画面にも入力の要素がなく、知らない銘柄は404（not-found）", async () => {
     const agents = renderToStaticMarkup(await AgentsPage());
     const thread = renderToStaticMarkup(await SymbolPage({ params: Promise.resolve({ symbol: "TSTB" }) }));
-    expect(thread).toContain("銘柄スレッド");
-    for (const h of [agents, thread]) expect(h).not.toMatch(/<(form|input|textarea|select|button)\b/i);
+    expect(thread).toContain("掲示板");
+    expect(agents).not.toMatch(/<(form|input|textarea|select|button)\b/i);
+    // 掲示板で操作できるのは、種類の絞り込みのボタンだけ（フォーム・入力欄・送信するボタンはない）
+    expect(thread).not.toMatch(/<(form|input|textarea|select)\b/i);
+    expect([...thread.matchAll(/<button\b[^>]*>/g)].every((m) => m[0].includes('type="button"'))).toBe(true);
     await expect(SymbolPage({ params: Promise.resolve({ symbol: "NOPE" }) })).rejects.toThrow();
   });
 });

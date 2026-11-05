@@ -1,9 +1,10 @@
 // イベントの列と外の値（投稿の本文）から、画面に出す形を作る純関数。
 // 台帳の記録（約定・評価）をそのまま写す。残高・損益・順位を台帳の外の規則で計算し直さない（順位は記録された評価額の並べ替えだけ）。
+import { readBody } from "./body";
 import type { LogEvent } from "../events/types";
 import { INITIAL_CASH, type Deciyen, type Fill } from "../ledger/types";
-import { formatSignedYen, formatYen } from "./format";
-import type { AgentDay, AgentPerformance, SymbolThread, TimelineItem, View } from "./types";
+import { formatMonthDay, formatSignedYen, formatYen } from "./format";
+import type { AgentDay, AgentPerformance, Evidence, SymbolThread, TimelineItem, View } from "./types";
 
 type P = Record<string, any>; // 連鎖の検査を通ったイベントの中身
 
@@ -11,10 +12,11 @@ type P = Record<string, any>; // 連鎖の検査を通ったイベントの中�
  * events は連鎖の検査（verifyChain・replay）を通したログ。body は post.published の bodyHash から本文を引く関数で、
  * 本文の保管（ハッシュが合うもの）だけを引くこと。引けなければ null として扱う。
  */
-export function buildView(events: readonly LogEvent[], body: (hash: string) => string | undefined): View {
+export function buildView(events: readonly LogEvent[], body: (hash: string) => unknown): View {
   const names = new Map<string, string>();
   const initial = new Map<string, Deciyen>();
   const timeline: TimelineItem[] = [];
+  const evidence: Evidence[] = [];
   const last = new Map<string, Deciyen>();
   const days = new Map<string, AgentDay[]>();
   const lessThan = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0); // ロケールに依らない並べ替え
@@ -36,7 +38,8 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => s
       case "post.published":
         {
           const w = withdrawn.get(e.seq) ?? null;
-          timeline.push({ ...base(p.agentId), kind: "post", symbol: p.board, text: w ? null : (body(p.bodyHash) ?? null), withdrawn: w, citeSeqs: p.citeSeqs ?? [], replyTo: p.replyTo ?? null, runSeq: p.runSeq });
+          const b = readBody(body(p.bodyHash));
+          timeline.push({ ...base(p.agentId), kind: "post", symbol: p.board, text: w ? null : (b?.text ?? null), intent: w ? null : (b?.intent ?? null), stance: w ? null : (b?.stance ?? null), withdrawn: w, citeSeqs: p.citeSeqs ?? [], replyTo: p.replyTo ?? null, runSeq: p.runSeq });
         }
         break;
       case "order_sheet.committed":
@@ -61,10 +64,29 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => s
         (days.get(p.agentId) ?? days.set(p.agentId, []).get(p.agentId)!).push({ date: p.date, total, totalText: formatYen(total), change, changeText: formatSignedYen(change), stale: positions.some((x) => x.stale), rank: 0 });
         break;
       }
+      case "source.captured":
+        evidence.push({ seq: e.seq, kind: "source", label: typeof p.source === "string" ? p.source : "出典の記載なし", publishedAt: typeof p.publishedAt === "number" ? p.publishedAt : null, fetchedAt: typeof p.fetchedAt === "number" ? p.fetchedAt : null });
+        break;
+      case "prices.close":
+        evidence.push({ seq: e.seq, kind: "close", label: `終値 ${formatMonthDay(String(p.date))}${typeof p.source === "string" ? `（${p.source}）` : ""}`, publishedAt: null, fetchedAt: typeof p.fetchedAt === "number" ? p.fetchedAt : null });
+        break;
       case "agent.suspended":
       case "agent.resumed":
         timeline.push({ ...base(p.agentId), kind: "suspension", action: e.type === "agent.suspended" ? "suspended" : "resumed", scope: p.scope, reason: p.reason });
         break;
+    }
+  }
+
+  // 投稿が引用した記録のうち、出典・終値でないもの（他の投稿・評価など）も落とさず、種類つきで残す
+  const bySeq = new Map(events.map((e) => [e.seq, e]));
+  const known = new Set(evidence.map((x) => x.seq));
+  for (const it of timeline) {
+    if (it.kind !== "post") continue;
+    for (const s of it.citeSeqs) {
+      if (known.has(s)) continue;
+      known.add(s);
+      const src = bySeq.get(s);
+      evidence.push(src ? { seq: s, kind: src.type === "post.published" ? "post" : "other", label: `記録（${src.type}）`, publishedAt: null, fetchedAt: null } : { seq: s, kind: "other", label: "記録が見つかりません", publishedAt: null, fetchedAt: null });
     }
   }
 
@@ -85,5 +107,5 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => s
     initialCash: initial.get(agentId) ?? INITIAL_CASH,
     days: (days.get(agentId) ?? []).sort((a, b) => lessThan(a.date, b.date)),
   }));
-  return { timeline, threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)) };
+  return { timeline, evidence, threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)) };
 }

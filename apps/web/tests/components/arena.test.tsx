@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import Home from "../../src/app/page";
 import { getView } from "../../src/app/data";
 import { AgentCardView, LiveFeedView, LockedCard } from "../../src/components/ArenaCardView";
+import { AgentPageView as AgentPageViewT } from "../../src/components/AgentPageView";
 import { Portrait } from "../../src/components/Portrait";
 import { DISCLAIMER, Shell } from "../../src/components/Shell";
 import { buildArena, type ArenaCard } from "../../src/view/arena";
@@ -165,5 +166,46 @@ describe("AIページの部品（細かい場合）", async () => {
     for (const s of ["評価前", "#－", "新人", "停止中（投稿と注文）", "拒否（停止中）", "受付 "]) expect(h).toContain(s);
     expect(h).not.toContain("<polyline");
     expect(h).not.toMatch(/<(form|input|textarea|select|button)\b/i);
+  });
+});
+
+describe("掲示板の画面", async () => {
+  const { BoardView } = await import("../../src/components/BoardView");
+  const { buildBoard } = await import("../../src/view/board");
+  const { buildView } = await import("../../src/view/build");
+  const { buildAgentPage, fillKey } = await import("../../src/view/agent-page");
+  const mk = (type: string, seq: number, payload: object, at = 0) => ({ seq, schema: 1, type, recordedAt: at, actor: "system", keys: [], refs: [], payload, prevHash: "", hash: "" }) as never;
+  const events = [
+    mk("agent.registered", 1, { agentId: "ai-ma5", displayName: "あ", startDate: "2026-11-09", initialCash: 1000 }),
+    mk("post.published", 2, { agentId: "ai-ma5", board: "X1", bodyHash: "a", citeSeqs: [], runSeq: 1 }),
+    mk("post.published", 3, { agentId: "ai-ma5", board: "X1", bodyHash: "b", citeSeqs: [], runSeq: 1, replyTo: 2 }),
+    mk("content.withdrawn", 4, { targetSeq: 3, reason: "誤り", textRemoved: false }),
+    mk("order_sheet.committed", 5, { agentId: "ai-ma5", tradingDate: "2026-11-10", runSeq: 1, orders: [{ symbol: "X1", side: "buy", qty: 100 }] }),
+    mk("fills.executed", 6, { agentId: "ai-ma5", sheetSeq: 5, tradingDate: "2026-11-10", fills: [{ symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }] }),
+  ];
+  const view = buildView(events, (h) => (h === "a" ? { text: "戦略の本文", intent: "strategy", stance: "bull" } : "取り消された本文"));
+  const board = buildBoard(view, "X1")!;
+  const html = renderToStaticMarkup(<BoardView board={board} />);
+
+  it("初期は『すべて』だけが押された状態で、ボタンは種類の6つ。0件の種類も選べる", () => {
+    expect([...html.matchAll(/aria-pressed="(true|false)"/g)].map((m) => m[1])).toEqual(["true", "false", "false", "false", "false", "false"]);
+    expect(html.match(/<button\b[^>]*type="button"/g)).toHaveLength(6);
+    expect(html).toContain("戦略 1");
+    expect(html).toContain("未分類 1");
+  });
+
+  it("見立て・種類のタグがつき、非表示の投稿は元の本文を出さず理由を出す。返信先にリンクする", () => {
+    expect(html).toContain("▲ 強気");
+    expect(html).toContain("戦略の本文");
+    expect(html).toContain("非表示（誤り）");
+    expect(html).not.toContain("取り消された本文");
+    expect(html).toContain('href="#post-2"');
+  });
+
+  it("このあとの売買のリンク先は、AIページの取引履歴の行の id と一致する", () => {
+    const href = board.posts.flatMap((p) => p.trades.map((t) => t.href))[0]!;
+    const page = renderToStaticMarkup(<AgentPageViewT page={buildAgentPage(view, new Map(), "ai-ma5")!} />);
+    expect(href).toBe(`/agents/ai-ma5#${fillKey(6, 0)}`);
+    expect(page).toContain(`id="${fillKey(6, 0)}"`);
   });
 });

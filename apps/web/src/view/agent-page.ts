@@ -80,6 +80,9 @@ export function suspensionOf(view: View, agentId: string): string | null {
   return names.length === 0 ? null : `停止中（${names.join("と")}）`;
 }
 
+/** 取引履歴の行の id（掲示板からのリンク先） */
+export const fillKey = (seq: number, fillIndex: number) => `f${seq}-${fillIndex}`;
+
 export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account>, agentId: string): AgentPage | null {
   const a = view.agents.find((x) => x.agentId === agentId);
   if (!a) return null;
@@ -147,7 +150,7 @@ export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account
     if (t.kind === "fill") {
       const s = sheets.get(t.sheetSeq);
       const tail = ` ${t.qty}株${t.price === null ? "" : ` @${formatYenMark(t.price)}`}${t.qty !== t.requestedQty ? `（注文 ${t.requestedQty}株）` : ""}`;
-      rows.push({ seq: t.seq, idx: t.fillIndex, date: t.tradingDate, row: { key: `f${t.seq}-${t.fillIndex}`, dateText: md(t.tradingDate), timeLabel: "確定", committedText: s ? formatJstShort(s.at) : "－", head: SIDE[t.side], symbol: t.symbol, tail, status: STATUS[t.status], reason: t.reason ? (REASON[t.reason] ?? t.reason) : null, runSeq: s?.runSeq ?? null } });
+      rows.push({ seq: t.seq, idx: t.fillIndex, date: t.tradingDate, row: { key: fillKey(t.seq, t.fillIndex), dateText: md(t.tradingDate), timeLabel: "確定", committedText: s ? formatJstShort(s.at) : "－", head: SIDE[t.side], symbol: t.symbol, tail, status: STATUS[t.status], reason: t.reason ? (REASON[t.reason] ?? t.reason) : null, runSeq: s?.runSeq ?? null } });
     } else if (t.kind === "order_sheet" && t.orders.length === 0) {
       rows.push({ seq: t.seq, idx: 0, date: t.tradingDate, row: { key: `s${t.seq}`, dateText: md(t.tradingDate), timeLabel: "確定", committedText: formatJstShort(t.at), head: "注文なし", symbol: null, tail: "", status: "売買なし", reason: null, runSeq: t.runSeq } });
     } else if (t.kind === "rejected") {

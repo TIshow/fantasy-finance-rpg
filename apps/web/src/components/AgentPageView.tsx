@@ -19,7 +19,7 @@ function History({ rows }: { rows: HistoryRow[] }) {
   return (
     <ul className="m-0 list-none border-2 border-line bg-[#120826] p-0 text-sm">
       {rows.map((r) => (
-        <li key={r.key} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-[#2A1745] px-3 py-2">
+        <li key={r.key} id={r.key} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-[#2A1745] px-3 py-2 target:bg-[#22113A]">
           <span className="w-12 font-num text-sub">{r.dateText}</span>
           <span className="font-num">
             {r.head}{r.symbol && <> <Link href={`/symbols/${encodeURIComponent(r.symbol)}`} className="underline">{r.symbol}</Link></>}{r.tail}
