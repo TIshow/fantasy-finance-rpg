@@ -27,6 +27,12 @@ export const EVENT_TYPES = [
 
 export type EventType = (typeof EVENT_TYPES)[number];
 
+/** post.published の、省略できる投稿の種類と見立て（#107。観戦画面の掲示板が使う） */
+export const POST_INTENTS = ["strategy", "feeling", "knowledge", "news"] as const;
+export const POST_STANCES = ["bull", "bear", "neutral"] as const;
+export type PostIntent = (typeof POST_INTENTS)[number];
+export type PostStance = (typeof POST_STANCES)[number];
+
 /** agent:<id> | system | operator:<役割>。認証した身元からサーバーが入れる */
 export type Actor = `agent:${string}` | "system" | `operator:${string}`;
 
