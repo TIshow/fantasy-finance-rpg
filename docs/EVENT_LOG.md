@@ -185,6 +185,8 @@ valuation.recorded(D) → corporate_actions.applied(D) → order_sheet.committed
 - `corporate_actions.applied`：§3.3 の決め方で公表と終値を集めて `applyCorporateActions` をやり直す。権利落ち日の前営業日の引け後処理が済んだのに、`ca:` のキーで反映済みになっていない公表があれば報告する
 - `valuation.recorded`：終値から再計算する。直近の終値が、その後の分割より前の日のものなら、分割に合わせた価格の規則を実装するまで止める
 - 約定・分割配当・評価の中身は、記録する側も同じ関数（`src/events/replay.ts` の `Ledger.compute*`）で作る
+- **書く前の確かめ：** 保管は、イベントを書く前に `Ledger.check`（`apply` と同じ判定で、状態を変えない）で確かめ、断られたものは書かない。`check`・書き込み・`apply` は同じ直列の区間で1件ずつ行う（#85）
+- `prices.open`・`prices.close`：ログの外の値（形とハッシュ）は、その価格を当てる時点で確かめる（約定や評価で使う時ではない。壊れた値をログに残さない、#85）
 - `ledger.adjusted`：§6.2 の定義で差を再計算して照合し、足す
 - 祝日の一覧と取引対象は、§3.5 のとおり、そのイベントより前の `holidays.adopted`・`universe.set` のものを使う。採用した版の一覧が渡されなければ止まる（D-031）
 - ログの外の値が消されていれば、その範囲は照合できないと報告する
