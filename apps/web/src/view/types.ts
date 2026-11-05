@@ -1,4 +1,5 @@
 // 画面に出す形（読み取り用のモデル）。金額は台帳の値（0.1円単位の整数）と、表示用の文字列の両方を持つ。
+import type { Intent, Stance } from "./body";
 import type { Deciyen, FillReason, FillStatus, RejectReason, Side } from "../ledger/types";
 
 interface Base {
@@ -12,7 +13,7 @@ interface Base {
 
 export type TimelineItem =
   /** 非表示にした投稿は、同じ位置に残し（EVENT_LOG §6.1）、text は null、withdrawn に理由を入れる。text が null で withdrawn も null なら、本文が外の保管にない */
-  | (Base & { kind: "post"; symbol: string; text: string | null; withdrawn: { seq: number; reason: string } | null; citeSeqs: number[]; replyTo: number | null; runSeq: number })
+  | (Base & { kind: "post"; symbol: string; text: string | null; intent: Intent | null; stance: Stance | null; withdrawn: { seq: number; reason: string } | null; citeSeqs: number[]; replyTo: number | null; runSeq: number })
   | (Base & { kind: "order_sheet"; tradingDate: string; runSeq: number; orders: { symbol: string; side: Side; qty: number }[] })
   | (Base & { kind: "fill"; fillIndex: number; sheetSeq: number; tradingDate: string; symbol: string; side: Side; requestedQty: number; qty: number; price: Deciyen | null; priceText: string | null; status: FillStatus; reason?: FillReason })
   | (Base & { kind: "valuation"; date: string; cash: Deciyen; positions: ValuedPosition[]; total: Deciyen; totalText: string; change: Deciyen; changeText: string })
@@ -57,8 +58,19 @@ export interface AgentPerformance {
   days: AgentDay[];
 }
 
+/** AIが読める情報の記録（source.captured と終値）。投稿の citeSeqs が指す */
+export interface Evidence {
+  seq: number;
+  kind: "source" | "close";
+  label: string;
+  /** 終値の記録には公開時刻がない */
+  publishedAt: number | null;
+  fetchedAt: number;
+}
+
 export interface View {
   timeline: TimelineItem[];
+  evidence: Evidence[];
   threads: SymbolThread[];
   agents: AgentPerformance[];
 }
