@@ -6,6 +6,7 @@ import type { LogEvent } from "../../src/events/types";
 import { IngestedMarketData, type SourceQuote, staticSource } from "../../src/ingest/market-data";
 import { INITIAL_CASH } from "../../src/ledger/types";
 import { type RunnerDeps, runDay, scheduleOf } from "../../src/runner/day";
+import { adjustCloses } from "../../src/runner/adjust";
 import { ruleAgents } from "../../src/runner/rule-agents";
 import { RunnerValues } from "../../src/runner/values";
 import { InMemoryEventStore } from "../../src/store/memory-store";
@@ -42,7 +43,7 @@ function quotes(seed: number, lateFetchAt: number): { fetchedAt: number; quote: 
 }
 
 /** AIが受け取った入力（先読みの検査に使う） */
-type Seen = { agentId: string; tradingDate: string; at: number; closes: { seq: number; date: string; tstc: number | null | undefined }[]; splitSeqs: number[] };
+type Seen = { agentId: string; tradingDate: string; at: number; closes: { seq: number; date: string; prices: Readonly<Record<string, number | null>> }[]; splitSeqs: number[] };
 
 /**
  * 保管・取り込み・runner を組み、前営業日から10営業日を回す。取り込みは取得の時刻に staticSource から行う。
@@ -70,7 +71,7 @@ async function run(seed: number, opts: { lateFetchAt?: number; interrupt?: boole
   const agents = (await ruleAgents()).map((a) => ({
     ...a,
     decide: (input: Parameters<typeof a.decide>[0]) => {
-      seen.push({ agentId: a.id, tradingDate: input.tradingDate, at: input.at, closes: input.closes.map((c) => ({ seq: c.seq, date: c.date, tstc: c.prices.TSTC })), splitSeqs: input.splits.map((x) => x.seq) });
+      seen.push({ agentId: a.id, tradingDate: input.tradingDate, at: input.at, closes: input.closes.map((c) => ({ seq: c.seq, date: c.date, prices: c.prices })), splitSeqs: input.splits.map((x) => x.seq) });
       return a.decide(input);
     },
   }));
@@ -140,8 +141,17 @@ describe("規則のAI 3体で10営業日を通す", async () => {
       const applied = of("corporate_actions.applied").find((e) => p(e).agentId === x.agentId && p(e).exDate === DAYS[6])!;
       expect(inputs).toContain(applied.seq);
       // 列が分割の日の前後で続いている（1日の値動きは10%に収まる。調整しなければ半分になる）
-      const xs = x.closes.map((c) => c.tstc as number);
+      const xs = x.closes.map((c) => c.prices.TSTC as number);
       for (let i = 1; i < xs.length; i++) expect(Math.abs(xs[i]! - xs[i - 1]!)).toBeLessThan(xs[i - 1]! * 0.15);
+    }
+    // AIが受け取った列は、run の入力の seq（終値と分割の公表）とログの外の値だけから作り直せる
+    for (const x of r.seen) {
+      const run = of("agent.run").find((e) => p(e).agentId === x.agentId && p(e).startedAt === x.at)!;
+      const inputs = (p(run).inputSeqs as number[]).map((s) => r.events[s - 1]!);
+      const value = (e: LogEvent) => r.values.get(p(e).valuesHash as string)!.value as Record<string, number>;
+      const raw = inputs.filter((e) => e.type === "prices.close").map((e) => ({ seq: e.seq, date: p(e).date as string, prices: value(e) }));
+      const splits = inputs.filter((e) => e.type === "corporate_action.announced").map((e) => ({ seq: e.seq, symbol: p(e).symbol as string, exDate: p(e).exDate as string, from: value(e).from!, to: value(e).to! }));
+      expect(adjustCloses(raw, splits)).toEqual(x.closes);
     }
     // 分割より前の判断には、分割を渡さない
     expect(r.seen.filter((x) => x.tradingDate < DAYS[6]!).every((x) => x.splitSeqs.length === 0)).toBe(true);

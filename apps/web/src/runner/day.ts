@@ -231,7 +231,9 @@ class Day {
         const basis = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id).at(-1) ?? registered;
         // 分割を知っていたことを残す：列の間の分割の公表と、それを反映したそのAIの引け後の処理を入力に入れる
         const first = closes[0] ? (pl(closes[0]).date as string) : date;
-        const inRange = (exDate: string) => first < exDate && exDate <= date;
+        // 権利落ち日が休場になった公表は、どの引け後の処理にも渡らない（§6.2 で運営者が決める）ので、列も調整しない
+        const H = this.log.holidays();
+        const inRange = (exDate: string) => first < exDate && exDate <= date && isBusinessDay(exDate, H);
         const splits = this.log.events.filter((e) => e.type === "corporate_action.announced" && pl(e).kind === "split" && inRange(pl(e).exDate as string)).map((e) => {
           const v = this.deps.values.get(pl(e).valuesHash as string)!.value as { from: number; to: number };
           return { seq: e.seq, symbol: pl(e).symbol as string, exDate: pl(e).exDate as string, from: v.from, to: v.to };
