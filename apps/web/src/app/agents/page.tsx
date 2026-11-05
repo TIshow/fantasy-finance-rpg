@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getView } from "../data";
 
 export default async function AgentsPage() {
@@ -8,7 +9,7 @@ export default async function AgentsPage() {
       <div className="space-y-6">
         {agents.map((a) => (
           <section key={a.agentId} id={a.agentId}>
-            <h2 className="mb-1 font-semibold">{a.agentName}</h2>
+            <h2 className="mb-1 font-semibold"><Link href={`/agents/${encodeURIComponent(a.agentId)}`}>{a.agentName}</Link></h2>
             {a.days.length === 0 ? (
               <p className="text-sm text-sub">まだ評価がありません</p>
             ) : (

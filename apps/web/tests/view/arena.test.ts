@@ -183,4 +183,17 @@ describe("buildArena（順位とフィードの細かい場合）", () => {
     expect(seqs).toEqual([...seqs].sort((x, y) => y - x)); // 新しい順
     expect(seqs[0]! - seqs[11]!).toBe(11); // 古い2件が落ちる
   });
+
+  it("評価が書きかけの日は、首位の記録を出さない（評価を始めたAIの一部しか出ていない日）", () => {
+    const ok = mk([[["p", 1100], ["q", 1000]], [["p", 1200], ["q", 1000]]]);
+    const part = mk([[["p", 1100], ["q", 1000]], [["p", 1200]]]); // 2日目は q の評価がまだ
+    expect(ok.feed.filter((f) => f.kind === "rank")).toHaveLength(2);
+    expect(part.feed.filter((f) => f.kind === "rank").map((f) => f.key)).toEqual(["rank-2026-11-09"]);
+  });
+
+  it("ひとことには投稿の日時がつく", () => {
+    n = 0;
+    const evs = [ev("agent.registered", { agentId: "p", displayName: "P", startDate: "2026-11-09", initialCash: 1000 }, 0), ev("post.published", { agentId: "p", board: "X1", bodyHash: "h", citeSeqs: [], runSeq: 1 }, T("2026-11-12", 21))];
+    expect(buildArena(buildView(evs, () => "本文")).cards[0]).toMatchObject({ quote: "本文", quoteAt: "11/12 21:00" });
+  });
 });

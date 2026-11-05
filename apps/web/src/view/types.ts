@@ -13,10 +13,10 @@ interface Base {
 export type TimelineItem =
   /** 非表示にした投稿は、同じ位置に残し（EVENT_LOG §6.1）、text は null、withdrawn に理由を入れる。text が null で withdrawn も null なら、本文が外の保管にない */
   | (Base & { kind: "post"; symbol: string; text: string | null; withdrawn: { seq: number; reason: string } | null; citeSeqs: number[]; replyTo: number | null; runSeq: number })
-  | (Base & { kind: "order_sheet"; tradingDate: string; orders: { symbol: string; side: Side; qty: number }[] })
-  | (Base & { kind: "fill"; fillIndex: number; tradingDate: string; symbol: string; side: Side; requestedQty: number; qty: number; price: Deciyen | null; priceText: string | null; status: FillStatus; reason?: FillReason })
+  | (Base & { kind: "order_sheet"; tradingDate: string; runSeq: number; orders: { symbol: string; side: Side; qty: number }[] })
+  | (Base & { kind: "fill"; fillIndex: number; sheetSeq: number; tradingDate: string; symbol: string; side: Side; requestedQty: number; qty: number; price: Deciyen | null; priceText: string | null; status: FillStatus; reason?: FillReason })
   | (Base & { kind: "valuation"; date: string; cash: Deciyen; positions: ValuedPosition[]; total: Deciyen; totalText: string; change: Deciyen; changeText: string })
-  | (Base & { kind: "rejected"; tradingDate: string; reason: RejectReason })
+  | (Base & { kind: "rejected"; tradingDate: string; reason: RejectReason; runSeq: number | null })
   /** agentId が "*" なら全体 */
   | (Base & { kind: "suspension"; action: "suspended" | "resumed"; scope: "posts" | "orders" | "both"; reason: string });
 

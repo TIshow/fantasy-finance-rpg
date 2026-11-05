@@ -7,7 +7,7 @@ import type { TimelineItem, View } from "./types";
 
 export type Direction = "up" | "down" | "flat";
 export const MARK: Record<Direction, string> = { up: "▲", down: "▼", flat: "－" };
-const dir = (n: number): Direction => (n > 0 ? "up" : n < 0 ? "down" : "flat");
+export const dir = (n: number): Direction => (n > 0 ? "up" : n < 0 ? "down" : "flat");
 
 export interface Sparkline {
   /** SVG の polyline の points（横幅 W・縦 H の座標系） */
@@ -33,6 +33,21 @@ export function sparkline(values: number[], baseline: number): Sparkline {
   return { points, baseY: y(baseline), label: `${Math.max(0, n - 1)}営業日の資産の推移（${words[dir(last - baseline)]}）` };
 }
 
+/** 直近の（非表示でなく本文が保管にある）投稿 */
+export function latestPost(view: View, agentId: string) {
+  const p = findLast(view.timeline, (t) => t.kind === "post" && t.agentId === agentId && t.withdrawn === null && t.text !== null);
+  return p && p.kind === "post" ? { text: p.text as string, symbol: p.symbol, atText: formatJstShort(p.at) } : null;
+}
+
+/**
+ * 評価がそろった日の集合。評価を始めたAIのうち、まだその日の評価がないAIがいる日（書きかけの日）は含めない。
+ * 順位・首位・連続首位は、この日のものだけを使う（書きかけの日は、先に評価されたAIが仮に1位になるため）
+ */
+export function settledDates(view: View): Set<string> {
+  const all = new Set(view.agents.flatMap((a) => a.days.map((d) => d.date)));
+  return new Set([...all].filter((date) => !view.agents.some((a) => a.days.length > 0 && a.days[0]!.date <= date && !a.days.some((d) => d.date === date))));
+}
+
 export interface ArenaCard {
   agentId: string;
   character: Character;
@@ -51,6 +66,8 @@ export interface ArenaCard {
   top: { symbol: string; weightText: string; weightPct: number }[];
   /** 直近の（非表示でない）投稿の本文。ない・本文が保管にない場合は null */
   quote: string | null;
+  /** ひとことの投稿の日時（"11/12 21:00"） */
+  quoteAt: string | null;
   /** 直近の約定（"11/18 買 TSTA 300株"）。ない場合は null */
   lastTrade: string | null;
 }
@@ -85,6 +102,7 @@ export function buildArena(view: View): Arena {
   const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.qty > 0);
   const valuations = view.timeline.filter((t): t is TimelineItem & { kind: "valuation" } => t.kind === "valuation");
 
+  const settledDays = settledDates(view);
   const cards: ArenaCard[] = view.agents.map((a) => {
     const character = characterOf(a.agentId, a.agentName);
     const lastDay = a.days.at(-1);
@@ -100,20 +118,21 @@ export function buildArena(view: View): Arena {
         const permille = roundedRatio(p.value, total ?? a.initialCash, 1000);
         return { symbol: p.symbol, weightText: `${Math.floor(permille / 10)}.${permille % 10}%`, weightPct: permille / 10 };
       });
-    const quote = findLast(posts, (p) => p.agentId === a.agentId && p.withdrawn === null && p.text !== null)?.text ?? null;
+    const post = latestPost(view, a.agentId);
     const f = findLast(fills, (x) => x.agentId === a.agentId);
     return {
       agentId: a.agentId,
       character,
       loggedName: a.agentName,
       handle: handleOf(a.agentId),
-      rank: lastDay?.rank ?? null,
+      rank: findLast(a.days, (d) => settledDays.has(d.date))?.rank ?? null,
       totalText: total === undefined ? null : formatYenMark(total),
       asOf: lastDay ? formatMonthDay(lastDay.date) : null,
       pnl: total === undefined ? null : { direction: dir(diff), text: formatSignedYenMark(diff), percentText: formatBp(roundedRatio(diff, a.initialCash, 10000), true) },
       spark: a.days.length === 0 ? null : sparkline([a.initialCash, ...a.days.map((d) => d.total)], a.initialCash),
       top,
-      quote,
+      quote: post?.text ?? null,
+      quoteAt: post?.atText ?? null,
       lastTrade: f ? `${formatMonthDay(f.tradingDate)} ${SIDE[f.side]} ${f.symbol} ${f.qty}株` : null,
     };
   });
@@ -131,8 +150,11 @@ export function buildArena(view: View): Arena {
   // 順位：評価の記録の日ごとに、首位のAI。前の評価の日の首位と同じなら「守る」
   const byDate = new Map<string, (TimelineItem & { kind: "valuation" })[]>();
   for (const v of valuations) (byDate.get(v.date) ?? byDate.set(v.date, []).get(v.date)!).push(v);
+  const settled = settledDates(view);
   let prevLeader: string | null = null;
   for (const [date, list] of [...byDate].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    // 評価が書きかけの日（評価を始めたAIのうち、まだその日の評価がないAIがいる日）は、首位を決めない
+    if (!settled.has(date)) continue;
     const best = list.reduce((m, v) => (v.total > m.total ? v : m));
     const tied = list.filter((v) => v.total === best.total);
     const lead = tied.length > 1 ? null : best;

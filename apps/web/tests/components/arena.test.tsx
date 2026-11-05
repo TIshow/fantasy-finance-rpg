@@ -20,6 +20,7 @@ const card = (over: Partial<ArenaCard> = {}): ArenaCard => ({
   spark: { points: "0,10 140,30", baseY: 20, label: "2営業日の資産の推移（初期資金より下）" },
   top: [{ symbol: "TSTB", weightText: "31.4%", weightPct: 31.4 }],
   quote: "本文そのまま",
+  quoteAt: "11/17 16:58",
   lastTrade: "11/18 売 TSTA 400株",
   ...over,
 });
@@ -70,7 +71,7 @@ describe("カードの部品", () => {
     expect(h).toContain("31.4%");
     expect(h).toContain("2営業日の資産の推移");
     expect(h).toContain("11/18 引け");
-    expect(h).toContain('href="/agents#ai-reversal"');
+    expect(h).toContain('href="/agents/ai-reversal"');
   });
 
   it("投稿・保有・売買がない、評価がまだないカードも壊れない", () => {
@@ -124,6 +125,45 @@ describe("タイムライン・成績のページ", () => {
     const h = renderToStaticMarkup(await TimelinePage());
     expect(h).toContain("タイムライン");
     expect(h.match(/<time /g)?.length).toBe((await getView()).timeline.length);
+    expect(h).not.toMatch(/<(form|input|textarea|select|button)\b/i);
+  });
+});
+
+describe("AIページ", async () => {
+  const { default: AgentPage, generateStaticParams } = await import("../../src/app/agents/[id]/page");
+  const ids = (await generateStaticParams()).map((p) => p.id);
+  const html = renderToStaticMarkup(await AgentPage({ params: Promise.resolve({ id: ids[0]! }) }));
+
+  it("AIごとにページがあり、知らないIDは404。入力の要素がない", async () => {
+    expect(ids).toHaveLength((await getView()).agents.length);
+    await expect(AgentPage({ params: Promise.resolve({ id: "NOPE" }) })).rejects.toThrow();
+    expect(html).not.toMatch(/<(form|input|textarea|select|button)\b/i);
+    expect(html).not.toMatch(/\b(SSR|SR)\b/);
+  });
+
+  it("紹介・成績・推移・持ち株・取引履歴が出て、推移は全AIの線を重ねる。損益は▲▼つき", () => {
+    for (const s of ["RECORD", "総資産", "前日比", "累計損益", "約定の回数", "EQUITY", "HOLDINGS", "取引履歴", "判断の実行 #", "直近の投稿"]) expect(html).toContain(s);
+    expect(html.match(/<polyline/g)).toHaveLength(ids.length);
+    expect(html).toMatch(/[▲▼－] [+¥-]/);
+  });
+
+  it("カードはAIページに、成績の表の名前もAIページにリンクする", async () => {
+    const top = renderToStaticMarkup(await Home());
+    for (const id of ids) expect(top).toContain(`href="/agents/${id}"`);
+  });
+});
+
+describe("AIページの部品（細かい場合）", async () => {
+  const { AgentPageView } = await import("../../src/components/AgentPageView");
+  const { buildAgentPage } = await import("../../src/view/agent-page");
+  const { buildView } = await import("../../src/view/build");
+  const mk = (type: string, seq: number, payload: object, at = 0) => ({ seq, schema: 1, type, recordedAt: at, actor: "system", keys: [], refs: [], payload, prevHash: "", hash: "" }) as never;
+
+  it("評価前のAIは『評価前』で、推移を出さず、拒否の行と停止中が出る", () => {
+    const v = buildView([mk("agent.registered", 1, { agentId: "ai-new", displayName: "新人", startDate: "2026-11-09", initialCash: 1000 }), mk("order_sheet.rejected", 2, { agentId: "ai-new", tradingDate: "2026-11-09", reason: "suspended", runSeq: 1 }, 5000), mk("agent.suspended", 3, { agentId: "ai-new", scope: "both", reason: "x" })], () => undefined);
+    const h = renderToStaticMarkup(<AgentPageView page={buildAgentPage(v, new Map(), "ai-new")!} />);
+    for (const s of ["評価前", "#－", "新人", "停止中（投稿と注文）", "拒否（停止中）", "受付 "]) expect(h).toContain(s);
+    expect(h).not.toContain("<polyline");
     expect(h).not.toMatch(/<(form|input|textarea|select|button)\b/i);
   });
 });
