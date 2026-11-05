@@ -27,6 +27,7 @@ function quotes(seed: number, lateFetchAt: number): { fetchedAt: number; quote: 
   const last: Record<string, number> = { TSTA: 1200, TSTB: 2500, TSTC: 800 };
   for (const date of [PRIOR, ...DAYS]) {
     for (const symbol of SYMBOLS) {
+      if (symbol === "TSTC" && date === DAYS[6]) last[symbol] = Math.round(last[symbol]! / 2); // 1:2 の分割で値が半分になる（調整しない値）
       const open = Math.max(1, Math.round(last[symbol]! * (1 + (rand() - 0.5) * 0.06)));
       const close = Math.max(1, Math.round(open * (1 + (rand() - 0.5) * 0.08)));
       last[symbol] = close;
@@ -118,6 +119,13 @@ describe("規則のAI 3体で10営業日を通す", async () => {
     const actions = of("corporate_actions.applied").filter((e) => p(e).agentId === "ai-hold").flatMap((e) => p(e).actions as { kind: string; symbol: string }[]);
     expect(actions.map((x) => `${x.kind}:${x.symbol}`)).toEqual(["dividend:TSTB", "split:TSTC"]);
     expect(r.store.account("ai-hold").holdings.TSTC?.qty).toBe(200);
+    // 分割の前後で TSTC の評価額が飛ばない（株数は倍・値は半分）。1日の値動きは10%に収まる
+    const tstc = (d: string) => {
+      const v = p(of("valuation.recorded").find((e) => p(e).agentId === "ai-hold" && p(e).date === d)!);
+      const x = (v.positions as { symbol: string; qty: number; price: number }[]).find((y) => y.symbol === "TSTC")!;
+      return x.qty * x.price;
+    };
+    expect(Math.abs(tstc(DAYS[6]!) - tstc(DAYS[5]!))).toBeLessThan(tstc(DAYS[5]!) * 0.15);
   });
 
   it("(b) replay で先頭から作り直した台帳が、記録（保管の口座）と一致する", async () => {
