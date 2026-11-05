@@ -1,7 +1,36 @@
 @import "tailwindcss";
 
+/* ネオン・アリーナの色と書体（issue #96）。上昇はシアン、下落はピンク（色だけで示さず ▲▼ を付ける） */
+@theme {
+  --color-ground: #0d0617;
+  --color-panel: #170b26;
+  --color-line: #3a1f5c;
+  --color-ink: #f4ecff;
+  --color-sub: #b9a6d6;
+  --color-soft: #d9c8f2;
+  --color-neon-cyan: #00e5ff;
+  --color-neon-pink: #ff2e88;
+  --color-neon-lime: #b6ff3b;
+  --font-display: var(--font-dela), "Hiragino Sans", "Noto Sans JP", sans-serif;
+  --font-num: var(--font-mono), ui-monospace, monospace;
+  --font-sans: var(--font-noto), system-ui, -apple-system, "Hiragino Sans", sans-serif;
+}
+
 body {
-  background: #f8fafc;
-  color: #0f172a;
-  font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  background: var(--color-ground);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  line-height: 1.6;
+}
+
+/* リンクの色は base の層に置く（utility の text-* で上書きできるように） */
+@layer base {
+  a {
+    color: var(--color-neon-cyan);
+    text-decoration: none;
+  }
+  a:hover {
+    color: #8ff6ff;
+    text-decoration: underline;
+  }
 }

@@ -52,6 +52,8 @@ export interface AgentDay {
 export interface AgentPerformance {
   agentId: string;
   agentName: string;
+  /** 登録時の初期資金（累計損益の基準。登録のないAIは台帳の初期資金） */
+  initialCash: Deciyen;
   days: AgentDay[];
 }
 
