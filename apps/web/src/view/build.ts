@@ -40,7 +40,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => s
         }
         break;
       case "order_sheet.committed":
-        timeline.push({ ...base(p.agentId), kind: "order_sheet", tradingDate: p.tradingDate, orders: p.orders.map((o: P) => ({ symbol: o.symbol, side: o.side, qty: o.qty })) });
+        timeline.push({ ...base(p.agentId), kind: "order_sheet", tradingDate: p.tradingDate, runSeq: p.runSeq, orders: p.orders.map((o: P) => ({ symbol: o.symbol, side: o.side, qty: o.qty })) });
         break;
       case "order_sheet.rejected":
         timeline.push({ ...base(p.agentId), kind: "rejected", tradingDate: p.tradingDate, reason: p.reason });
@@ -48,7 +48,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => s
       case "fills.executed":
         for (const [fillIndex, f] of (p.fills as Fill[]).entries()) {
           const { symbol, side, requestedQty, qty, price, status, reason } = f;
-          timeline.push({ ...base(p.agentId), kind: "fill", fillIndex, tradingDate: p.tradingDate, symbol, side, requestedQty, qty, price, priceText: price === null ? null : formatYen(price), status, ...(reason ? { reason } : {}) });
+          timeline.push({ ...base(p.agentId), kind: "fill", fillIndex, sheetSeq: p.sheetSeq, tradingDate: p.tradingDate, symbol, side, requestedQty, qty, price, priceText: price === null ? null : formatYen(price), status, ...(reason ? { reason } : {}) });
         }
         break;
       case "valuation.recorded": {

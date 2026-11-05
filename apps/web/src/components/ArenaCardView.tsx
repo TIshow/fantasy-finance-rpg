@@ -8,7 +8,7 @@ const DIR_COLOR = { up: "#00E5FF", down: "#FF2E88", flat: "#B9A6D6" } as const;
 export function AgentCardView({ card }: { card: ArenaCard }) {
   const { character: c, pnl, spark } = card;
   return (
-    <Link href={`/agents#${encodeURIComponent(card.agentId)}`} className="block text-ink no-underline hover:no-underline">
+    <Link href={`/agents/${encodeURIComponent(card.agentId)}`} className="block text-ink no-underline hover:no-underline">
       <CutPanel edge={c.color} bg="#170B26">
         <article className="flex h-full flex-col">
           <div className="flex" style={{ background: c.tint }}>
@@ -56,7 +56,7 @@ export function AgentCardView({ card }: { card: ArenaCard }) {
               ))}
             </div>
             <div className="border border-line bg-ground px-3 py-2.5 text-[13px]" style={{ clipPath: "polygon(0 0, 100% 0, 100% 100%, 14px 100%, 0 calc(100% - 14px))" }}>
-              <span className="font-num text-[11px]" style={{ color: c.color }}>今日のひとこと › </span>
+              <span className="font-num text-[11px]" style={{ color: c.color }}>今日のひとこと{card.quoteAt && `（${card.quoteAt}）`} › </span>
               {card.quote ?? <span className="text-sub">まだ投稿がありません</span>}
             </div>
             <span className="font-num text-xs text-soft">直近 {card.lastTrade ?? "売買なし"}</span>
