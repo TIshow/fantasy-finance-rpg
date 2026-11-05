@@ -13,16 +13,21 @@ const run = (prevYen: number, orders: AuctionOrder[]) => runAuction({ symbol: "N
 const summary = (r: AuctionResult) => r.fills.map((f) => [f.qty, f.reason ?? null]);
 
 describe("値幅", () => {
-  it("前日の価格の ±20% を、呼値（1円）に合わせて内側に丸める", () => {
+  it("前日の価格の ±20% と ±1円の広いほうを、呼値（1円）に合わせて内側に丸める。下限は1円", () => {
     expect(priceBand(yen(1000))).toEqual({ lower: yen(800), upper: yen(1200) });
     expect(priceBand(yen(7))).toEqual({ lower: yen(6), upper: yen(8) });
     expect(priceBand(10005)).toEqual({ lower: yen(801), upper: yen(1200) });
     expect(() => priceBand(0)).toThrow();
     expect(() => priceBand(100_000_000 * 10 + 1)).toThrow();
-    // 安い価格では値幅が狭い：4円は 4円の1点だけ、1円は 1円だけ、0.8円は上限が0円になり例外（lead に判断を依頼、#110）
-    expect(priceBand(yen(4))).toEqual({ lower: yen(4), upper: yen(4) });
-    expect(priceBand(yen(1))).toEqual({ lower: yen(1), upper: yen(1) });
-    expect(() => priceBand(8)).toThrow("price band is empty");
+    // 安い価格では ±1円のほうが広い（#110 の lead の決定）。5円は ±20% と ±1円が同じ
+    expect(priceBand(yen(5))).toEqual({ lower: yen(4), upper: yen(6) });
+    expect(priceBand(yen(4))).toEqual({ lower: yen(3), upper: yen(5) });
+    expect(priceBand(yen(3))).toEqual({ lower: yen(2), upper: yen(4) });
+    // 1円より下がらない
+    expect(priceBand(yen(1))).toEqual({ lower: yen(1), upper: yen(2) });
+    expect(priceBand(8)).toEqual({ lower: yen(1), upper: yen(1) });
+    expect(priceBand(15)).toEqual({ lower: yen(1), upper: yen(2) });
+    expect(priceBand(45)).toEqual({ lower: yen(4), upper: yen(5) });
   });
 });
 
@@ -95,8 +100,8 @@ describe("手で数えた板", () => {
 /** 乱数の板。前日の価格のまわりに、成行と指値を混ぜる */
 function randomBook(seed: number): { prevPrice: number; orders: AuctionOrder[] } {
   const rand = mulberry32(seed);
-  // 0.1円単位（呼値に合わないことがある）で、数円から3000円まで
-  const prevPrice = randInt(rand, 0, 3) === 0 ? randInt(rand, 30, 500) : randInt(rand, 500, 30_000);
+  // 0.1円単位（呼値に合わないことがある）で、0.1円から3000円まで
+  const prevPrice = randInt(rand, 0, 3) === 0 ? randInt(rand, 1, 500) : randInt(rand, 500, 30_000);
   const { lower, upper } = priceBand(prevPrice);
   const orders: AuctionOrder[] = [];
   const sheets = randInt(rand, 0, 12);
@@ -119,6 +124,10 @@ describe("乱数の板の性質（200通り）", () => {
       const { prevPrice, orders } = randomBook(seed);
       const r = runAuction({ symbol: "NEO1", prevPrice, orders });
       const { lower, upper } = priceBand(prevPrice);
+      // 値幅は1円以上で、前日より高い価格を必ず含み、前日より低い価格も（1円で止まるのでなければ）含む
+      expect(lower).toBeGreaterThanOrEqual(TICK);
+      expect(upper).toBeGreaterThan(prevPrice);
+      expect(lower < prevPrice || lower === TICK).toBe(true);
       const sum = (side: string) => r.fills.filter((f) => f.side === side).reduce((a, f) => a + f.qty, 0);
       // 買いと売りの約定量が一致し、100株単位、注文の株数以下
       expect(sum("buy")).toBe(r.volume);

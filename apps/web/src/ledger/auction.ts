@@ -4,7 +4,7 @@ import { LOT, type Deciyen, type Side } from "./types";
 
 /** 呼値（価格の刻み）：1円 */
 export const TICK: Deciyen = 10;
-/** 値幅制限：前日の価格の ±20% */
+/** 値幅制限：前日の価格の ±20% と ±1円（呼値1つ）の大きいほう。価格は1円より下がらない（#110 の lead の決定） */
 export const PRICE_BAND_PERCENT = 20;
 /** 前日の価格の上限（1億円）。候補の価格を1つずつ数えるので、これより大きい価格は受け付けない */
 export const MAX_PRICE: Deciyen = 100_000_000 * 10;
@@ -58,13 +58,13 @@ export interface AuctionResult {
   fills: AuctionFill[];
 }
 
-/** 前日の価格から、呼値に合う値幅の下限と上限 */
+/** 前日の価格から、呼値に合う値幅の下限と上限。±20% と ±1円の広いほうを、呼値に合わせて内側に丸め、下限は1円 */
 export function priceBand(prevPrice: Deciyen): { lower: Deciyen; upper: Deciyen } {
   if (!Number.isSafeInteger(prevPrice) || prevPrice <= 0 || prevPrice > MAX_PRICE) throw new Error(`invalid previous price: ${prevPrice}`);
   const scale = 100 * TICK;
-  const lower = Math.max(TICK, Math.ceil((prevPrice * (100 - PRICE_BAND_PERCENT)) / scale) * TICK);
-  const upper = Math.floor((prevPrice * (100 + PRICE_BAND_PERCENT)) / scale) * TICK;
-  if (lower > upper) throw new Error(`price band is empty around ${prevPrice}`);
+  // 安い価格でも値幅が1点にならないよう、±1円は必ず含める（上限は前日より高く、下限は前日より低いか1円）
+  const lower = Math.max(TICK, Math.min(Math.ceil((prevPrice * (100 - PRICE_BAND_PERCENT)) / scale), Math.ceil((prevPrice - TICK) / TICK)) * TICK);
+  const upper = Math.max(Math.floor((prevPrice * (100 + PRICE_BAND_PERCENT)) / scale), Math.floor((prevPrice + TICK) / TICK)) * TICK;
   return { lower, upper };
 }
 
