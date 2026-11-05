@@ -40,7 +40,7 @@ export function AgentPageView({ page: p }: { page: AgentPage }) {
         <section aria-labelledby="h-intro" className="flex flex-wrap" style={{ background: c.tint }}>
           <div className="w-[240px] max-w-full flex-none"><Portrait look={c.look} size={240} /></div>
           <div className="flex min-w-[260px] flex-1 flex-col gap-2 p-5">
-            <span className="font-display text-3xl" style={{ color: c.color }}>{p.rank === null ? "#－" : `#${p.rank}`}</span>
+            <span className="font-display text-3xl" style={{ color: c.color }}>{p.rank === null ? "#－" : `#${p.rank}`}{p.rankAsOf && <span className="ml-2 font-num text-xs text-sub">{p.rankAsOf} 引け時点</span>}</span>
             <h1 id="h-intro" className="font-display text-3xl font-normal">{c.name}</h1>
             <p className="text-soft">{c.title}</p>
             {p.suspended && <p className="w-fit bg-neon-pink px-2 text-sm font-bold text-ground">{p.suspended}</p>}

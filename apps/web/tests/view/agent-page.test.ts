@@ -100,17 +100,20 @@ describe("buildAgentPage（時点・順序・停止の細かい場合）", () =>
   });
 
   it("評価が書きかけの日は、順位とバッジに数えない（先に評価されたAIが仮に1位になる）", () => {
-    const v = base([], [["ai-ma5", "09", 11_000], ["ai-hold", "09", 10_000], ["ai-ma5", "10", 12_000]]); // 10日は ai-hold がまだ
+    // 9日は ai-hold が上（ai-ma5 は2位）。10日は ai-hold がまだで、ai-ma5 だけ見ると仮に1位
+    const v = base([], [["ai-ma5", "09", 10_000], ["ai-hold", "09", 11_000], ["ai-ma5", "10", 12_000]]);
     const p = buildAgentPage(v, new Map(), "ai-ma5")!;
-    expect(p.rank).toBe(1); // 9日（そろった日）の順位
+    expect(p.rank).toBe(2); // 9日（そろった日）の順位。書きかけの10日の仮の1位ではない
+    expect(p.rankAsOf).toBe("11/09");
     expect(p.badges).not.toContain("連続首位 2日");
-    expect(buildArena(v).cards.find((c) => c.agentId === "ai-ma5")!.rank).toBe(1);
+    expect(buildArena(v).cards.find((c) => c.agentId === "ai-ma5")!.rank).toBe(2);
     // そろえば数える
     const done = base([], [["ai-ma5", "09", 11_000], ["ai-hold", "09", 10_000], ["ai-ma5", "10", 12_000], ["ai-hold", "10", 10_000]]);
     expect(buildAgentPage(done, new Map(), "ai-ma5")!.badges).toContain("連続首位 2日");
-    // 開始が遅いAI（まだ1日も評価がない）は、そろった日の判定を止めない
-    const late = base([], [["ai-ma5", "09", 11_000]]);
-    expect(buildAgentPage(late, new Map(), "ai-ma5")!.rank).toBe(1);
+    // 開始が遅いAI（10日から）は、9日をそろった日として数えるのを止めない。10日はそろって ai-ma5 が2位
+    const late = base([], [["ai-ma5", "09", 11_000], ["ai-ma5", "10", 10_000], ["ai-hold", "10", 11_000]]);
+    expect(buildAgentPage(late, new Map(), "ai-ma5")!.rank).toBe(2);
+    expect(buildAgentPage(late, new Map(), "ai-ma5")!.rankAsOf).toBe("11/10");
   });
 
   it("直近の終値で評価した保有には、その印がつく", () => {
@@ -138,6 +141,16 @@ describe("buildAgentPage（時点・順序・停止の細かい場合）", () =>
     expect(buildAgentPage(base([stop], [["ai-ma5", "09", 10_000]]), new Map(), "ai-ma5")!.suspended).toBe("停止中（注文）");
     const resume = ev("agent.resumed", { agentId: "*", scope: "orders", reason: "解除" }, T("2026-11-09", 11));
     expect(buildAgentPage(base([stop, resume], [["ai-ma5", "09", 10_000]]), new Map(), "ai-ma5")!.suspended).toBeNull();
+  });
+
+  it("停止の範囲は実行側と同じ決め方（IDごとの範囲の集合。どちらかが止めていれば停止）", () => {
+    const sus = (agentId: string, scope: string, resumed = false) => ev(resumed ? "agent.resumed" : "agent.suspended", { agentId, scope, reason: "x" }, T("2026-11-09", 10));
+    const of = (evs: LogEvent[]) => buildAgentPage(base(evs, [["ai-ma5", "09", 10_000]]), new Map(), "ai-ma5")!.suspended;
+    expect(of([sus("ai-ma5", "both"), sus("*", "both", true)])).toBe("停止中（投稿と注文）"); // (a) 全体の再開は、AI個別の停止を解かない
+    expect(of([sus("ai-ma5", "posts"), sus("ai-ma5", "orders")])).toBe("停止中（投稿と注文）"); // (b) 範囲は足し合わせる
+    expect(of([sus("*", "orders"), sus("ai-ma5", "orders", true)])).toBe("停止中（注文）"); // (c) AI個別の再開は、全体の停止を解かない
+    expect(of([sus("ai-ma5", "both"), sus("ai-ma5", "posts", true)])).toBe("停止中（注文）"); // 一部だけ再開
+    expect(of([sus("ai-hold", "both")])).toBeNull(); // 別のAIの停止
   });
 
   it("開始が遅いAIに、実在しない線を引かない（初期資金の点は最初の評価の日の1つ前）", () => {

@@ -44,6 +44,8 @@ export interface AgentPage {
   loggedName: string;
   handle: string;
   rank: number | null;
+  /** 順位の基準の日（評価がそろった最後の日。"11/09"） */
+  rankAsOf: string | null;
   /** 停止中の表示（"停止中（投稿と注文）"）。停止されていなければ null */
   suspended: string | null;
   badges: string[];
@@ -56,12 +58,27 @@ export interface AgentPage {
 }
 
 const SIDE = { buy: "買", sell: "売" } as const;
-const SCOPE = { posts: "投稿", orders: "注文", both: "投稿と注文" } as const;
 const pct = (permille: number) => `${Math.floor(permille / 10)}.${permille % 10}%`;
 const sign = (d: Deciyen) => `${MARK[dir(d)]} ${formatSignedYenMark(d)}`;
 
 /** 連続して首位（順位1）だった日数の最長 */
 const longestStreak = (ranks: number[]) => ranks.reduce<[number, number]>(([best, run], r) => (r === 1 ? [Math.max(best, run + 1), run + 1] : [best, 0]), [0, 0])[0];
+
+/**
+ * 停止中の表示。実行側（src/runner/day.ts の suspended）と同じ決め方：IDごと（AIと "*"）に、停止した範囲の集合を
+ * 記録の順に足し引きし（both は両方）、どちらかが止めていればその範囲を停止とする。範囲は投稿・注文の順に並べる
+ */
+export function suspensionOf(view: View, agentId: string): string | null {
+  const on = new Map<string, Set<string>>();
+  for (const t of view.timeline) {
+    if (t.kind !== "suspension" || (t.agentId !== agentId && t.agentId !== "*")) continue;
+    const set = on.get(t.agentId) ?? new Set<string>();
+    for (const x of t.scope === "both" ? ["posts", "orders"] : [t.scope]) (t.action === "suspended" ? set.add(x) : set.delete(x));
+    on.set(t.agentId, set);
+  }
+  const names = (["posts", "orders"] as const).filter((x) => [agentId, "*"].some((id) => on.get(id)?.has(x))).map((x) => (x === "posts" ? "投稿" : "注文"));
+  return names.length === 0 ? null : `停止中（${names.join("と")}）`;
+}
 
 export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account>, agentId: string): AgentPage | null {
   const a = view.agents.find((x) => x.agentId === agentId);
@@ -141,12 +158,10 @@ export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account
   const key = (d: string) => (valid(d) ? d : ""); // 日付が不正な拒否は一番後ろ
   const history = rows.sort((p, q) => (key(p.date) < key(q.date) ? 1 : key(p.date) > key(q.date) ? -1 : p.seq - q.seq || p.idx - q.idx)).map((r) => r.row);
 
-  // 停止中か：このAIまたは全体の、直近の停止・再開の記録
-  const susp = [...mine, ...view.timeline.filter((t) => t.agentId === "*")].filter((t) => t.kind === "suspension").sort((p, q) => p.seq - q.seq).at(-1);
-  const suspended = susp && susp.kind === "suspension" && susp.action === "suspended" ? `停止中（${SCOPE[susp.scope]}）` : null;
+  const suspended = suspensionOf(view, agentId);
 
   return {
-    agentId, character, loggedName: a.agentName, handle: handleOf(agentId), rank: settledDays.at(-1)?.rank ?? null, suspended, badges, latestPost: latestPost(view, agentId), chart, holdings, cash, history,
+    agentId, character, loggedName: a.agentName, handle: handleOf(agentId), rank: settledDays.at(-1)?.rank ?? null, rankAsOf: settledDays.at(-1) ? formatMonthDay(settledDays.at(-1)!.date) : null, suspended, badges, latestPost: latestPost(view, agentId), chart, holdings, cash, history,
     stats: last ? { totalText: formatYenMark(last.total), asOf: formatMonthDay(last.date), changeText: sign(last.change), changeDirection: dir(last.change), pnlText: `${sign(last.total - a.initialCash)}（${formatBp(roundedRatio(last.total - a.initialCash, a.initialCash, 10000), true)}）`, pnlDirection: dir(last.total - a.initialCash), fills: filled } : null,
   };
 }
