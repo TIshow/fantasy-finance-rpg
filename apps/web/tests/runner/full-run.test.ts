@@ -106,6 +106,10 @@ describe("規則のAI 3体で10営業日を通す", async () => {
     expect(await verifyChain(r.events)).toEqual([]);
     expect(of("valuation.recorded").length).toBe(DAYS.length * 3);
     expect(of("order_sheet.rejected")).toEqual([]);
+    // 売買しない日も、全員が毎日注文票を確定し、約定（空なら空）を残す
+    expect(of("order_sheet.committed").length).toBe(DAYS.length * 3);
+    expect(of("fills.executed").length).toBe(DAYS.length * 3);
+    expect(of("order_sheet.committed").some((e) => (p(e).orders as unknown[]).length === 0)).toBe(true);
     const traded = (id: string) => of("fills.executed").filter((e) => p(e).agentId === id && (p(e).fills as { qty: number }[]).some((f) => f.qty > 0)).length;
     for (const id of ids) expect(traded(id), id).toBeGreaterThan(0);
     expect(of("fills.executed").some((e) => (p(e).fills as { side: string; qty: number }[]).some((f) => f.side === "sell" && f.qty > 0))).toBe(true);

@@ -4,6 +4,7 @@ import { verifyChain } from "../../src/events/chain";
 import { replay } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
 import { IngestedMarketData, type SourceQuote } from "../../src/ingest/market-data";
+import { cutoffOf } from "../../src/ledger/ledger";
 import { INITIAL_CASH } from "../../src/ledger/types";
 import { type RunnerAgent, type RunnerDeps, type StageResult, runDay, scheduleOf } from "../../src/runner/day";
 import { RunnerValues } from "../../src/runner/values";
@@ -66,8 +67,12 @@ describe("runDay（1日の流れ）", async () => {
 
   it("投稿→注文票の確定→約定→評価→引け後の処理が記録され、連鎖が通り、replay の台帳が保管と一致する", async () => {
     expect(await verifyChain(events)).toEqual([]);
-    expect(of("order_sheet.committed").length).toBe(2);
-    expect(of("fills.executed").map((e) => p(e).tradingDate)).toEqual([TRADING_DAYS[0], TRADING_DAYS[0]]);
+    // 売買しない日も空の注文票を確定し、空の約定を書く
+    expect(of("order_sheet.committed").length).toBe(2 * TRADING_DAYS.length);
+    expect(of("order_sheet.committed").filter((e) => (p(e).orders as unknown[]).length > 0).map((e) => p(e).tradingDate)).toEqual([TRADING_DAYS[0], TRADING_DAYS[0]]);
+    expect(of("fills.executed").map((e) => p(e).tradingDate)).toEqual(TRADING_DAYS.flatMap((d) => [d, d]));
+    expect(of("fills.executed").filter((e) => p(e).tradingDate !== TRADING_DAYS[0]).every((e) => (p(e).fills as unknown[]).length === 0)).toBe(true);
+    for (const f of of("fills.executed")) expect(of("order_sheet.committed").find((e) => e.seq === p(f).sheetSeq)!.recordedAt).toBeLessThan(cutoffOf(p(f).tradingDate as string));
     expect(of("post.published").length).toBe(2 * TRADING_DAYS.length);
     expect(of("valuation.recorded").length).toBe(2 * TRADING_DAYS.length);
     expect(of("corporate_actions.applied").length).toBe(2 * TRADING_DAYS.length);
@@ -139,6 +144,12 @@ describe("runDay の回し直しと失敗", () => {
     expect(events.filter((e) => e.type === "order_sheet.rejected").map((e) => [p(e).agentId, p(e).reason])).toEqual([["ai-b", "suspended"]]);
     expect(events.filter((e) => e.type === "fills.executed").map((e) => p(e).agentId)).toEqual(["ai-a"]);
     expect(events.filter((e) => e.type === "valuation.recorded").length).toBe(2);
+    // 売買しない日も同じ：投稿を止めたAIは空の注文票を確定して空の約定、注文を止めたAIは空の注文票が拒否として残る
+    await runDay(TRADING_DAYS[1], s.deps);
+    const day1 = (await s.all()).filter((e) => p(e).tradingDate === TRADING_DAYS[1]);
+    expect(day1.filter((e) => e.type === "order_sheet.committed").map((e) => [p(e).agentId, p(e).orders])).toEqual([["ai-a", []]]);
+    expect(day1.filter((e) => e.type === "fills.executed").map((e) => [p(e).agentId, p(e).fills])).toEqual([["ai-a", []]]);
+    expect(day1.filter((e) => e.type === "order_sheet.rejected").map((e) => [p(e).agentId, p(e).reason])).toEqual([["ai-b", "suspended"]]);
   });
 
   it("判断が例外を投げたAIは失敗の run を残し、ほかのAIと約定・評価は進む。回し直しても判断をやり直さない", async () => {
@@ -152,6 +163,9 @@ describe("runDay の回し直しと失敗", () => {
     expect(runs.map((e) => [p(e).ok, p(e).errorCode])).toEqual([[false, "provider_error"]]);
     expect(JSON.stringify(runs)).not.toContain("secret");
     expect(calls).toBe(1);
+    // 判断に失敗した日は、注文票を確定しない（空の注文票も書かない）。評価は進む
+    expect(events.filter((e) => e.type === "order_sheet.committed").map((e) => p(e).agentId)).toEqual(["ai-b"]);
+    expect(events.filter((e) => e.type === "valuation.recorded").map((e) => p(e).agentId).sort()).toEqual(["ai-b", "ai-x"]);
     expect(events.filter((e) => e.type === "fills.executed").map((e) => p(e).agentId)).toEqual(["ai-b"]);
   });
 
