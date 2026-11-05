@@ -60,6 +60,13 @@ describe("post.published の intent と stance（#107）", () => {
     }
   });
 
+  it("投稿を停止したAIは、一覧にない値でも理由 suspended で断る（停止を先に見る、EVENT_LOG §4）", async () => {
+    const { log, run } = await setup();
+    await ok(log, op("agent.suspended", jst("2026-11-09", 22, 30), { agentId: "alpha", scope: "posts", reason: "test" }));
+    const r = await log.append(post(run, { intent: "rumor" }));
+    expect(r.ok ? "ok" : r.reason).toBe("suspended");
+  });
+
   it("照合（admit・replay）でも、同じ理由で断る", async () => {
     const { log, run } = await setup();
     await ok(log, post(run, { intent: "strategy", stance: "bull" }));
