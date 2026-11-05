@@ -4,6 +4,7 @@ import { verifyChain } from "../../src/events/chain";
 import { replay } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
 import { IngestedMarketData, type SourceQuote } from "../../src/ingest/market-data";
+import { cutoffOf } from "../../src/ledger/ledger";
 import { INITIAL_CASH } from "../../src/ledger/types";
 import { type RunnerAgent, type RunnerDeps, type StageResult, runDay, scheduleOf } from "../../src/runner/day";
 import { RunnerValues } from "../../src/runner/values";
@@ -66,8 +67,12 @@ describe("runDay（1日の流れ）", async () => {
 
   it("投稿→注文票の確定→約定→評価→引け後の処理が記録され、連鎖が通り、replay の台帳が保管と一致する", async () => {
     expect(await verifyChain(events)).toEqual([]);
-    expect(of("order_sheet.committed").length).toBe(2);
-    expect(of("fills.executed").map((e) => p(e).tradingDate)).toEqual([TRADING_DAYS[0], TRADING_DAYS[0]]);
+    // 売買しない日も空の注文票を確定し、空の約定を書く
+    expect(of("order_sheet.committed").length).toBe(2 * TRADING_DAYS.length);
+    expect(of("order_sheet.committed").filter((e) => (p(e).orders as unknown[]).length > 0).map((e) => p(e).tradingDate)).toEqual([TRADING_DAYS[0], TRADING_DAYS[0]]);
+    expect(of("fills.executed").map((e) => p(e).tradingDate)).toEqual(TRADING_DAYS.flatMap((d) => [d, d]));
+    expect(of("fills.executed").filter((e) => p(e).tradingDate !== TRADING_DAYS[0]).every((e) => (p(e).fills as unknown[]).length === 0)).toBe(true);
+    for (const f of of("fills.executed")) expect(of("order_sheet.committed").find((e) => e.seq === p(f).sheetSeq)!.recordedAt).toBeLessThan(cutoffOf(p(f).tradingDate as string));
     expect(of("post.published").length).toBe(2 * TRADING_DAYS.length);
     expect(of("valuation.recorded").length).toBe(2 * TRADING_DAYS.length);
     expect(of("corporate_actions.applied").length).toBe(2 * TRADING_DAYS.length);

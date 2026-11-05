@@ -269,7 +269,8 @@ class Day {
       }
       const orderRun = await runSeq("order");
       const sheetDone = this.log.events.some((e) => (e.type === "order_sheet.committed" || e.type === "order_sheet.rejected") && pl(e).runSeq === orderRun);
-      if (decision.orders.length > 0 && !sheetDone) {
+      // 売買しない日も空の注文票を確定する（締めより前に「売買しない」と決めたことを残す。約定は空の fills.executed）
+      if (!sheetDone) {
         await this.sync(await this.deps.store.commitSheet(id, { tradingDate: date, orders: decision.orders, runSeq: orderRun, inputSeqs }), `commitSheet ${id}`);
         wrote = true;
       }
