@@ -311,7 +311,10 @@ class Day {
     return { stage: "open", status: wrote ? "written" : "done" };
   }
 
-  /** 終値を取り込み、AIごとに評価と引け後の処理。約定待ちの注文票や、企業行動の公表（#67 の後で扱う）があれば待つ */
+  /**
+   * 終値を取り込み、AIごとに評価と引け後の処理。引け後の処理には、権利落ち日が翌営業日の企業行動の公表をすべて
+   * （seq の昇順で）渡し、分割・配当を反映する（EVENT_LOG §3.3）。約定待ちの注文票があれば待つ
+   */
   async afterClose(date: string): Promise<StageResult> {
     const stage = "after_close";
     const unfilled = this.log.events.filter((e) => e.type === "order_sheet.committed" && (pl(e).tradingDate as string) <= date && !this.find("fills.executed", (p) => p.sheetSeq === e.seq));
@@ -319,11 +322,12 @@ class Day {
     const close = await this.ingest(date, "close");
     if (!("seq" in close)) return close;
     const exDate = nextBusinessDay(date, this.log.holidays());
-    if (this.find("corporate_action.announced", (p) => p.exDate === exDate)) return { stage, status: "waiting", detail: `corporate actions on ${exDate} are not handled yet (#67)` };
     // 前の日の引け後の処理が済んでいないAIがいれば、この日の評価もできない（順に1日ずつ進む）
     const prev = previousBusinessDay(date, this.log.holidays());
     const behind = this.agentsOn(prev).filter((id) => !this.find("corporate_actions.applied", (p) => p.agentId === id && p.asOf === prev));
     if (behind.length > 0) return { stage, status: "waiting", detail: `post-close of ${prev} not done: ${behind.join(",")}` };
+    // 公表は、どのAIもこの日の引け後の処理を済ませる前にしか書けない（#67）ので、ここで読んだものがすべて
+    const announcedSeqs = this.log.events.filter((e) => e.type === "corporate_action.announced" && pl(e).exDate === exDate).map((e) => e.seq);
     let wrote = false;
     for (const agentId of this.agentsOn(date)) {
       if (!this.find("valuation.recorded", (p) => p.agentId === agentId && p.date === date)) {
@@ -331,8 +335,8 @@ class Day {
         wrote = true;
       }
       if (!this.find("corporate_actions.applied", (p) => p.agentId === agentId && p.asOf === date && p.closedSeq === undefined)) {
-        const ca = await this.ledger.computeCorporate(agentId, date, exDate, []);
-        await this.append("corporate_actions.applied", "system", { agentId, asOf: date, exDate, announcedSeqs: [], ...ca.payload });
+        const ca = await this.ledger.computeCorporate(agentId, date, exDate, announcedSeqs);
+        await this.append("corporate_actions.applied", "system", { agentId, asOf: date, exDate, announcedSeqs, ...ca.payload }, announcedSeqs);
         wrote = true;
       }
     }

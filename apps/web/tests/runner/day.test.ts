@@ -171,18 +171,29 @@ describe("runDay の回し直しと失敗", () => {
     for (const e of prices) expect(events.filter((x) => x.type === "source.captured" && p(x).contentHash === p(e).valuesHash).length).toBe(1);
   });
 
-  it("前の日の引け後の処理が済んでいないAIは、判断を待つ（拒否の注文票を残さない）", async () => {
+  it("権利落ち日が翌営業日の公表（配当・分割）を、引け後の処理で反映する。replay の台帳も同じになる", async () => {
     const s = await setup();
-    // 権利落ち日が T1 の公表があると、T0 の引け後の処理は（#67 まで）待つ
-    const valuesHash = await s.values.putValue({ kind: "dividend", perShare: 100 });
-    await s.store.append({ type: "corporate_action.announced", actor: "system", refs: [], payload: { symbol: "TSTA", kind: "dividend", exDate: TRADING_DAYS[1], source: "fixture", valuesHash } });
-    await runDay(TRADING_DAYS[0], s.deps);
-    const before = (await s.all()).filter((e) => e.type === "agent.run").length;
-    const day = await runDay(TRADING_DAYS[1], s.deps);
-    expect(day.find((r) => r.stage === "decide")).toMatchObject({ status: "waiting" });
+    const announce = async (kind: "dividend" | "split", exDate: string, value: Record<string, unknown>) => {
+      const valuesHash = await s.values.putValue({ kind, ...value });
+      const r = await s.store.append({ type: "corporate_action.announced", actor: "system", refs: [], payload: { symbol: "TSTA", kind, exDate, source: "fixture", valuesHash } });
+      expect(r).toMatchObject({ ok: true });
+      return r.ok ? r.event.seq : 0;
+    };
+    const dividend = await announce("dividend", TRADING_DAYS[1], { perShare: 100 }); // 1株 10円
+    const split = await announce("split", TRADING_DAYS[2], { from: 1, to: 2 });
+    await runDay(TRADING_DAYS[0], s.deps); // 初日に TSTA を100株買う
+    const cashAfterBuy = (await s.all()).filter((e) => e.type === "valuation.recorded" && p(e).agentId === "ai-a").at(-1)!;
+    expect(s.store.account("ai-a").cash).toBe((p(cashAfterBuy).cash as number) + 100 * 100);
+    await runDay(TRADING_DAYS[1], s.deps);
+    expect(s.store.account("ai-a").holdings.TSTA?.qty).toBe(200);
     const events = await s.all();
-    expect(events.filter((e) => e.type === "agent.run").length).toBe(before);
-    expect(events.filter((e) => e.type === "order_sheet.rejected")).toEqual([]);
+    const applied = events.filter((e) => e.type === "corporate_actions.applied" && p(e).agentId === "ai-a").map((e) => [p(e).asOf, p(e).announcedSeqs]);
+    expect(applied).toEqual([[TRADING_DAYS[0], [dividend]], [TRADING_DAYS[1], [split]]]);
+    const ledger = await replay(events, s.values, { holidayTables: s.holidayTables });
+    for (const id of ["ai-a", "ai-b"]) expect(ledger.account(id)).toEqual(s.store.account(id));
+    const last = (await s.store.last())!.seq;
+    await runDay(TRADING_DAYS[1], s.deps);
+    expect((await s.store.last())!.seq).toBe(last);
   });
 
   it("注文の run を書いた後で落ちても、回し直せば同じ run から注文票を確定する（判断はやり直さない）", async () => {
