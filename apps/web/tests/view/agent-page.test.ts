@@ -136,10 +136,26 @@ describe("buildAgentPage（時点・順序・停止の細かい場合）", () =>
     expect(h.map((r) => [r.dateText, r.head, r.timeLabel, r.runSeq])).toEqual([["11/10", "売", "確定", null], ["11/10", "買", "確定", null], ["－", "注文票", "受付", 5]]);
   });
 
+  it("売買しない日（#102：空の注文票と空の約定）は『売買なし』の1行になる。約定のある日と並ぶ", () => {
+    n = 0;
+    const evs = [
+      ev("agent.registered", { agentId: "ai-ma5", displayName: "あ", startDate: "2026-11-09", initialCash: 10_000 }, 0), // seq 1
+      ev("order_sheet.committed", { agentId: "ai-ma5", tradingDate: "2026-11-09", runSeq: 11, orders: [] }, T("2026-11-06", 21)), // seq 2
+      ev("fills.executed", { agentId: "ai-ma5", sheetSeq: 2, openSeq: 0, tradingDate: "2026-11-09", fills: [] }, T("2026-11-09", 9)),
+      ev("order_sheet.committed", { agentId: "ai-ma5", tradingDate: "2026-11-10", runSeq: 12, orders: [{ symbol: "X1", side: "buy", qty: 100 }] }, T("2026-11-09", 21)), // seq 4
+      ev("fills.executed", { agentId: "ai-ma5", sheetSeq: 4, openSeq: 0, tradingDate: "2026-11-10", fills: [{ symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 90, amount: 9000, status: "filled" }] }, T("2026-11-10", 9)),
+    ];
+    const view2 = buildView([...evs, ev("valuation.recorded", { agentId: "ai-ma5", date: "2026-11-10", cash: 10_000, positions: [], total: 10_000 }, T("2026-11-10", 16))], () => undefined);
+    const p = buildAgentPage(view2, new Map(), "ai-ma5")!;
+    expect(p.history.map((r) => [r.dateText, r.head, r.status, r.runSeq])).toEqual([["11/10", "買", "約定", 12], ["11/09", "注文なし", "売買なし", 11]]);
+    expect(p.stats!.fills).toBe(1);
+  });
+
   it("停止中のAIには、その旨が出る（全体の停止も。再開で消える）", () => {
+    n = 2; // 登録の2件（seq 1・2）のあとに、停止（3）→再開（4）の順で置く
     const stop = ev("agent.suspended", { agentId: "*", scope: "orders", reason: "点検" }, T("2026-11-09", 10));
-    expect(buildAgentPage(base([stop], [["ai-ma5", "09", 10_000]]), new Map(), "ai-ma5")!.suspended).toBe("停止中（注文）");
     const resume = ev("agent.resumed", { agentId: "*", scope: "orders", reason: "解除" }, T("2026-11-09", 11));
+    expect(buildAgentPage(base([stop], [["ai-ma5", "09", 10_000]]), new Map(), "ai-ma5")!.suspended).toBe("停止中（注文）");
     expect(buildAgentPage(base([stop, resume], [["ai-ma5", "09", 10_000]]), new Map(), "ai-ma5")!.suspended).toBeNull();
   });
 
