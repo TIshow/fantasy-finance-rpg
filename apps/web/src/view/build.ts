@@ -78,6 +78,12 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => s
     if (it.kind !== "post" && it.kind !== "fill") continue;
     (threadMap.get(it.symbol) ?? threadMap.set(it.symbol, { symbol: it.symbol, items: [] }).get(it.symbol)!).items.push(it);
   }
-  const agents: AgentPerformance[] = [...days].map(([agentId, list]) => ({ agentId, agentName: nameOf(agentId), days: list.sort((a, b) => lessThan(a.date, b.date)) }));
+  // 登録されたAIは、まだ評価がなくても載せる（最初の日の前でも参戦中として見える）
+  const agents: AgentPerformance[] = [...new Set([...initial.keys(), ...days.keys()])].map((agentId) => ({
+    agentId,
+    agentName: nameOf(agentId),
+    initialCash: initial.get(agentId) ?? INITIAL_CASH,
+    days: (days.get(agentId) ?? []).sort((a, b) => lessThan(a.date, b.date)),
+  }));
   return { timeline, threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)) };
 }

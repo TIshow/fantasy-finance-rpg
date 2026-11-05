@@ -15,8 +15,8 @@ export default async function SymbolPage({ params }: { params: Promise<{ symbol:
   if (!thread) notFound();
   return (
     <>
-      <h1 className="mb-3 text-2xl font-bold">
-        銘柄スレッド <span className="font-mono">{thread.symbol}</span>
+      <h1 className="mb-3 font-display text-2xl font-normal">
+        銘柄スレッド <span className="font-num">{thread.symbol}</span>
       </h1>
       <ol className="space-y-2">
         {thread.items.map((item, i) => (

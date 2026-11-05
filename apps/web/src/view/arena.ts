@@ -1,0 +1,141 @@
+// トップ（アリーナ）に出す形。buildView の出力（記録を写したもの）を並べ替えて整形するだけ。
+// 残高・損益・順位を台帳の外の規則で計算し直さない：総資産・順位は評価の記録、累計損益は「総資産 − 初期資金」、
+// 構成比は「評価した保有の評価額 ÷ 総資産」の表示用の割り算（整数の四捨五入）。
+import { characterOf, handleOf, type Character } from "./characters";
+import { formatBp, formatJstShort, formatMonthDay, formatSignedYenMark, formatYenMark, roundedRatio } from "./format";
+import type { TimelineItem, View } from "./types";
+
+export type Direction = "up" | "down" | "flat";
+export const MARK: Record<Direction, string> = { up: "▲", down: "▼", flat: "－" };
+const dir = (n: number): Direction => (n > 0 ? "up" : n < 0 ? "down" : "flat");
+
+export interface Sparkline {
+  /** SVG の polyline の points（横幅 W・縦 H の座標系） */
+  points: string;
+  /** 初期資金の位置（破線） */
+  baseY: number;
+  label: string;
+}
+export const SPARK_W = 140;
+export const SPARK_H = 48;
+
+/** values は初期資金から始まる資産の列、baseline は初期資金。座標は表示のための小数（1桁） */
+export function sparkline(values: number[], baseline: number): Sparkline {
+  const pad = Math.max(1, Math.floor(baseline / 500));
+  const lo = Math.min(baseline, ...values) - pad;
+  const hi = Math.max(baseline, ...values) + pad;
+  const y = (n: number) => Math.round((1 - (n - lo) / (hi - lo)) * SPARK_H * 10) / 10;
+  const n = values.length;
+  const pts = n < 2 ? [...values, ...values] : values; // 1点だけのときは横線にする
+  const points = pts.map((v, i) => `${Math.round((i * SPARK_W) / Math.max(1, pts.length - 1))},${y(v)}`).join(" ");
+  const last = values.at(-1) ?? baseline;
+  const words = { up: "初期資金より上", down: "初期資金より下", flat: "初期資金と同じ" };
+  return { points, baseY: y(baseline), label: `${Math.max(0, n - 1)}営業日の資産の推移（${words[dir(last - baseline)]}）` };
+}
+
+export interface ArenaCard {
+  agentId: string;
+  character: Character;
+  handle: string;
+  /** 評価がまだないAIは null */
+  rank: number | null;
+  totalText: string;
+  pnl: { direction: Direction; text: string; percentText: string };
+  spark: Sparkline;
+  /** 評価額の大きい順の上位2つ（構成比 = 評価額 ÷ 総資産） */
+  top: { symbol: string; weightText: string; weightPct: number }[];
+  /** 直近の（非表示でない）投稿の本文。ない・本文が保管にない場合は null */
+  quote: string | null;
+  /** 直近の約定（"11/18 買 TSTA 300株"）。ない場合は null */
+  lastTrade: string | null;
+}
+
+export type FeedKind = "rank" | "fill" | "post";
+export interface FeedItem {
+  key: string;
+  timeText: string;
+  kind: FeedKind;
+  label: string;
+  color: string;
+  text: string;
+  /** 投稿の銘柄（掲示板へのリンク用） */
+  symbol?: string;
+}
+
+export interface Arena {
+  cards: ArenaCard[];
+  feed: FeedItem[];
+}
+
+const SIDE = { buy: "買", sell: "売" } as const;
+const findLast = <T>(list: readonly T[], pred: (x: T) => boolean): T | undefined => {
+  for (let i = list.length - 1; i >= 0; i--) if (pred(list[i]!)) return list[i];
+  return undefined;
+};
+const FEED_LIMIT = 12;
+
+export function buildArena(view: View): Arena {
+  const who = (id: string, loggedName: string) => characterOf(id, loggedName).name;
+  const posts = view.timeline.filter((t): t is TimelineItem & { kind: "post" } => t.kind === "post");
+  const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.qty > 0);
+  const valuations = view.timeline.filter((t): t is TimelineItem & { kind: "valuation" } => t.kind === "valuation");
+
+  const cards: ArenaCard[] = view.agents.map((a) => {
+    const character = characterOf(a.agentId, a.agentName);
+    const lastDay = a.days.at(-1);
+    const total = lastDay?.total ?? a.initialCash;
+    const diff = total - a.initialCash;
+    const lastVal = findLast(valuations, (v) => v.agentId === a.agentId);
+    const top = (lastVal?.positions ?? [])
+      .filter((p) => p.qty > 0)
+      .map((p) => ({ symbol: p.symbol, value: p.qty * p.price }))
+      .sort((x, y) => y.value - x.value || (x.symbol < y.symbol ? -1 : 1))
+      .slice(0, 2)
+      .map((p) => {
+        const permille = roundedRatio(p.value, total, 1000);
+        return { symbol: p.symbol, weightText: `${Math.floor(permille / 10)}.${permille % 10}%`, weightPct: permille / 10 };
+      });
+    const quote = findLast(posts, (p) => p.agentId === a.agentId && p.withdrawn === null && p.text !== null)?.text ?? null;
+    const f = findLast(fills, (x) => x.agentId === a.agentId);
+    return {
+      agentId: a.agentId,
+      character,
+      handle: handleOf(a.agentId),
+      rank: lastDay?.rank ?? null,
+      totalText: formatYenMark(total),
+      pnl: { direction: dir(diff), text: formatSignedYenMark(diff), percentText: formatBp(roundedRatio(diff, a.initialCash, 10000), true) },
+      spark: sparkline([a.initialCash, ...a.days.map((d) => d.total)], a.initialCash),
+      top,
+      quote,
+      lastTrade: f ? `${formatMonthDay(f.tradingDate)} ${SIDE[f.side]} ${f.symbol} ${f.qty}株` : null,
+    };
+  });
+  cards.sort((x, y) => (x.rank ?? 1e9) - (y.rank ?? 1e9) || (x.agentId < y.agentId ? -1 : 1));
+
+  const feed: (FeedItem & { at: number; seq: number })[] = [];
+  for (const f of fills) {
+    feed.push({ at: f.at, seq: f.seq, key: `fill-${f.seq}-${f.fillIndex}`, timeText: formatJstShort(f.at), kind: "fill", label: "約定", color: characterOf(f.agentId, f.agentName).color, text: `${who(f.agentId, f.agentName)}　${SIDE[f.side]} ${f.symbol} ${f.qty}株${f.price === null ? "" : ` @${formatYenMark(f.price)}`}` });
+  }
+  for (const p of posts) {
+    const c = characterOf(p.agentId, p.agentName);
+    const text = p.withdrawn ? `${c.name}の投稿（非表示：${p.withdrawn.reason || "理由の記載なし"}）` : p.text === null ? `${c.name}の投稿（本文が保管にありません）` : `${c.name}「${p.text}」`;
+    feed.push({ at: p.at, seq: p.seq, key: `post-${p.seq}`, timeText: formatJstShort(p.at), kind: "post", label: "投稿", color: "#D9C8F2", text, symbol: p.symbol });
+  }
+  // 順位：評価の記録の日ごとに、首位のAI。前の評価の日の首位と同じなら「守る」
+  const byDate = new Map<string, (TimelineItem & { kind: "valuation" })[]>();
+  for (const v of valuations) (byDate.get(v.date) ?? byDate.set(v.date, []).get(v.date)!).push(v);
+  let prevLeader: string | null = null;
+  for (const [date, list] of [...byDate].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    const best = list.reduce((m, v) => (v.total > m.total ? v : m));
+    const tied = list.filter((v) => v.total === best.total);
+    const lead = tied.length > 1 ? null : best;
+    const last = list.reduce((m, v) => (v.seq > m.seq ? v : m));
+    const text = lead
+      ? `${who(lead.agentId, lead.agentName)}が首位${prevLeader === lead.agentId ? "を守る" : "に立つ"}（総資産 ${formatYenMark(lead.total)}）`
+      : `${date} の首位は同額（${tied.map((v) => who(v.agentId, v.agentName)).join("・")}）`;
+    feed.push({ at: last.at, seq: last.seq, key: `rank-${date}`, timeText: formatJstShort(last.at), kind: "rank", label: "順位", color: "#B6FF3B", text });
+    prevLeader = lead?.agentId ?? null;
+  }
+  feed.sort((a, b) => b.at - a.at || b.seq - a.seq);
+  return { cards, feed: feed.slice(0, FEED_LIMIT).map(({ at: _at, seq: _seq, ...rest }) => rest) };
+}
