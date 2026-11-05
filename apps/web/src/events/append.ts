@@ -7,7 +7,7 @@ import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusiness
 import { INITIAL_CASH, type Account, type Order, type RejectReason } from "../ledger/types";
 import { CanonicalizeError } from "./canonical";
 import { sealEvent } from "./chain";
-import type { Actor, EventType, LogEvent } from "./types";
+import { POST_INTENTS, POST_STANCES, type Actor, type EventType, type LogEvent } from "./types";
 
 type Writer = "agent" | "system" | "operator";
 
@@ -368,6 +368,8 @@ export class EventLog {
         return p.purpose === "post" || p.purpose === "order" ? this.inputProblem(p.inputSeqs, null) : "purpose must be post or order";
       case "post.published":
         if (this.isSuspended(agentId, "posts")) return "suspended";
+        if (p.intent !== undefined && !(POST_INTENTS as readonly unknown[]).includes(p.intent)) return `intent must be one of ${POST_INTENTS.join(", ")}`;
+        if (p.stance !== undefined && !(POST_STANCES as readonly unknown[]).includes(p.stance)) return `stance must be one of ${POST_STANCES.join(", ")}`;
         return this.runProblem(d, agentId, "post");
       case "order_sheet.committed":
         // 保存済みのログの照合で、祝日の一覧が記録と違うときは、営業日の判定をやり直せない（D-031）
