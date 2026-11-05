@@ -175,7 +175,7 @@ describe("runDay の回し直しと失敗", () => {
     const s = await setup();
     // 権利落ち日が T1 の公表があると、T0 の引け後の処理は（#67 まで）待つ
     const valuesHash = await s.values.putValue({ kind: "dividend", perShare: 100 });
-    await s.store.append({ type: "corporate_action.announced", actor: "system", refs: [], payload: { symbol: "TSTA", exDate: TRADING_DAYS[1], source: "fixture", valuesHash } });
+    await s.store.append({ type: "corporate_action.announced", actor: "system", refs: [], payload: { symbol: "TSTA", kind: "dividend", exDate: TRADING_DAYS[1], source: "fixture", valuesHash } });
     await runDay(TRADING_DAYS[0], s.deps);
     const before = (await s.all()).filter((e) => e.type === "agent.run").length;
     const day = await runDay(TRADING_DAYS[1], s.deps);

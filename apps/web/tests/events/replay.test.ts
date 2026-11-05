@@ -47,7 +47,7 @@ async function start() {
   const op = (type: Draft["type"], recordedAt: number, payload: Record<string, unknown>): Draft => ({ type, recordedAt, actor: "operator:owner", refs: [], payload });
   await add(op("holidays.adopted", 0, { holidaysSha256: A }));
   await add(op("universe.set", 0, { symbols: ["AAA"] }));
-  const announce = async (at: number, exDate: string, value: unknown) => add(sys("corporate_action.announced", at, { symbol: "AAA", exDate, valuesHash: await store.put(value) }));
+  const announce = async (at: number, exDate: string, value: unknown) => add(sys("corporate_action.announced", at, { symbol: "AAA", kind: (value as { kind: string }).kind, exDate, valuesHash: await store.put(value) }));
 
   // alpha・beta が 11/10 の寄り付きで AAA を100株ずつ買う注文票を確定する
   const sheets: Record<string, number> = {};

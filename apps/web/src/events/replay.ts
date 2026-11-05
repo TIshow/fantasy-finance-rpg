@@ -154,6 +154,10 @@ export class Ledger {
         }
         break;
       }
+      case "corporate_action.announced":
+        // 値と種類をいま確かめる（引け後処理まで待つと、その権利落ち日の引け後処理が全員止まる）
+        await this.valuesOf(e.seq, "corporate_action.announced");
+        break;
       case "fills.executed": {
         const r = await this.computeFills(p.agentId as string, p.sheetSeq as number, p.openSeq as number | undefined);
         same(at, { fills: p.fills, accountHash: p.accountHash }, r.payload);
@@ -206,10 +210,22 @@ export class Ledger {
     const v = this.store.get(hash);
     if (!v) throw new Error(`seq ${seq}: values are not available`);
     if ((await bodyHash(v.salt, { value: v.value })) !== hash) throw new Error(`seq ${seq}: values do not match valuesHash`);
-    const bad = type === "corporate_action.announced" ? !isAnnouncement(v.value) : !isPrices(v.value);
-    if (bad) throw new Error(`seq ${seq}: values have the wrong shape for ${type}`);
+    if (type === "corporate_action.announced") {
+      const problem = announcementValueProblem(this.payloadOf(seq, type), v.value);
+      if (problem) throw new Error(`seq ${seq}: ${problem}`);
+    } else if (!isPrices(v.value)) throw new Error(`seq ${seq}: values have the wrong shape for ${type}`);
     return v.value;
   }
+}
+
+/**
+ * 公表のログの外の値が、形どおりで、イベントの種類（kind）と同じか。違えば理由。
+ * 台帳は公表を当てるときにこれで止まる。書く前の検査（保管の側）でも同じものを使う
+ */
+export function announcementValueProblem(payload: Readonly<Record<string, unknown>>, value: unknown): string | null {
+  if (!isAnnouncement(value)) return "values have the wrong shape for corporate_action.announced";
+  const kind = (value as { kind: string }).kind;
+  return kind === payload.kind ? null : `announced kind ${String(payload.kind)} does not match the values (${kind})`;
 }
 
 /** 記録と再計算を、正規化した JSON で比べる */

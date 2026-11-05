@@ -66,7 +66,7 @@ async function start() {
   }
   const close = await add(sys("prices.close", jst(D, 15, 30), { date: D, valuesHash: await store.put({ AAA: 11_000 }) }));
   /** 権利落ち日 exDate の公表（kind は配当か分割） */
-  const announce = async (at: number, exDate: string, value: Record<string, unknown>) => add(sys("corporate_action.announced", at, { symbol: "AAA", exDate, valuesHash: await store.put(value) }));
+  const announce = async (at: number, exDate: string, value: Record<string, unknown>) => add(sys("corporate_action.announced", at, { symbol: "AAA", kind: value.kind, exDate, valuesHash: await store.put(value) }));
   const valuate = async (at: number, id: string, date: string, closeSeq: number) => append(sys("valuation.recorded", at, { agentId: id, date, closeSeq, ...ledger.computeValuation(id, date) }, [closeSeq]));
   const postClose = async (at: number, id: string, asOf: string, exDate: string, announcedSeqs: number[], closedSeq?: number, actor: Draft["actor"] = "system") => {
     const ca = await ledger.computeCorporate(id, asOf, exDate, announcedSeqs);
@@ -81,9 +81,11 @@ async function start() {
 }
 
 describe("渡す公表（§3.3「権利落ち日が D の翌営業日のもの」）", () => {
-  it("権利落ち日が T の公表を混ぜる、NEXT の公表を一部だけ渡す、権利落ち日を T や NEXT の次にする追加の処理は書けない", async () => {
+  it("別の日の公表を混ぜる、NEXT の公表を一部だけ渡す、権利落ち日を T や NEXT の次にする追加の処理は書けない", async () => {
     const w = await start();
-    const onT = await w.announce(jst(D, 16), T, { kind: "dividend", perShare: 100 }); // 休場の日が権利落ち日（§6.2 の訂正で扱う）
+    // 権利落ち日が T の公表は、alpha が D の引け後処理を済ませたので、もう書けない（遅れた公表。#67）
+    await expect(w.announce(jst(D, 16), T, { kind: "dividend", perShare: 100 })).rejects.toThrow(/already finished the post-close/);
+    const later = await w.announce(jst(D, 16), "2026-11-13", { kind: "dividend", perShare: 100 }); // 権利落ち日が NEXT の次の日
     const a1 = await w.announce(jst(D, 16, 1), NEXT, { kind: "dividend", perShare: 500 });
     const a2 = await w.announce(jst(D, 16, 2), NEXT, { kind: "split", from: 1, to: 2 });
     const closed = await w.closeMarket(jst(T, 7));
@@ -91,12 +93,12 @@ describe("渡す公表（§3.3「権利落ち日が D の翌営業日のもの�
     // 反映した内容は正しい一覧で計算し、渡した公表の一覧だけを偽る（computeCorporate は偽の一覧で例外にするので）
     const ca = await w.ledger.computeCorporate("alpha", D, NEXT, [a1, a2]);
     const forged = (announcedSeqs: number[]) => w.append(w.sys("corporate_actions.applied", at, { agentId: "alpha", asOf: D, exDate: NEXT, announcedSeqs, closedSeq: closed, ...ca.payload }, [...announcedSeqs, closed]));
-    expect((await forged([onT, a1, a2])).ok).toBe(false);
+    expect((await forged([later, a1, a2])).ok).toBe(false);
     expect((await forged([a1])).ok).toBe(false);
     expect((await forged([a2, a1])).ok).toBe(false);
     expect((await forged([a1, a1, a2])).ok).toBe(false);
-    expect((await w.postClose(at, "alpha", D, T, [onT], closed)).ok).toBe(false);
-    expect((await w.postClose(at, "alpha", D, "2026-11-13", [], closed)).ok).toBe(false);
+    expect((await w.postClose(at, "alpha", D, T, [], closed)).ok).toBe(false);
+    expect((await w.postClose(at, "alpha", D, "2026-11-13", [later], closed)).ok).toBe(false);
     const ok = await w.postClose(at, "alpha", D, NEXT, [a1, a2], closed);
     expect(ok.ok).toBe(true);
     expect(w.ledger.account("alpha").holdings.AAA?.qty).toBe(200);

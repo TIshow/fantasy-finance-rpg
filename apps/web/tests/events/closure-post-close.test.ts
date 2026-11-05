@@ -70,7 +70,7 @@ async function start(holidays = SHA) {
   const close = await add(sys("prices.close", jst(D, 15, 30), { date: D, valuesHash: await store.put({ AAA: 11_000 }) }));
   await add(sys("valuation.recorded", jst(D, 15, 40), { agentId: "alpha", date: D, closeSeq: close, ...ledger.computeValuation("alpha", D) }, [close]));
   /** T の翌営業日（NEXT）が権利落ち日の配当（1株50円） */
-  const announce = async (at: number) => add(sys("corporate_action.announced", at, { symbol: "AAA", exDate: NEXT, valuesHash: await store.put({ kind: "dividend", perShare: 500 }) }));
+  const announce = async (at: number) => add(sys("corporate_action.announced", at, { symbol: "AAA", kind: "dividend", exDate: NEXT, valuesHash: await store.put({ kind: "dividend", perShare: 500 }) }));
   const closeMarket = (at: number) => add(op("market.closed", at, { date: T, reason: "test" }));
   return { store, ledger, log, append, add, sys, commit, postClose, announce, closeMarket };
 }
