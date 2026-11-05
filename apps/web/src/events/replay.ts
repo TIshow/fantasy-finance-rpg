@@ -17,6 +17,8 @@ export interface ValueStore {
 type Prices = Readonly<Record<string, Deciyen | null>>;
 type Announcement = { kind: "split"; from: number; to: number } | { kind: "dividend"; perShare: Deciyen };
 type Payload = Record<string, unknown>;
+/** 台帳に当てる（または当てられるかを確かめる）イベント */
+type Candidate = Pick<LogEvent, "seq" | "type" | "payload">;
 
 interface LatestClose {
   price: Deciyen;
@@ -126,56 +128,84 @@ export class Ledger {
   async apply(e: LogEvent): Promise<void> {
     if (this.failed) throw new Error(`ledger stopped at ${this.failed}`);
     if (e.seq !== this.byseq.length + 1) throw new Error(`seq ${e.seq} out of order`);
-    this.byseq.push(e);
     try {
-      await this.applyOne(e);
+      const commit = await this.evaluate(e);
+      // 呼び出し側は1件ずつ当てる。待つあいだに別の apply が進んでいたら、台帳がずれるので止める
+      if (e.seq !== this.byseq.length + 1) throw new Error(`seq ${e.seq} was applied concurrently`);
+      this.byseq.push(e);
+      commit();
     } catch (err) {
       this.failed = `seq ${e.seq}`;
       throw err;
     }
   }
 
-  private async applyOne(e: LogEvent): Promise<void> {
+  /**
+   * 次の seq に、このイベントを当てられるか。状態は変えない。断るなら理由を返す（apply なら例外になるもの）。
+   * apply と同じ evaluate を通すので、check が通れば apply も通り、check が断れば apply も断る。
+   * 保管は書く前にこれを呼び、台帳が断るイベントを追記だけのログに残さない。
+   * この保証は、check・書き込み・apply を同じ直列の区間で行い、そのあいだに別のイベントを当てないときだけ成り立つ。
+   * ログの外の値は、check の前に ValueStore に置いておく
+   */
+  async check(d: { type: LogEvent["type"]; payload: unknown }): Promise<string | null> {
+    if (this.failed) return `ledger stopped at ${this.failed}`;
+    try {
+      await this.evaluate({ seq: this.byseq.length + 1, type: d.type, payload: d.payload });
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  /** 1件を再計算して記録と照合する。状態は変えず、当てるための変更を返す。食い違えば例外 */
+  private async evaluate(e: Candidate): Promise<() => void> {
     const p = e.payload as Payload;
     const at = `seq ${e.seq} (${e.type})`;
+    const none = () => {};
     switch (e.type) {
       case "agent.registered":
         if (p.initialCash !== INITIAL_CASH) throw new Error(`${at}: initialCash must be INITIAL_CASH`);
-        this.accounts.set(p.agentId as string, newAccount());
-        break;
+        return () => this.accounts.set(p.agentId as string, newAccount());
+      case "prices.open":
+        // 値はいま確かめる（約定まで待つと、その日の約定が全員止まる）
+        await this.valuesOf(e.seq, "prices.open", e);
+        return none;
       case "prices.close": {
-        const closes = (await this.valuesOf(e.seq, "prices.close")) as Prices;
-        this.closesByDate.set(p.date as string, closes);
-        for (const [symbol, price] of Object.entries(closes)) {
-          if (price === null) continue;
-          const list = this.closeHistory.get(symbol) ?? [];
-          list.push({ price, seq: e.seq, date: p.date as string });
-          this.closeHistory.set(symbol, list);
-        }
-        break;
+        const closes = (await this.valuesOf(e.seq, "prices.close", e)) as Prices;
+        return () => {
+          this.closesByDate.set(p.date as string, closes);
+          for (const [symbol, price] of Object.entries(closes)) {
+            if (price === null) continue;
+            const list = this.closeHistory.get(symbol) ?? [];
+            list.push({ price, seq: e.seq, date: p.date as string });
+            this.closeHistory.set(symbol, list);
+          }
+        };
       }
       case "corporate_action.announced":
         // 値と種類をいま確かめる（引け後処理まで待つと、その権利落ち日の引け後処理が全員止まる）
-        await this.valuesOf(e.seq, "corporate_action.announced");
-        break;
+        await this.valuesOf(e.seq, "corporate_action.announced", e);
+        return none;
       case "fills.executed": {
         const r = await this.computeFills(p.agentId as string, p.sheetSeq as number, p.openSeq as number | undefined);
         same(at, { fills: p.fills, accountHash: p.accountHash }, r.payload);
-        this.accounts.set(p.agentId as string, r.account);
-        break;
+        return () => this.accounts.set(p.agentId as string, r.account);
       }
       case "corporate_actions.applied": {
         const r = await this.computeCorporate(p.agentId as string, p.asOf as string, p.exDate as string, p.announcedSeqs as number[]);
         same(at, { actions: p.actions, accountHash: p.accountHash }, r.payload);
-        this.accounts.set(p.agentId as string, r.account);
-        const mine = this.splitsApplied.get(p.agentId as string) ?? new Map<string, string[]>();
-        for (const s of r.splitSymbols) mine.set(s, [...(mine.get(s) ?? []), p.exDate as string]);
-        this.splitsApplied.set(p.agentId as string, mine);
-        break;
+        return () => {
+          this.accounts.set(p.agentId as string, r.account);
+          const mine = this.splitsApplied.get(p.agentId as string) ?? new Map<string, string[]>();
+          for (const s of r.splitSymbols) mine.set(s, [...(mine.get(s) ?? []), p.exDate as string]);
+          this.splitsApplied.set(p.agentId as string, mine);
+        };
       }
       case "valuation.recorded":
         same(at, { cash: p.cash, positions: p.positions, total: p.total }, this.computeValuation(p.agentId as string, p.date as string));
-        break;
+        return none;
+      default:
+        return none;
     }
   }
 
@@ -197,21 +227,22 @@ export class Ledger {
     return best;
   }
 
-  private payloadOf(seq: number, type: LogEvent["type"]): Payload {
-    const e = this.byseq[seq - 1];
+  /** seq のイベントの中身。self は、まだ当てていない（evaluate 中の）イベント */
+  private payloadOf(seq: number, type: LogEvent["type"], self?: Candidate): Payload {
+    const e = self?.seq === seq ? self : this.byseq[seq - 1];
     if (e?.type !== type) throw new Error(`seq ${seq} is not ${type}`);
     return e.payload as Payload;
   }
 
   /** ログの外の値を受け取り、イベントに書いたハッシュと合うかを確かめる */
-  private async valuesOf(seq: number, type: LogEvent["type"]): Promise<unknown> {
-    const hash = this.payloadOf(seq, type).valuesHash;
+  private async valuesOf(seq: number, type: LogEvent["type"], self?: Candidate): Promise<unknown> {
+    const hash = this.payloadOf(seq, type, self).valuesHash;
     if (typeof hash !== "string") throw new Error(`seq ${seq}: valuesHash is missing`);
     const v = this.store.get(hash);
     if (!v) throw new Error(`seq ${seq}: values are not available`);
     if ((await bodyHash(v.salt, { value: v.value })) !== hash) throw new Error(`seq ${seq}: values do not match valuesHash`);
     if (type === "corporate_action.announced") {
-      const problem = announcementValueProblem(this.payloadOf(seq, type), v.value);
+      const problem = announcementValueProblem(this.payloadOf(seq, type, self), v.value);
       if (problem) throw new Error(`seq ${seq}: ${problem}`);
     } else if (!isPrices(v.value)) throw new Error(`seq ${seq}: values have the wrong shape for ${type}`);
     return v.value;
