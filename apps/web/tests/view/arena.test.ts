@@ -11,6 +11,11 @@ const ev = (type: LogEvent["type"], payload: object, at: number): LogEvent => ({
 const T = (date: string, hh: number) => Date.parse(`${date}T${String(hh).padStart(2, "0")}:00:00+09:00`);
 
 describe("キャラの設定の表", () => {
+  it("ゴールデンログのAIは見た目だけ借り、方針の二つ名は出さない", () => {
+    expect(characterOf("ai-a", "x").title).toContain("表示確認用");
+    expect(characterOf("ai-ma5", "x").title).toContain("トレンドフォロー");
+  });
+
   it("決めたIDとゴールデンログのIDは同じキャラに引ける", () => {
     expect(characterOf("ai-ma5", "x")).toMatchObject({ look: "mia", name: "ミア・ファイヴ", color: "#00E5FF" });
     expect(characterOf("ai-reversal", "x")).toMatchObject({ look: "riva", name: "リバ・ゼロ", color: "#FF2E88" });
@@ -88,13 +93,13 @@ describe("buildArena（手で組んだ小さなログ）", () => {
   it("順位の順に並び、評価のないAIも出る（順位なし）。人数は登録されたAI", () => {
     expect(arena.cards.map((c) => [c.agentId, c.rank])).toEqual([["ai-ma5", 1], ["ai-hold", 2], ["ai-new", null]]);
     expect(byId["ai-new"]!.character.look).toBe("locked");
-    expect(byId["ai-new"]!.totalText).toBe("¥100"); // 初期資金 1000（0.1円単位）
+    // 評価のないAIは、初期資金などで埋めず「評価前」（数字は記録にあるものだけ）
+    expect(byId["ai-new"]!).toMatchObject({ totalText: null, asOf: null, pnl: null, spark: null, loggedName: "新人" });
   });
 
   it("総資産と累計損益は記録から。上昇は▲、下落は▼、同じなら－", () => {
-    expect(byId["ai-ma5"]!).toMatchObject({ totalText: "¥120", pnl: { direction: "up", text: "+¥20", percentText: "+20.00%" } });
+    expect(byId["ai-ma5"]!).toMatchObject({ totalText: "¥120", asOf: "11/10", pnl: { direction: "up", text: "+¥20", percentText: "+20.00%" } });
     expect(byId["ai-hold"]!.pnl).toMatchObject({ direction: "down", text: "-¥10", percentText: "-10.00%" });
-    expect(byId["ai-new"]!.pnl).toMatchObject({ direction: "flat", text: "¥0", percentText: "0.00%" });
   });
 
   it("持ち株の上位2つは評価額の大きい順で、構成比は評価額÷総資産", () => {
@@ -144,5 +149,38 @@ describe("buildArena（ゴールデンログ）", async () => {
     expect(arena.feed.length).toBeLessThanOrEqual(12);
     expect(arena.feed.length).toBeGreaterThan(0);
     expect(new Set(arena.feed.map((f) => f.key)).size).toBe(arena.feed.length);
+  });
+});
+
+describe("buildArena（順位とフィードの細かい場合）", () => {
+  const T0 = Date.parse("2026-11-09T16:00:00+09:00");
+  const mk = (totals: [string, number][][], extra: LogEvent[] = []) => {
+    n = 0;
+    const evs = [
+      ev("agent.registered", { agentId: "p", displayName: "P", startDate: "2026-11-09", initialCash: 1000 }, 0),
+      ev("agent.registered", { agentId: "q", displayName: "Q", startDate: "2026-11-09", initialCash: 1000 }, 0),
+      ...extra,
+      ...totals.flatMap((day, i) => day.map(([id, total]) => ev("valuation.recorded", { agentId: id, date: `2026-11-${String(9 + i).padStart(2, "0")}`, cash: total, positions: [], total }, T0 + i * 86_400_000))),
+    ];
+    return buildArena(buildView(evs, () => undefined));
+  };
+
+  it("首位が同額なら『同額』、前の日と同じ首位なら『守る』、変われば『立つ』", () => {
+    const a = mk([[["p", 1100], ["q", 1100]], [["p", 1200], ["q", 1100]], [["p", 1200], ["q", 1300]]]);
+    const nameOf = (id: string) => id.toUpperCase(); // 未知のIDなので記録の名前（P・Q）
+    expect(a.feed.map((f) => f.text)).toEqual([`${nameOf("q")}が首位に立つ（総資産 ¥130）`, `${nameOf("p")}が首位に立つ（総資産 ¥120）`, expect.stringContaining("同額")]);
+    const keep = mk([[["p", 1100], ["q", 1000]], [["p", 1200], ["q", 1000]]]);
+    expect(keep.feed[0]!.text).toContain("首位を守る");
+  });
+
+  it("本文が保管にない投稿はその旨を出し、フィードは12件で新しいものが残る", () => {
+    const posts = Array.from({ length: 14 }, (_, i) => ev("post.published", { agentId: "p", board: "X1", bodyHash: "none", citeSeqs: [], runSeq: 1 }, T0 + 1_000_000 + i * 1000));
+    const a = mk([[["p", 1100], ["q", 1000]]], posts);
+    expect(a.feed).toHaveLength(12);
+    expect(a.feed.every((f) => f.kind === "post")).toBe(true); // 評価の記録（T0）より新しい投稿が先に残る
+    expect(a.feed[0]!.text).toContain("本文が保管にありません");
+    const seqs = a.feed.map((f) => Number(f.key.replace("post-", "")));
+    expect(seqs).toEqual([...seqs].sort((x, y) => y - x)); // 新しい順
+    expect(seqs[0]! - seqs[11]!).toBe(11); // 古い2件が落ちる
   });
 });

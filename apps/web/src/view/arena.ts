@@ -36,12 +36,17 @@ export function sparkline(values: number[], baseline: number): Sparkline {
 export interface ArenaCard {
   agentId: string;
   character: Character;
+  /** 記録の displayName（ほかの画面と照らし合わせるため、カードにも出す） */
+  loggedName: string;
   handle: string;
   /** 評価がまだないAIは null */
   rank: number | null;
-  totalText: string;
-  pnl: { direction: Direction; text: string; percentText: string };
-  spark: Sparkline;
+  /** 総資産と損益は最後の評価の記録から。評価がまだなければ null（初期資金などで埋めない） */
+  totalText: string | null;
+  /** 総資産の基準の日（最後の評価の日 "11/13"） */
+  asOf: string | null;
+  pnl: { direction: Direction; text: string; percentText: string } | null;
+  spark: Sparkline | null;
   /** 評価額の大きい順の上位2つ（構成比 = 評価額 ÷ 総資産） */
   top: { symbol: string; weightText: string; weightPct: number }[];
   /** 直近の（非表示でない）投稿の本文。ない・本文が保管にない場合は null */
@@ -83,8 +88,8 @@ export function buildArena(view: View): Arena {
   const cards: ArenaCard[] = view.agents.map((a) => {
     const character = characterOf(a.agentId, a.agentName);
     const lastDay = a.days.at(-1);
-    const total = lastDay?.total ?? a.initialCash;
-    const diff = total - a.initialCash;
+    const total = lastDay?.total;
+    const diff = total === undefined ? 0 : total - a.initialCash;
     const lastVal = findLast(valuations, (v) => v.agentId === a.agentId);
     const top = (lastVal?.positions ?? [])
       .filter((p) => p.qty > 0)
@@ -92,7 +97,7 @@ export function buildArena(view: View): Arena {
       .sort((x, y) => y.value - x.value || (x.symbol < y.symbol ? -1 : 1))
       .slice(0, 2)
       .map((p) => {
-        const permille = roundedRatio(p.value, total, 1000);
+        const permille = roundedRatio(p.value, total ?? a.initialCash, 1000);
         return { symbol: p.symbol, weightText: `${Math.floor(permille / 10)}.${permille % 10}%`, weightPct: permille / 10 };
       });
     const quote = findLast(posts, (p) => p.agentId === a.agentId && p.withdrawn === null && p.text !== null)?.text ?? null;
@@ -100,11 +105,13 @@ export function buildArena(view: View): Arena {
     return {
       agentId: a.agentId,
       character,
+      loggedName: a.agentName,
       handle: handleOf(a.agentId),
       rank: lastDay?.rank ?? null,
-      totalText: formatYenMark(total),
-      pnl: { direction: dir(diff), text: formatSignedYenMark(diff), percentText: formatBp(roundedRatio(diff, a.initialCash, 10000), true) },
-      spark: sparkline([a.initialCash, ...a.days.map((d) => d.total)], a.initialCash),
+      totalText: total === undefined ? null : formatYenMark(total),
+      asOf: lastDay ? formatMonthDay(lastDay.date) : null,
+      pnl: total === undefined ? null : { direction: dir(diff), text: formatSignedYenMark(diff), percentText: formatBp(roundedRatio(diff, a.initialCash, 10000), true) },
+      spark: a.days.length === 0 ? null : sparkline([a.initialCash, ...a.days.map((d) => d.total)], a.initialCash),
       top,
       quote,
       lastTrade: f ? `${formatMonthDay(f.tradingDate)} ${SIDE[f.side]} ${f.symbol} ${f.qty}株` : null,

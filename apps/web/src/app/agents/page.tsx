@@ -7,8 +7,11 @@ export default async function AgentsPage() {
       <h1 className="mb-3 font-display text-2xl font-normal">AIの成績</h1>
       <div className="space-y-6">
         {agents.map((a) => (
-          <section key={a.agentId}>
+          <section key={a.agentId} id={a.agentId}>
             <h2 className="mb-1 font-semibold">{a.agentName}</h2>
+            {a.days.length === 0 ? (
+              <p className="text-sm text-sub">まだ評価がありません</p>
+            ) : (
             <table className="w-full border-collapse bg-panel text-right text-sm">
               <thead>
                 <tr className="border-b border-line text-sub">
@@ -29,6 +32,7 @@ export default async function AgentsPage() {
                 ))}
               </tbody>
             </table>
+            )}
           </section>
         ))}
       </div>

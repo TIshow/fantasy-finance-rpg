@@ -11,9 +11,11 @@ import { characterOf } from "../../src/view/characters";
 const card = (over: Partial<ArenaCard> = {}): ArenaCard => ({
   agentId: "ai-reversal",
   character: characterOf("ai-reversal", "x"),
+  loggedName: "x",
   handle: "@ai-reversal",
   rank: 2,
   totalText: "¥9,900,000",
+  asOf: "11/18",
   pnl: { direction: "down", text: "-¥100,000", percentText: "-1.00%" },
   spark: { points: "0,10 140,30", baseY: 20, label: "2営業日の資産の推移（初期資金より下）" },
   top: [{ symbol: "TSTB", weightText: "31.4%", weightPct: 31.4 }],
@@ -67,19 +69,23 @@ describe("カードの部品", () => {
     expect(h).toContain("本文そのまま");
     expect(h).toContain("31.4%");
     expect(h).toContain("2営業日の資産の推移");
+    expect(h).toContain("11/18 引け");
+    expect(h).toContain('href="/agents#ai-reversal"');
   });
 
   it("投稿・保有・売買がない、評価がまだないカードも壊れない", () => {
-    const h = renderToStaticMarkup(<AgentCardView card={card({ rank: null, quote: null, top: [], lastTrade: null, pnl: { direction: "flat", text: "¥0", percentText: "0.00%" } })} />);
+    const h = renderToStaticMarkup(<AgentCardView card={card({ rank: null, quote: null, top: [], lastTrade: null, totalText: null, asOf: null, pnl: null, spark: null })} />);
     expect(h).toContain("#－");
     expect(h).toContain("まだ投稿がありません");
     expect(h).toContain("保有なし");
     expect(h).toContain("売買なし");
-    expect(h).toContain("－ 0.00%");
+    expect(h).toContain("評価前");
+    expect(h).not.toContain("<polyline");
+    expect(h).not.toMatch(/[▲▼－] /);
   });
 
   it("未知のAIは伏せカードの肖像で、記録の名前を出す", () => {
-    const h = renderToStaticMarkup(<AgentCardView card={card({ character: characterOf("ai-new", "新人さん") })} />);
+    const h = renderToStaticMarkup(<AgentCardView card={card({ character: characterOf("ai-new", "新人さん"), loggedName: "新人さん" })} />);
     expect(h).toContain("新人さん");
     expect(h).toContain("まだ参戦していないAIのシルエット");
   });
@@ -101,9 +107,23 @@ describe("カードの部品", () => {
     expect(h).not.toMatch(/<image|href="http/);
   });
 
+  it("キャラの名前が記録の名前と違うときは、記録の名前も出す", () => {
+    expect(renderToStaticMarkup(<AgentCardView card={card({ loggedName: "テストAI・い" })} />)).toContain("記録名 テストAI・い");
+  });
+
   it("フィードの投稿は掲示板へのリンクを持つ", () => {
     const h = renderToStaticMarkup(<LiveFeedView feed={[{ key: "p", timeText: "11/18 16:58", kind: "post", label: "投稿", color: "#D9C8F2", text: "リバ・ゼロ「x」", symbol: "TSTA" }]} />);
     expect(h).toContain('href="/symbols/TSTA"');
     expect(h).toContain("11/18 16:58");
+  });
+});
+
+describe("タイムライン・成績のページ", () => {
+  it("/timeline は全項目を出し、入力の要素がない。評価のないAIは成績の表の代わりに文を出す", async () => {
+    const { default: TimelinePage } = await import("../../src/app/timeline/page");
+    const h = renderToStaticMarkup(await TimelinePage());
+    expect(h).toContain("タイムライン");
+    expect(h.match(/<time /g)?.length).toBe((await getView()).timeline.length);
+    expect(h).not.toMatch(/<(form|input|textarea|select|button)\b/i);
   });
 });

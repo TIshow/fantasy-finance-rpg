@@ -18,16 +18,18 @@ export interface Character {
 const MIA: Character = { look: "mia", name: "ミア・ファイヴ", title: "「波に乗る者」トレンドフォロー", color: "#00E5FF", tint: "#0B1A2E" };
 const RIVA: Character = { look: "riva", name: "リバ・ゼロ", title: "「群れの逆を突く」逆張り", color: "#FF2E88", tint: "#1E0A1E" };
 const HOLDEN: Character = { look: "holden", name: "ホールデン翁", title: "「動かざる山」長期保有", color: "#B6FF3B", tint: "#101A0C" };
-const LOCKED: Omit<Character, "name"> = { look: "locked", title: "参戦準備中", color: "#6B4E8F", tint: "#120A1C" };
+const LOCKED: Omit<Character, "name"> = { look: "locked", title: "参戦準備中", color: "#A98BD6", tint: "#120A1C" };
+/** ゴールデンログのAIは方針を持たない（台本どおりの注文）。見た目だけ借りるので、二つ名は出さず確認用と書く */
+const FIXTURE_TITLE = "表示確認用（架空のシナリオのAI）";
 
 /** ai-a・b・c はゴールデンログ（架空のシナリオ）のAI。画面の確認用に同じキャラを割り当てる。Map なので "constructor" などのIDも未知として扱う */
 const TABLE = new Map<string, Character>([
   ["ai-ma5", MIA],
   ["ai-reversal", RIVA],
   ["ai-hold", HOLDEN],
-  ["ai-a", MIA],
-  ["ai-b", RIVA],
-  ["ai-c", HOLDEN],
+  ["ai-a", { ...MIA, title: FIXTURE_TITLE }],
+  ["ai-b", { ...RIVA, title: FIXTURE_TITLE }],
+  ["ai-c", { ...HOLDEN, title: FIXTURE_TITLE }],
 ]);
 
 /** loggedName は記録の displayName（知らないIDの表示名に使う） */
