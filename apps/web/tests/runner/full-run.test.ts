@@ -42,7 +42,7 @@ function quotes(seed: number, lateFetchAt: number): { fetchedAt: number; quote: 
 }
 
 /** AIが受け取った入力（先読みの検査に使う） */
-type Seen = { agentId: string; tradingDate: string; at: number; closes: { seq: number; date: string }[] };
+type Seen = { agentId: string; tradingDate: string; at: number; closes: { seq: number; date: string; tstc: number | null | undefined }[]; splitSeqs: number[] };
 
 /**
  * 保管・取り込み・runner を組み、前営業日から10営業日を回す。取り込みは取得の時刻に staticSource から行う。
@@ -70,7 +70,7 @@ async function run(seed: number, opts: { lateFetchAt?: number; interrupt?: boole
   const agents = (await ruleAgents()).map((a) => ({
     ...a,
     decide: (input: Parameters<typeof a.decide>[0]) => {
-      seen.push({ agentId: a.id, tradingDate: input.tradingDate, at: input.at, closes: input.closes.map((c) => ({ seq: c.seq, date: c.date })) });
+      seen.push({ agentId: a.id, tradingDate: input.tradingDate, at: input.at, closes: input.closes.map((c) => ({ seq: c.seq, date: c.date, tstc: c.prices.TSTC })), splitSeqs: input.splits.map((x) => x.seq) });
       return a.decide(input);
     },
   }));
@@ -126,6 +126,25 @@ describe("規則のAI 3体で10営業日を通す", async () => {
       return x.qty * x.price;
     };
     expect(Math.abs(tstc(DAYS[6]!) - tstc(DAYS[5]!))).toBeLessThan(tstc(DAYS[5]!) * 0.15);
+  });
+
+  it("分割の後の判断には、調整した終値の列を渡し、分割の公表と、それを反映した引け後の処理を入力に残す", () => {
+    const split = of("corporate_action.announced").find((e) => p(e).kind === "split")!;
+    const after = r.seen.filter((x) => x.tradingDate >= DAYS[6]! && x.closes.some((c) => c.date < DAYS[6]!));
+    expect(after.length).toBeGreaterThan(0);
+    for (const x of after) {
+      expect(x.splitSeqs).toEqual([split.seq]);
+      const run = of("agent.run").find((e) => p(e).agentId === x.agentId && p(e).startedAt === x.at)!;
+      const inputs = p(run).inputSeqs as number[];
+      expect(inputs).toContain(split.seq);
+      const applied = of("corporate_actions.applied").find((e) => p(e).agentId === x.agentId && p(e).exDate === DAYS[6])!;
+      expect(inputs).toContain(applied.seq);
+      // 列が分割の日の前後で続いている（1日の値動きは10%に収まる。調整しなければ半分になる）
+      const xs = x.closes.map((c) => c.tstc as number);
+      for (let i = 1; i < xs.length; i++) expect(Math.abs(xs[i]! - xs[i - 1]!)).toBeLessThan(xs[i - 1]! * 0.15);
+    }
+    // 分割より前の判断には、分割を渡さない
+    expect(r.seen.filter((x) => x.tradingDate < DAYS[6]!).every((x) => x.splitSeqs.length === 0)).toBe(true);
   });
 
   it("(b) replay で先頭から作り直した台帳が、記録（保管の口座）と一致する", async () => {
