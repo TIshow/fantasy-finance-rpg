@@ -16,7 +16,7 @@ export type TimelineItem =
   | (Base & { kind: "order_sheet"; tradingDate: string; runSeq: number; orders: { symbol: string; side: Side; qty: number }[] })
   | (Base & { kind: "fill"; fillIndex: number; sheetSeq: number; tradingDate: string; symbol: string; side: Side; requestedQty: number; qty: number; price: Deciyen | null; priceText: string | null; status: FillStatus; reason?: FillReason })
   | (Base & { kind: "valuation"; date: string; cash: Deciyen; positions: ValuedPosition[]; total: Deciyen; totalText: string; change: Deciyen; changeText: string })
-  | (Base & { kind: "rejected"; tradingDate: string; reason: RejectReason })
+  | (Base & { kind: "rejected"; tradingDate: string; reason: RejectReason; runSeq: number | null })
   /** agentId が "*" なら全体 */
   | (Base & { kind: "suspension"; action: "suspended" | "resumed"; scope: "posts" | "orders" | "both"; reason: string });
 

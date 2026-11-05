@@ -49,7 +49,7 @@ describe("buildAgentPage（手で組んだ小さなログ）", () => {
   });
 
   it("持ち株は評価の記録と台帳の口座から。株数が合わないときは取得単価・含み損益を出さない", () => {
-    expect(page.holdings).toEqual([{ symbol: "X1", qty: 100, valueText: "¥1,200", weightText: "80.0%", closeText: "¥12", unitCostText: "¥10", unrealized: { direction: "up", text: "▲ +¥200" } }]);
+    expect(page.holdings).toEqual([{ symbol: "X1", qty: 100, valueText: "¥1,200", weightText: "80.0%", closeText: "¥12", stale: false, unitCostText: "¥10", unrealized: { direction: "up", text: "▲ +¥200" } }]);
     expect(page.cash).toEqual({ text: "¥300", weightText: "20.0%" });
     const off = buildAgentPage(view, acct({ X1: { qty: 200, cost: 20_000 } }), "ai-ma5")!.holdings[0]!;
     expect([off.unitCostText, off.unrealized]).toEqual([null, null]);
@@ -68,7 +68,83 @@ describe("buildAgentPage（手で組んだ小さなログ）", () => {
   it("推移は全AIを重ね、このAIを最後に太く描く。全部の点が枠の中", () => {
     expect(page.chart!.lines.map((l) => [l.agentId, l.bold])).toEqual([["ai-hold", false], ["ai-ma5", true]]);
     for (const l of page.chart!.lines) for (const pt of l.points.split(" ")) { const [x, y] = pt.split(",").map(Number); expect(x).toBeGreaterThanOrEqual(0), expect(x).toBeLessThanOrEqual(600), expect(y).toBeGreaterThanOrEqual(0), expect(y).toBeLessThanOrEqual(200); }
-    expect(page.chart).toMatchObject({ from: "11/09", to: "11/10" });
+    expect(page.chart).toMatchObject({ to: "11/10" });
+    expect(page.chart!.lines.map((l) => l.name)).toEqual(["ホールデン翁", "ミア・ファイヴ"]);
+  });
+});
+
+describe("buildAgentPage（時点・順序・停止の細かい場合）", () => {
+  const base = (extra: LogEvent[], vals: [string, string, number, object[]?][]) => {
+    n = 0;
+    return buildView(
+      [
+        ev("agent.registered", { agentId: "ai-ma5", displayName: "あ", startDate: "2026-11-09", initialCash: 10_000 }, 0),
+        ev("agent.registered", { agentId: "ai-hold", displayName: "い", startDate: "2026-11-09", initialCash: 10_000 }, 0),
+        ...extra,
+        ...vals.map(([id, date, total, positions]) => ev("valuation.recorded", { agentId: id, date: `2026-11-${date}`, cash: total, positions: positions ?? [], total }, T(`2026-11-${date}`, 16))),
+      ],
+      () => undefined,
+    );
+  };
+  const held = acct({ X1: { qty: 100, cost: 10_000 } });
+
+  it("最後の評価より後に約定があれば、株数が同じでも取得単価・含み損益を出さない", () => {
+    const evs = [ev("fills.executed", { agentId: "ai-ma5", sheetSeq: 0, tradingDate: "2026-11-10", fills: [{ symbol: "X1", side: "sell", requestedQty: 100, qty: 100, price: 90, amount: 9000, status: "filled" }] }, T("2026-11-10", 9))];
+    const v = base(evs, [["ai-ma5", "09", 12_000, [pos("X1", 100, 120)]], ["ai-hold", "09", 10_000]]);
+    const h = buildAgentPage(v, held, "ai-ma5")!.holdings[0]!;
+    expect([h.unitCostText, h.unrealized]).toEqual([null, null]);
+    // 約定が評価より前なら出る
+    n = 0;
+    const v2 = base([], [["ai-ma5", "09", 12_000, [pos("X1", 100, 120)]]]);
+    expect(buildAgentPage(v2, held, "ai-ma5")!.holdings[0]!.unitCostText).toBe("¥10");
+  });
+
+  it("評価が書きかけの日は、順位とバッジに数えない（先に評価されたAIが仮に1位になる）", () => {
+    const v = base([], [["ai-ma5", "09", 11_000], ["ai-hold", "09", 10_000], ["ai-ma5", "10", 12_000]]); // 10日は ai-hold がまだ
+    const p = buildAgentPage(v, new Map(), "ai-ma5")!;
+    expect(p.rank).toBe(1); // 9日（そろった日）の順位
+    expect(p.badges).not.toContain("連続首位 2日");
+    expect(buildArena(v).cards.find((c) => c.agentId === "ai-ma5")!.rank).toBe(1);
+    // そろえば数える
+    const done = base([], [["ai-ma5", "09", 11_000], ["ai-hold", "09", 10_000], ["ai-ma5", "10", 12_000], ["ai-hold", "10", 10_000]]);
+    expect(buildAgentPage(done, new Map(), "ai-ma5")!.badges).toContain("連続首位 2日");
+    // 開始が遅いAI（まだ1日も評価がない）は、そろった日の判定を止めない
+    const late = base([], [["ai-ma5", "09", 11_000]]);
+    expect(buildAgentPage(late, new Map(), "ai-ma5")!.rank).toBe(1);
+  });
+
+  it("直近の終値で評価した保有には、その印がつく", () => {
+    const evs: LogEvent[] = [];
+    const v = base(evs, [["ai-ma5", "09", 12_000, [{ ...pos("X1", 100, 120) }]]]);
+    expect(buildAgentPage(v, held, "ai-ma5")!.holdings[0]!.stale).toBe(false);
+    const staleView = { ...v, timeline: v.timeline.map((t) => (t.kind === "valuation" ? { ...t, positions: t.positions.map((q) => ({ ...q, stale: true })) } : t)) };
+    expect(buildAgentPage(staleView, held, "ai-ma5")!.holdings[0]!.stale).toBe(true);
+  });
+
+  it("拒否の行は『受付』で、約定日が不正でも壊れない。同じ日の約定は売り→買いの順", () => {
+    const evs = [
+      ev("order_sheet.rejected", { agentId: "ai-ma5", tradingDate: "invalid", reason: "invalid_sheet", runSeq: 5 }, T("2026-11-09", 20)),
+      ev("fills.executed", { agentId: "ai-ma5", sheetSeq: 0, tradingDate: "2026-11-10", fills: [
+        { symbol: "X1", side: "sell", requestedQty: 100, qty: 100, price: 90, amount: 9000, status: "filled" },
+        { symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 91, amount: 9100, status: "filled" },
+      ] }, T("2026-11-10", 9)),
+    ];
+    const h = buildAgentPage(base(evs, [["ai-ma5", "10", 10_000]]), new Map(), "ai-ma5")!.history;
+    expect(h.map((r) => [r.dateText, r.head, r.timeLabel, r.runSeq])).toEqual([["11/10", "売", "確定", null], ["11/10", "買", "確定", null], ["－", "注文票", "受付", 5]]);
+  });
+
+  it("停止中のAIには、その旨が出る（全体の停止も。再開で消える）", () => {
+    const stop = ev("agent.suspended", { agentId: "*", scope: "orders", reason: "点検" }, T("2026-11-09", 10));
+    expect(buildAgentPage(base([stop], [["ai-ma5", "09", 10_000]]), new Map(), "ai-ma5")!.suspended).toBe("停止中（注文）");
+    const resume = ev("agent.resumed", { agentId: "*", scope: "orders", reason: "解除" }, T("2026-11-09", 11));
+    expect(buildAgentPage(base([stop, resume], [["ai-ma5", "09", 10_000]]), new Map(), "ai-ma5")!.suspended).toBeNull();
+  });
+
+  it("開始が遅いAIに、実在しない線を引かない（初期資金の点は最初の評価の日の1つ前）", () => {
+    const v = base([], [["ai-ma5", "09", 10_000], ["ai-ma5", "10", 11_000], ["ai-hold", "10", 9_000]]);
+    const late = buildAgentPage(v, new Map(), "ai-ma5")!.chart!.lines.find((l) => l.agentId === "ai-hold")!;
+    expect(late.points.split(" ")[0]!.split(",")[0]).toBe("300"); // 2日のうち2日目から始まる（x = 1日分 = 300）
+    expect(late.points.split(" ")).toHaveLength(2);
   });
 });
 

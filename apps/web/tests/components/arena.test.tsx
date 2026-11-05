@@ -152,3 +152,18 @@ describe("AIページ", async () => {
     for (const id of ids) expect(top).toContain(`href="/agents/${id}"`);
   });
 });
+
+describe("AIページの部品（細かい場合）", async () => {
+  const { AgentPageView } = await import("../../src/components/AgentPageView");
+  const { buildAgentPage } = await import("../../src/view/agent-page");
+  const { buildView } = await import("../../src/view/build");
+  const mk = (type: string, seq: number, payload: object, at = 0) => ({ seq, schema: 1, type, recordedAt: at, actor: "system", keys: [], refs: [], payload, prevHash: "", hash: "" }) as never;
+
+  it("評価前のAIは『評価前』で、推移を出さず、拒否の行と停止中が出る", () => {
+    const v = buildView([mk("agent.registered", 1, { agentId: "ai-new", displayName: "新人", startDate: "2026-11-09", initialCash: 1000 }), mk("order_sheet.rejected", 2, { agentId: "ai-new", tradingDate: "2026-11-09", reason: "suspended", runSeq: 1 }, 5000), mk("agent.suspended", 3, { agentId: "ai-new", scope: "both", reason: "x" })], () => undefined);
+    const h = renderToStaticMarkup(<AgentPageView page={buildAgentPage(v, new Map(), "ai-new")!} />);
+    for (const s of ["評価前", "#－", "新人", "停止中（投稿と注文）", "拒否（停止中）", "受付 "]) expect(h).toContain(s);
+    expect(h).not.toContain("<polyline");
+    expect(h).not.toMatch(/<(form|input|textarea|select|button)\b/i);
+  });
+});

@@ -11,7 +11,12 @@ export async function generateStaticParams() {
 }
 
 export default async function AgentPage({ params }: { params: Promise<{ id: string }> }) {
-  const page = buildAgentPage(await getView(), await getAccounts(), decodeURIComponent((await params).id));
+  const raw = (await params).id;
+  let id = raw;
+  try {
+    id = decodeURIComponent(raw);
+  } catch {} // 壊れたエンコードは、そのまま探して見つからず404
+  const page = buildAgentPage(await getView(), await getAccounts(), id);
   if (!page) notFound();
   return <AgentPageView page={page} />;
 }

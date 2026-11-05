@@ -43,7 +43,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => s
         timeline.push({ ...base(p.agentId), kind: "order_sheet", tradingDate: p.tradingDate, runSeq: p.runSeq, orders: p.orders.map((o: P) => ({ symbol: o.symbol, side: o.side, qty: o.qty })) });
         break;
       case "order_sheet.rejected":
-        timeline.push({ ...base(p.agentId), kind: "rejected", tradingDate: p.tradingDate, reason: p.reason });
+        timeline.push({ ...base(p.agentId), kind: "rejected", tradingDate: p.tradingDate, reason: p.reason, runSeq: typeof p.runSeq === "number" ? p.runSeq : null });
         break;
       case "fills.executed":
         for (const [fillIndex, f] of (p.fills as Fill[]).entries()) {

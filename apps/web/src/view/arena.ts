@@ -39,6 +39,15 @@ export function latestPost(view: View, agentId: string) {
   return p && p.kind === "post" ? { text: p.text as string, symbol: p.symbol, atText: formatJstShort(p.at) } : null;
 }
 
+/**
+ * 評価がそろった日の集合。評価を始めたAIのうち、まだその日の評価がないAIがいる日（書きかけの日）は含めない。
+ * 順位・首位・連続首位は、この日のものだけを使う（書きかけの日は、先に評価されたAIが仮に1位になるため）
+ */
+export function settledDates(view: View): Set<string> {
+  const all = new Set(view.agents.flatMap((a) => a.days.map((d) => d.date)));
+  return new Set([...all].filter((date) => !view.agents.some((a) => a.days.length > 0 && a.days[0]!.date <= date && !a.days.some((d) => d.date === date))));
+}
+
 export interface ArenaCard {
   agentId: string;
   character: Character;
@@ -93,6 +102,7 @@ export function buildArena(view: View): Arena {
   const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.qty > 0);
   const valuations = view.timeline.filter((t): t is TimelineItem & { kind: "valuation" } => t.kind === "valuation");
 
+  const settledDays = settledDates(view);
   const cards: ArenaCard[] = view.agents.map((a) => {
     const character = characterOf(a.agentId, a.agentName);
     const lastDay = a.days.at(-1);
@@ -115,7 +125,7 @@ export function buildArena(view: View): Arena {
       character,
       loggedName: a.agentName,
       handle: handleOf(a.agentId),
-      rank: lastDay?.rank ?? null,
+      rank: findLast(a.days, (d) => settledDays.has(d.date))?.rank ?? null,
       totalText: total === undefined ? null : formatYenMark(total),
       asOf: lastDay ? formatMonthDay(lastDay.date) : null,
       pnl: total === undefined ? null : { direction: dir(diff), text: formatSignedYenMark(diff), percentText: formatBp(roundedRatio(diff, a.initialCash, 10000), true) },
@@ -140,11 +150,11 @@ export function buildArena(view: View): Arena {
   // 順位：評価の記録の日ごとに、首位のAI。前の評価の日の首位と同じなら「守る」
   const byDate = new Map<string, (TimelineItem & { kind: "valuation" })[]>();
   for (const v of valuations) (byDate.get(v.date) ?? byDate.set(v.date, []).get(v.date)!).push(v);
+  const settled = settledDates(view);
   let prevLeader: string | null = null;
   for (const [date, list] of [...byDate].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     // 評価が書きかけの日（評価を始めたAIのうち、まだその日の評価がないAIがいる日）は、首位を決めない
-    const pending = view.agents.some((a) => a.days.length > 0 && a.days[0]!.date <= date && !a.days.some((d) => d.date === date));
-    if (pending) continue;
+    if (!settled.has(date)) continue;
     const best = list.reduce((m, v) => (v.total > m.total ? v : m));
     const tied = list.filter((v) => v.total === best.total);
     const lead = tied.length > 1 ? null : best;

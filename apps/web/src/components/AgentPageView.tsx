@@ -25,7 +25,7 @@ function History({ rows }: { rows: HistoryRow[] }) {
             {r.head}{r.symbol && <> <Link href={`/symbols/${encodeURIComponent(r.symbol)}`} className="underline">{r.symbol}</Link></>}{r.tail}
           </span>
           <span className="font-bold">{r.status}{r.reason && `（${r.reason}）`}</span>
-          <span className="ml-auto font-num text-xs text-sub">確定 {r.committedText}{r.runSeq !== null && ` · 判断の実行 #${r.runSeq}`}</span>
+          <span className="ml-auto font-num text-xs text-sub">{r.timeLabel} {r.committedText}{r.runSeq !== null && ` · 判断の実行 #${r.runSeq}`}</span>
         </li>
       ))}
     </ul>
@@ -43,6 +43,7 @@ export function AgentPageView({ page: p }: { page: AgentPage }) {
             <span className="font-display text-3xl" style={{ color: c.color }}>{p.rank === null ? "#－" : `#${p.rank}`}</span>
             <h1 id="h-intro" className="font-display text-3xl font-normal">{c.name}</h1>
             <p className="text-soft">{c.title}</p>
+            {p.suspended && <p className="w-fit bg-neon-pink px-2 text-sm font-bold text-ground">{p.suspended}</p>}
             <p className="font-num text-xs text-sub">{p.handle}{p.loggedName !== c.name && ` · 記録名 ${p.loggedName}`}</p>
             {p.badges.length > 0 && (
               <ul className="m-0 flex list-none flex-wrap gap-2 p-0">
@@ -75,9 +76,13 @@ export function AgentPageView({ page: p }: { page: AgentPage }) {
           <div className="border-2 border-line bg-[#120826] p-3">
             <svg role="img" aria-label={p.chart.label} viewBox={`-4 -4 ${CHART_W + 8} ${CHART_H + 8}`} className="h-auto w-full">
               <line x1="0" x2={CHART_W} y1={p.chart.baseY} y2={p.chart.baseY} stroke="#3A1F5C" strokeDasharray="4 4" />
+              <title>{p.chart.label}</title>
               {p.chart.lines.map((l) => <polyline key={l.agentId} points={l.points} fill="none" stroke={l.color} strokeWidth={l.bold ? 4 : 1.5} opacity={l.bold ? 1 : 0.55} />)}
             </svg>
-            <div className="flex justify-between font-num text-xs text-sub"><span>{p.chart.from}</span><span>破線 = 初期資金</span><span>{p.chart.to}</span></div>
+            <ul className="m-0 mb-1 flex list-none flex-wrap gap-x-4 gap-y-1 p-0 font-num text-xs">
+              {p.chart.lines.map((l) => <li key={l.agentId}><span aria-hidden="true" className="mr-1 inline-block h-2 w-4 align-middle" style={{ background: l.color }} />{l.name}{l.bold && "（このAI）"}</li>)}
+            </ul>
+            <div className="flex justify-between font-num text-xs text-sub"><span>開始</span><span>破線 = 初期資金</span><span>{p.chart.to}</span></div>
           </div>
         </section>
       )}
@@ -92,7 +97,7 @@ export function AgentPageView({ page: p }: { page: AgentPage }) {
                 <dt className="text-sub">株数</dt><dd className="text-right">{h.qty}株</dd>
                 <dt className="text-sub">評価額</dt><dd className="text-right">{h.valueText}</dd>
                 <dt className="text-sub">取得単価</dt><dd className="text-right">{h.unitCostText ?? "－"}</dd>
-                <dt className="text-sub">終値</dt><dd className="text-right">{h.closeText}</dd>
+                <dt className="text-sub">終値</dt><dd className="text-right">{h.closeText}{h.stale && <span className="block text-xs text-amber-300">（直近の終値で評価）</span>}</dd>
                 <dt className="text-sub">構成比</dt><dd className="text-right">{h.weightText}</dd>
                 <dt className="text-sub">含み損益</dt>
                 <dd className="text-right" style={{ color: h.unrealized ? DIR_COLOR[h.unrealized.direction] : undefined }}>{h.unrealized?.text ?? "－"}</dd>
