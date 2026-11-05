@@ -80,6 +80,11 @@ async function run(seed: number, opts: { lateFetchAt?: number; interrupt?: boole
   await runDay(PRIOR, deps);
   await waitUntil(scheduleOf(PRIOR).closeAt + 3 * 3_600_000);
   for (const a of agents) await op("agent.registered", { agentId: a.id, displayName: a.id, startDate: DAYS[0], initialCash: INITIAL_CASH });
+  // 企業行動の公表：TSTB の配当（1株 5円）と TSTC の 1:2 の分割。引け後の処理で反映する
+  for (const [symbol, kind, exDate, value] of [["TSTB", "dividend", DAYS[4], { perShare: 50 }], ["TSTC", "split", DAYS[6], { from: 1, to: 2 }]] as const) {
+    const valuesHash = await values.putValue({ kind, ...value });
+    expect(await store.append({ type: "corporate_action.announced", actor: "system", refs: [], payload: { symbol, kind, exDate, source: "fixture:synthetic", valuesHash } })).toMatchObject({ ok: true });
+  }
   for (const d of DAYS) {
     if (opts.interrupt) {
       const stop = async (at: number) => (at === scheduleOf(d).openAt ? Promise.reject(new Error("stop")) : waitUntil(at));
@@ -103,6 +108,16 @@ describe("規則のAI 3体で10営業日を通す", async () => {
     for (const id of ids) expect(traded(id), id).toBeGreaterThan(0);
     expect(of("fills.executed").some((e) => (p(e).fills as { side: string; qty: number }[]).some((f) => f.side === "sell" && f.qty > 0))).toBe(true);
     for (const run of of("agent.run")) expect((p(run).model as { provider: string }).provider).toBe("rule");
+    // 公表は、権利落ち日の前営業日の引け後の処理で、全員に1回ずつ渡る
+    for (const a of of("corporate_action.announced")) {
+      const got = of("corporate_actions.applied").filter((e) => (p(e).announcedSeqs as number[]).includes(a.seq));
+      expect(got.map((e) => p(e).agentId).sort()).toEqual([...ids].sort());
+      expect(new Set(got.map((e) => p(e).exDate))).toEqual(new Set([p(a).exDate]));
+    }
+    // 持ち続けるAIは、配当を受け取り、分割で株数が2倍になる
+    const actions = of("corporate_actions.applied").filter((e) => p(e).agentId === "ai-hold").flatMap((e) => p(e).actions as { kind: string; symbol: string }[]);
+    expect(actions.map((x) => `${x.kind}:${x.symbol}`)).toEqual(["dividend:TSTB", "split:TSTC"]);
+    expect(r.store.account("ai-hold").holdings.TSTC?.qty).toBe(200);
   });
 
   it("(b) replay で先頭から作り直した台帳が、記録（保管の口座）と一致する", async () => {
