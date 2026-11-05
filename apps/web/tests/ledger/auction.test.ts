@@ -18,6 +18,11 @@ describe("値幅", () => {
     expect(priceBand(yen(7))).toEqual({ lower: yen(6), upper: yen(8) });
     expect(priceBand(10005)).toEqual({ lower: yen(801), upper: yen(1200) });
     expect(() => priceBand(0)).toThrow();
+    expect(() => priceBand(100_000_000 * 10 + 1)).toThrow();
+    // 安い価格では値幅が狭い：4円は 4円の1点だけ、1円は 1円だけ、0.8円は上限が0円になり例外（lead に判断を依頼、#110）
+    expect(priceBand(yen(4))).toEqual({ lower: yen(4), upper: yen(4) });
+    expect(priceBand(yen(1))).toEqual({ lower: yen(1), upper: yen(1) });
+    expect(() => priceBand(8)).toThrow("price band is empty");
   });
 });
 
@@ -72,18 +77,26 @@ describe("手で数えた板", () => {
     expect(summary(r)).toEqual([[100, "outmatched"], [200, null], [200, null], [500, null]]);
   });
 
+  it("確定時刻が同じなら注文票の seq、同じ注文票なら中の順", () => {
+    const at = (sheetSeq: number, index: number): AuctionOrder => ({ sheetSeq, index, committedAt: 7, side: "sell", qty: 100, limit: yen(1000) });
+    const r = run(1000, [at(9, 0), at(4, 1), at(4, 0), order("buy", 200, null)]);
+    expect(summary(r)).toEqual([[0, "outmatched"], [100, null], [100, null], [200, null]]);
+  });
+
   it("形の崩れた注文は例外（確定の検査を通ったものだけを渡す）", () => {
     expect(() => run(1000, [order("buy", 150, null)])).toThrow("invalid qty");
     expect(() => run(1000, [{ ...order("buy", 100, null), limit: 10005 }])).toThrow("invalid limit");
     const o = order("buy", 100, null);
     expect(() => run(1000, [o, { ...o }])).toThrow("duplicate order");
+    expect(() => run(1000, [{ ...o, sheetSeq: -1 }])).toThrow("invalid order identity");
   });
 });
 
 /** 乱数の板。前日の価格のまわりに、成行と指値を混ぜる */
 function randomBook(seed: number): { prevPrice: number; orders: AuctionOrder[] } {
   const rand = mulberry32(seed);
-  const prevPrice = yen(randInt(rand, 50, 3000));
+  // 0.1円単位（呼値に合わないことがある）で、数円から3000円まで
+  const prevPrice = randInt(rand, 0, 3) === 0 ? randInt(rand, 30, 500) : randInt(rand, 500, 30_000);
   const { lower, upper } = priceBand(prevPrice);
   const orders: AuctionOrder[] = [];
   const sheets = randInt(rand, 0, 12);

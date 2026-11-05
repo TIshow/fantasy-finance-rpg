@@ -6,6 +6,8 @@ import { LOT, type Deciyen, type Side } from "./types";
 export const TICK: Deciyen = 10;
 /** 値幅制限：前日の価格の ±20% */
 export const PRICE_BAND_PERCENT = 20;
+/** 前日の価格の上限（1億円）。候補の価格を1つずつ数えるので、これより大きい価格は受け付けない */
+export const MAX_PRICE: Deciyen = 100_000_000 * 10;
 
 export interface AuctionOrder {
   /** 注文票（order_sheet.committed）の seq */
@@ -58,7 +60,7 @@ export interface AuctionResult {
 
 /** 前日の価格から、呼値に合う値幅の下限と上限 */
 export function priceBand(prevPrice: Deciyen): { lower: Deciyen; upper: Deciyen } {
-  if (!Number.isSafeInteger(prevPrice) || prevPrice <= 0) throw new Error(`invalid previous price: ${prevPrice}`);
+  if (!Number.isSafeInteger(prevPrice) || prevPrice <= 0 || prevPrice > MAX_PRICE) throw new Error(`invalid previous price: ${prevPrice}`);
   const scale = 100 * TICK;
   const lower = Math.max(TICK, Math.ceil((prevPrice * (100 - PRICE_BAND_PERCENT)) / scale) * TICK);
   const upper = Math.floor((prevPrice * (100 + PRICE_BAND_PERCENT)) / scale) * TICK;
@@ -83,7 +85,7 @@ export function runAuction(input: AuctionInput): AuctionResult {
     if (o.side !== "buy" && o.side !== "sell") throw new Error(`invalid side: ${String(o.side)}`);
     if (!Number.isSafeInteger(o.qty) || o.qty <= 0 || o.qty % LOT !== 0) throw new Error(`invalid qty: ${o.qty}`);
     if (o.limit !== null && (!Number.isSafeInteger(o.limit) || o.limit <= 0 || o.limit % TICK !== 0)) throw new Error(`invalid limit: ${String(o.limit)}`);
-    if (!Number.isSafeInteger(o.sheetSeq) || !Number.isSafeInteger(o.index) || !Number.isSafeInteger(o.committedAt)) throw new Error("invalid order identity");
+    if (![o.sheetSeq, o.index, o.committedAt].every((n) => Number.isSafeInteger(n) && n >= 0)) throw new Error("invalid order identity");
     const id = `${o.sheetSeq}:${o.index}`;
     if (seen.has(id)) throw new Error(`duplicate order ${id}`);
     seen.add(id);
