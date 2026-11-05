@@ -125,7 +125,7 @@ describe("二重反映（§4 の一意キー）", () => {
   // 権利落ち日が変わった場合で、訂正の実装は別のPR）。ここではキーそのものが、連鎖の検査と封じる処理で効くことを確かめる
   it("同じ公表の ca: キーを2回使った保存済みログは、連鎖の検査で落ち、封じる処理も拒む", async () => {
     const { log } = await setup();
-    const ann = await ok(log, sys("corporate_action.announced", jst("2026-11-09", 23), { symbol: "AAA", exDate: "2026-11-11" }));
+    const ann = await ok(log, sys("corporate_action.announced", jst("2026-11-09", 23), { symbol: "AAA", kind: "dividend", exDate: "2026-11-11" }));
     const close = await ok(log, sys("prices.close", jst("2026-11-10", 15, 40), { date: "2026-11-10" }));
     await ok(log, sys("valuation.recorded", jst("2026-11-10", 15, 41), { agentId: "alpha", date: "2026-11-10", closeSeq: close }, [close]));
     const applied = await log.append(sys("corporate_actions.applied", jst("2026-11-10", 15, 42), { agentId: "alpha", asOf: "2026-11-10", exDate: "2026-11-11", announcedSeqs: [ann] }, [ann]));
@@ -159,8 +159,8 @@ describe("権限（§3 の書ける者・AIの身元）", () => {
     "agent.suspended": "operator", "agent.resumed": "operator",
   };
   const ACTORS = { system: "system", operator: "operator:owner", agent: "agent:alpha" } as const;
-  // 一意キーが作れる中身にして、書ける者の検査より前で落ちないようにする
-  const payload = { agentId: "alpha", date: "2026-11-10", tradingDate: "2026-11-10", asOf: "2026-11-10", announcedSeqs: [], correctionSeq: 1 };
+  // 一意キーが作れる中身にして、書ける者の検査より前で落ちないようにする（公表のキーは銘柄・種類・権利落ち日。#67）
+  const payload = { agentId: "alpha", symbol: "AAA", kind: "dividend", exDate: "2026-11-11", date: "2026-11-10", tradingDate: "2026-11-10", asOf: "2026-11-10", announcedSeqs: [], correctionSeq: 1 };
 
   it("文書の表に全種類があり、表の書ける者以外の追記はすべて拒む", async () => {
     expect(Object.keys(DOC_WRITER).sort()).toEqual([...EVENT_TYPES].sort());
