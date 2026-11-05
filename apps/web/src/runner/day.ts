@@ -73,12 +73,12 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
   const s = scheduleOf(date);
   const out: StageResult[] = [];
   await deps.waitUntil(s.decideAt);
-  out.push(await day.open(prev), await day.afterClose(prev));
+  out.push(...(await day.catchUp(prev)));
   out.push(await day.decide(date, prev));
   await deps.waitUntil(s.openAt);
   out.push(await day.open(date));
   await deps.waitUntil(s.closeAt);
-  out.push(await day.afterClose(date));
+  out.push(...(await day.catchUp(date)));
   return out;
 }
 
@@ -270,6 +270,30 @@ class Day {
     const base = { agentId: agent.id, purpose, model: agent.model, prompt: agent.prompt, inputSeqs, requestHash, startedAt, finishedAt: this.deps.clock.now() };
     const payload = output === null ? { ...base, ok: false, errorCode: "provider_error" } : { ...base, outputHash: await this.deps.values.putBody(output), ok: true };
     return (await this.append("agent.run", "system", payload, inputSeqs)).seq;
+  }
+
+  /**
+   * upTo までで、終値か引け後の処理が済んでいない日を、古い順に進める（始値の約定 → 引け後）。待った日で止める。
+   * 1日ずつ前にさかのぼり、済んでいる日（またはAIの登録より前の日）で止める（データが2日以上遅れても追いつける）
+   */
+  async catchUp(upTo: string): Promise<StageResult[]> {
+    const H = this.log.holidays();
+    const days: string[] = [];
+    for (let d = upTo; ; d = previousBusinessDay(d, H)) {
+      const agents = this.agentsOn(d);
+      const done = this.find("prices.close", (p) => p.date === d) && agents.every((id) => this.find("corporate_actions.applied", (p) => p.agentId === id && p.asOf === d && p.closedSeq === undefined));
+      if (done) break;
+      days.unshift(d);
+      if (agents.length === 0) break;
+    }
+    const out: StageResult[] = [];
+    for (const d of days) {
+      out.push(await this.open(d));
+      if (out.at(-1)!.status === "waiting") break;
+      out.push(await this.afterClose(d));
+      if (out.at(-1)!.status === "waiting") break;
+    }
+    return out;
   }
 
   /** 始値を取り込み、確定した注文票を約定させる */

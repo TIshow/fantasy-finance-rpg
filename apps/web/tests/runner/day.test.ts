@@ -122,7 +122,8 @@ describe("runDay の回し直しと失敗", () => {
     const s = await setup();
     await s.waitUntil(scheduleOf(TRADING_DAYS[1]).closeAt);
     const r = await runDay(TRADING_DAYS[0], s.deps);
-    expect(r.map((x) => [x.stage, x.status])).toEqual([["open", "done"], ["after_close", "done"], ["decide", "skipped"], ["open", "done"], ["after_close", "written"]]);
+    // 前の日は済んでいるので追いつく段はない。判断は締めの後で飛ばし、始値と引け後を記録する
+    expect(r.map((x) => [x.stage, x.status])).toEqual([["decide", "skipped"], ["open", "done"], ["open", "done"], ["after_close", "written"]]);
     const dates = (await s.all()).filter((e) => e.type === "prices.open" || e.type === "prices.close").map((e) => p(e).date);
     expect(dates.filter((d) => d === TRADING_DAYS[0]).length).toBe(2);
     expect((await runDay(TRADING_DAYS[1], s.deps)).some((x) => x.status === "written")).toBe(true);
