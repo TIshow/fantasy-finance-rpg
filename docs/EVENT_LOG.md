@@ -92,7 +92,7 @@ AIの「情報の取得 → 発言 → 判断 → 注文 → 約定 → 評価 �
 valuation.recorded(D) → corporate_actions.applied(D) → order_sheet.committed(D+1) → fills.executed(D+1) → valuation.recorded(D+1) → …
 ```
 
-- 注文票を確定しなかった日は `order_sheet.committed` と `fills.executed` を飛ばす。確定した日は、空の注文票でも `fills.executed`（約定の並びが空）を書いてから評価に進む
+- 注文票を確定しなかった日は `order_sheet.committed` と `fills.executed` を飛ばす（AIは売買しない日も空の注文票を確定する（`PAPER_TRADING_RULES` §3、#102）ので、飛ばすのは判断に失敗した日だけ）。確定した日は、空の注文票でも `fills.executed`（約定の並びが空）を書いてから評価に進む
 - **休場日：** 追記でも再計算でも、休場日は「そのイベントより前の最後の `holidays.adopted` の祝日の一覧」に「そのイベントより前の `market.closed` の日」を足したものとする（§3.5、§4、§7）
 - **臨時休場：** `market.closed`（T）を書いたら、T を休場日として扱い、T の注文票は `fills.executed`（全件失効、理由 `market_closed`）で閉じる。評価と引け後処理は T を飛ばして次の営業日へ進む。T の前営業日 D の引け後処理が済んでいれば、新しい休場日で権利落ち日が D の翌営業日になった公表を、追加の `corporate_actions.applied`（キー `post_close:<id>:<D>:<休場のseq>`）で反映する。反映する公表があるあいだは、T の翌営業日の注文票（理由 `account_not_ready`）と評価を止める（反映する公表がなければ、書かなくても進める）。照合では、`closedSeq` がそのAIに立っている最後の休場であること、`asOf` が D、権利落ち日が D の新しい翌営業日、約定待ちがないことを確かめる。追加の処理の前に次の日も休場になったら、新しい休場の状態で上書きする。T が権利落ち日だった公表の扱いは、運営者が §6.2 の訂正で決める
 
