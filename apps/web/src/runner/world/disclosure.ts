@@ -24,7 +24,10 @@ export function periodOf(listedAt: number, index: number): string {
 /**
  * 上場した企業ごとに、発表の時期が来た四半期のうち、まだ発表していない分を古い順に書く。書いた「銘柄:四半期」を返す。
  * 時期：index 0 は上場の直後。index k は、板寄せが k × quarterDays 日分済み、その最後の日の15:30を過ぎたとき
- * （価格のつかなかった板寄せの日も数える）。引け後（runDay のあと、次の runDay の前）に呼ぶ。書けなければ例外（理由つき）。
+ * （価格のつかなかった板寄せの日も数える）。書けなければ例外（理由つき）。
+ * 呼ぶ時点：runDay（RunnerDeps.seed を渡したとき）が、前の日の残りを補ったあと・判断の前と、1日の最後に呼ぶ。
+ * 毎日の実行の入口（scripts/daily-lib.ts）も、準備（上場の直後）と、runDay のあと（休日の実行で runDay が何もしないとき）に呼ぶ。
+ * 時期が来ていなければ何も書かないので、何度呼んでもよい。
  * clock は保管と同じ時計を渡す（時期は clock で決め、記録の時刻は保管が付けるので、別の時計だと15:30より前の記録になりうる）
  */
 export async function discloseDue(store: EventStore, seed: number, clock: Clock, companies: readonly Company[] = COMPANIES, quarterDays = QUARTER_DAYS): Promise<string[]> {
