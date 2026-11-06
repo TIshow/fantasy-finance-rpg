@@ -14,6 +14,7 @@ import { cutoffOf, isBusinessDay, nextBusinessDay, previousBusinessDay } from ".
 import type { Account, Deciyen, Order } from "../ledger/types";
 import type { ValuesPort } from "../store/pg-values";
 import { type SplitInput, adjustCloses } from "./adjust";
+import { discloseDue } from "./world/disclosure";
 
 /** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引き、凍結した写しを渡す */
 export interface CloseInput {
@@ -79,6 +80,11 @@ export interface RunnerDeps {
   waitUntil(at: number): Promise<void>;
   /** 判断の入力に渡す終値の日数（新しい方から） */
   inputDays?: number;
+  /**
+   * 架空の企業の決算を発表するときの乱数の種（上場と同じもの）。渡せば、前の日の残りを補ったあと・判断の前と、
+   * 1日の最後に、時期が来た四半期の決算（company.disclosed）を書く。渡さなければ発表しない（呼ぶ側が discloseDue を呼ぶ）
+   */
+  seed?: number;
 }
 
 const HOUR = 3_600_000;
@@ -94,13 +100,21 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
   const prev = previousBusinessDay(date, day.log.holidays());
   const s = scheduleOf(date);
   const out: StageResult[] = [];
+  const disclose = async () => {
+    if (deps.seed === undefined) return;
+    const written = await day.disclose(deps.seed);
+    if (written.length > 0) out.push({ stage: "disclose", status: "written", detail: written.join(",") });
+  };
   await deps.waitUntil(s.decideAt);
   out.push(...(await day.catchUp(prev)));
+  // 前の日の板寄せをここで補ったなら、その日の引けのあとに来た発表も、判断の前に書く（判断が、締めより前の発表を見るように）
+  await disclose();
   out.push(await day.decide(date, prev));
   await deps.waitUntil(s.openAt);
   out.push(await day.open(date));
   await deps.waitUntil(s.closeAt);
   out.push(...(await day.catchUp(date)));
+  await disclose();
   return out;
 }
 
@@ -149,6 +163,22 @@ class Day {
 
   private append(type: Parameters<EventStore["append"]>[0]["type"], actor: Parameters<EventStore["append"]>[0]["actor"], payload: Payload, refs: number[] = []) {
     return this.deps.store.append({ type, actor, refs, payload }).then((r) => this.sync(r, type));
+  }
+
+  /** 時期が来た決算の発表を書き、写しにも当てる（discloseDue が保管に追記した分を、ここで検査して取り込む） */
+  async disclose(seed: number): Promise<string[]> {
+    const s = this.deps.store;
+    const store: EventStore = {
+      read: (after, limit) => s.read(after, limit),
+      last: () => s.last(),
+      commitSheet: () => Promise.reject(new Error("disclose does not commit sheets")),
+      append: async (draft) => {
+        const r = await s.append(draft);
+        if (r.ok) await this.sync(r, draft.type);
+        return r;
+      },
+    };
+    return discloseDue(store, seed, this.deps.clock);
   }
 
   /** その日に動くAI（登録済みで、開始日が date 以前） */

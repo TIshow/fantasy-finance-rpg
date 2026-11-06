@@ -126,9 +126,12 @@ async function runLocked(date: string, o: DailyOptions): Promise<StageResult[]> 
     agents,
     clock: o.clock,
     waitUntil: o.waitUntil ?? (async () => {}),
+    // 決算の発表は runDay が、判断の前と1日の最後に書く
+    seed: o.seed ?? WORLD_SEED,
   };
   const results = await runDay(date, deps);
-  // 引けのあと（15:30 を過ぎ、板寄せの日が20日たまったとき）に、次の四半期の決算を発表する。時期が来ていなければ何も書かない
+  // 休日の実行（runDay が何もしない）でも、時期が来た決算を書く（前の営業日の引けのあとの実行がなかったとき）。
+  // 営業日なら runDay が書き終えているので、何も書かない
   const disclosed = await discloseDue(store, o.seed ?? WORLD_SEED, o.clock);
   return disclosed.length > 0 ? [...results, { stage: "disclose", status: "written", detail: disclosed.join(",") }] : results;
 }
