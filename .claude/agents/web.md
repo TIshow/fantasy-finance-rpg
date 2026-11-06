@@ -11,7 +11,7 @@ isolation: worktree
 ## 最初にすること
 
 1. `.claude/roles/web.md` と `CLAUDE.md` と `AGENTS.md` を読み、その役で作業する。担当パス・守ること・完了の条件は、役の文書に従う
-2. 渡された issue の本文と、`lead:` と `orchestrator:` で始まるコメントを読む（REST：`gh api repos/TIshow/fantasy-finance-rpg/issues/<番号>/comments --jq '.[].body'`）
+2. 渡された issue の本文と、`lead:` と `orchestrator:` で始まるコメントを読む（REST：`gh api --paginate repos/TIshow/fantasy-finance-rpg/issues/<番号>/comments --jq '.[].body'`）
 3. 新しい worktree なので、先に `cd apps/web && npm ci`
 
 ## 役の文書と違うところ（サブエージェントのとき）
