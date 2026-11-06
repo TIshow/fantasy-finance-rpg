@@ -80,7 +80,8 @@ export async function makerAgent(company: Company): Promise<RunnerAgent> {
   const id = makerId(company.symbol);
   const text =
     "Quote buy and sell limits around the fair price from disclosed results; lean against the inventory. " +
-    "When the center is outside the daily price band, quote both a buy and a sell at the band edge so that a price forms and moves toward the fair price.";
+    "When the center is outside the daily price band, quote only the side toward the fair price at the band edge (sell at the upper limit, buy at the lower limit). " +
+    "Never quote a buy that can trade against its own sell.";
   return {
     id,
     ...(await ruleModel("market-maker", text, { ...MAKER_PARAMS, target: ALLOTMENT.maker.target })),

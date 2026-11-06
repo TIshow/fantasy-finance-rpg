@@ -13,6 +13,7 @@ import { readAllEvents } from "../../src/store/pg-store";
 import { migrate, type SqlDb } from "../../src/store/sql";
 import { missedCutoff, productionSetup, runDaily, verifyDatabase } from "../../scripts/daily-lib";
 import { FakeClock, jst } from "../contracts/fakes";
+import { selfMatches } from "../runner/world/long-run/run";
 import { openPglite, resetSchema } from "./pglite";
 
 let pg: PGlite;
@@ -85,7 +86,7 @@ function crashingOn(type: string, n: number): SqlDb {
 describe("本番の入口で20営業日を回す（PGlite）", () => {
   let waitingShape: string[] = [];
 
-  it("待つ形：祝日と週末をとばして20営業日を回し、毎日の照合が一致し、決算の発表は時期どおりで、各社が16日以上・6社そろって10日以上、板寄せの値段がつく", async () => {
+  it("待つ形：祝日と週末をとばして20営業日を回し、毎日の照合が一致し、決算の発表は時期どおりで、各社が16日以上・6社そろって10日以上、板寄せの値段がつき、自己約定がない", async () => {
     await fresh();
     const w = world();
     const { business, skipped } = await runWaiting(w, FIRST, DAY20);
@@ -122,6 +123,10 @@ describe("本番の入口で20営業日を回す（PGlite）", () => {
     console.log(`priced days per company ${JSON.stringify(pricedDays)}, all six priced on ${allSixDays} of 20 days`);
     for (const s of SYMBOLS) expect(pricedDays[s], `${s}: ${JSON.stringify(pricedDays)}`).toBeGreaterThanOrEqual(16);
     expect(allSixDays, JSON.stringify(pricedDays)).toBeGreaterThanOrEqual(10);
+    // 自己約定（同じ参加者の売りと買いが、同じ日の同じ銘柄の板寄せで約定すること）は、どの日・どの銘柄にもない
+    expect(selfMatches(events)).toEqual([]);
+    // 確かめる対象が空でないこと：マーケットメイカーにも約定がある
+    expect(of("fills.executed").some((e) => String(p(e).agentId).startsWith("mm-") && (p(e).fills as { qty: number }[]).some((f) => f.qty > 0))).toBe(true);
 
     // 毎営業日、AI投資家3体の評価が残る
     expect(of("valuation.recorded").filter((e) => String(p(e).agentId).startsWith("ai-")).length).toBe(3 * 20);
