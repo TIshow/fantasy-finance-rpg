@@ -1,6 +1,9 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { BoardView } from "../../../components/BoardView";
+import { PriceChartView } from "../../../components/PriceChartView";
+import { priceChart } from "../../../view/market-chart";
+import { formatYenMark } from "../../../view/format";
 import { buildBoard } from "../../../view/board";
 import { getView } from "../../data";
 
@@ -8,7 +11,8 @@ import { getView } from "../../data";
 export const dynamicParams = false;
 
 export async function generateStaticParams() {
-  return (await getView()).threads.map((t) => ({ symbol: t.symbol }));
+  const v = await getView();
+  return [...new Set([...v.threads.map((t) => t.symbol), ...v.market.companies.map((c) => c.listing.symbol)])].sort().map((symbol) => ({ symbol }));
 }
 
 const RULES = [
@@ -18,7 +22,7 @@ const RULES = [
   "訂正・非表示になった投稿は、同じ位置に理由を残します（元の本文は出しません）。",
 ];
 
-const H = "mb-2 border-b-2 border-line pb-2 font-num text-sm tracking-[0.12em] text-neon-lime";
+const H = "mb-3 border-b-2 border-line pb-2 font-num text-sm tracking-[0.12em] text-neon-lime";
 
 export default async function SymbolPage({ params }: { params: Promise<{ symbol: string }> }) {
   const raw = (await params).symbol;
@@ -26,13 +30,48 @@ export default async function SymbolPage({ params }: { params: Promise<{ symbol:
   try {
     symbol = decodeURIComponent(raw);
   } catch {} // 壊れたエンコードは、そのまま探して見つからず404
-  const board = buildBoard(await getView(), symbol);
+  const view = await getView();
+  const board = buildBoard(view, symbol);
   if (!board) notFound();
+  const company = view.market.companies.find((c) => c.listing.symbol === symbol);
+  const chart = company ? priceChart(company.days, company.listing.listedPrice, formatYenMark) : null;
   return (
     <>
-      <h1 className="mb-4 font-display text-3xl font-normal">
-        <span className="font-num">{board.symbol}</span> 掲示板
+      <h1 className="mb-1 font-display text-3xl font-normal">
+        <span className="font-num">{board.symbol}</span> {company?.listing.name ?? "掲示板"}
       </h1>
+      {company ? (
+        <p className="mb-5 font-num text-xs text-sub">
+          {company.listing.sector} · 発行済株式数 {company.listing.sharesText} · 上場 {company.listing.listedOn}（最初の価格 {company.listing.listedPriceText}）
+        </p>
+      ) : (
+        <p className="mb-5 text-sm text-sub">この銘柄の市場の記録（上場・板寄せ・決算）は、まだありません。</p>
+      )}
+      {company && (
+        <div className="mb-8 flex flex-col gap-8">
+          <section aria-labelledby="h-price">
+            <h2 id="h-price" className={H}>PRICE · 値段の推移と出来高</h2>
+            {chart ? <PriceChartView chart={chart} days={company.days} /> : <p className="text-sm text-sub">まだ板寄せがありません</p>}
+          </section>
+          <section aria-labelledby="h-earn">
+            <h2 id="h-earn" className={H}>EARNINGS · 決算の発表（最新が上）</h2>
+            {company.disclosures.length === 0 ? <p className="text-sm text-sub">まだ決算の発表がありません</p> : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[560px] border-collapse text-right font-num text-sm">
+                  <thead><tr className="border-b border-line text-xs text-sub"><th className="p-2 text-left font-normal">四半期</th><th className="p-2 font-normal">売上</th><th className="p-2 font-normal">純利益</th><th className="p-2 font-normal">1株あたり利益</th><th className="p-2 font-normal">1株あたり配当</th><th className="p-2 text-left font-normal">発表</th></tr></thead>
+                  <tbody>
+                    {company.disclosures.map((d) => (
+                      <tr key={d.seq} className="border-b border-[#2A1745]">
+                        <td className="p-2 text-left font-sans">{d.periodText}</td><td className="p-2">{d.revenueText}</td><td className="p-2">{d.netIncomeText}</td><td className="p-2">{d.epsText}</td><td className="p-2">{d.dividendText}</td><td className="p-2 text-left text-xs text-sub">{d.atText}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
         <BoardView board={{ posts: board.posts, counts: board.counts }} />
         <aside aria-label="この銘柄の情報" className="flex flex-col gap-6 text-sm">

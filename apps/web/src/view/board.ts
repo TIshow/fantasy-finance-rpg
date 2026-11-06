@@ -64,7 +64,8 @@ export type PostFilter = Intent | "none" | "all";
 export const filterPosts = (posts: readonly BoardPost[], filter: PostFilter) => posts.filter((p) => filter === "all" || (p.intent ?? "none") === filter);
 
 export function buildBoard(view: View, symbol: string): Board | null {
-  if (!view.threads.some((t) => t.symbol === symbol)) return null;
+  // 投稿・約定のある銘柄、または上場した銘柄（まだ投稿がなくても、銘柄のページは作る）
+  if (!view.threads.some((t) => t.symbol === symbol) && !view.market.companies.some((c) => c.listing.symbol === symbol)) return null;
   const evidence = new Map(view.evidence.map((e) => [e.seq, e]));
   const posts = view.timeline.filter((t): t is TimelineItem & { kind: "post" } => t.kind === "post" && t.symbol === symbol);
   const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.symbol === symbol && t.qty > 0);

@@ -209,3 +209,39 @@ describe("掲示板の画面", async () => {
     expect(page).toContain(`id="${fillKey(6, 0)}"`);
   });
 });
+
+describe("銘柄のページ（市場の記録）", async () => {
+  const { PriceChartView } = await import("../../src/components/PriceChartView");
+  const { priceChart } = await import("../../src/view/market-chart");
+  const { buildMarket } = await import("../../src/view/market");
+  const { formatYenMark } = await import("../../src/view/format");
+  const { default: SymbolPage, generateStaticParams } = await import("../../src/app/symbols/[symbol]/page");
+  const mk = (type: string, seq: number, payload: object, at = 0) => ({ seq, schema: 1, type, recordedAt: at, actor: "system", keys: [], refs: [], payload, prevHash: "", hash: "" }) as never;
+  const market = buildMarket([
+    mk("company.listed", 1, { symbol: "NEO1", name: "ネオ電機", sector: "電機", sharesOutstanding: 500_000, price: 10_000 }, Date.parse("2026-11-09T18:00:00+09:00")),
+    mk("auction.cleared", 2, { symbol: "NEO1", date: "2026-11-10", price: 10_100, volume: 200, refSeq: 1, sheetSeqs: [] }),
+    mk("auction.cleared", 3, { symbol: "NEO1", date: "2026-11-11", price: null, volume: 0, refSeq: 2, sheetSeqs: [] }),
+  ]);
+  const c = market.companies[0]!;
+  const html = renderToStaticMarkup(<PriceChartView chart={priceChart(c.days, c.listing.listedPrice, formatYenMark)!} days={c.days} />);
+
+  it("値段の推移のグラフには、文での説明と表がつき、値つかずの日は印と言葉で分かる", () => {
+    expect(html).toContain("2日のうち1日は値つかず");
+    expect(html).toContain("▽ 値つかず");
+    expect(html).toContain("評価は前の価格 ¥1,010");
+    expect(html).toContain("¥1,010");
+    expect(html).toContain("200株");
+    const table = html.slice(html.indexOf("<table"));
+    expect(table.indexOf("11/11")).toBeLessThan(table.indexOf("11/10")); // 表は最新が上
+    expect(html).not.toMatch(/<(form|input|textarea|select|button)\b/i);
+  });
+
+  it("市場の記録がない銘柄のページは『まだありません』と出し、上場した銘柄は投稿がなくてもページがある", async () => {
+    const page = renderToStaticMarkup(await SymbolPage({ params: Promise.resolve({ symbol: "TSTA" }) }));
+    expect(page).toContain("市場の記録（上場・板寄せ・決算）は、まだありません");
+    expect(page).not.toContain("PRICE ·");
+    const ids = (await generateStaticParams()).map((p) => p.symbol);
+    expect(ids).toEqual([...ids].sort());
+    expect(ids).toContain("TSTB");
+  });
+});
