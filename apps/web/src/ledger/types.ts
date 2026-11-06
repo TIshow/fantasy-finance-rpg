@@ -6,6 +6,8 @@ export type Deciyen = number;
 
 export const LOT = 100;
 export const INITIAL_CASH: Deciyen = 10_000_000 * 10;
+/** 参加者の最初の現金の上限（100億円）。AI投資家は INITIAL_CASH、マーケットメイカーなどは別の額で始まる（#110） */
+export const MAX_INITIAL_CASH: Deciyen = 10_000_000_000 * 10;
 
 export type Side = "buy" | "sell";
 

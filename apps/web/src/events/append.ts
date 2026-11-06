@@ -6,7 +6,7 @@ import { coveredHolidays, type HolidayTable } from "../holidays/table";
 import { MAX_PRICE, TICK } from "../ledger/auction";
 import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusinessDay, tradingDateFor, validateSheet } from "../ledger/ledger";
 import type { Listing } from "../ledger/ledger";
-import { INITIAL_CASH, type Account, type Order, type RejectReason } from "../ledger/types";
+import { MAX_INITIAL_CASH, type Account, type Order, type RejectReason } from "../ledger/types";
 import { CanonicalizeError } from "./canonical";
 import { sealEvent } from "./chain";
 import { POST_INTENTS, POST_STANCES, type Actor, type EventType, type LogEvent } from "./types";
@@ -21,6 +21,8 @@ const WRITERS: Record<EventType, Writer> = {
   "corporate_action.announced": "system",
   "company.listed": "system",
   "auction.cleared": "system",
+  "shares.allotted": "system",
+  "company.disclosed": "system",
   "market.closed": "operator",
   "holidays.adopted": "operator",
   "universe.set": "operator",
@@ -53,6 +55,7 @@ const AGENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "valuation.recorded",
   "corporate_actions.applied",
   "ledger.adjusted",
+  "shares.allotted",
   "agent.suspended",
   "agent.resumed",
 ]);
@@ -77,6 +80,10 @@ const JUDGED_DATES: Partial<Record<EventType, string[]>> = {
 
 /** 注文の中身で決まる拒否の理由（validateSheet の注文ごとの検査） */
 const ORDER_REASONS: ReadonlySet<RejectReason> = new Set<RejectReason>(["invalid_order", "unknown_symbol", "invalid_qty", "insufficient_holdings", "invalid_price"]);
+
+/** company.disclosed の項目と、四半期の書き方（例：2026-Q4） */
+const DISCLOSED_FIELDS = ["symbol", "period", "revenue", "netIncome", "eps", "dividendPerShare"];
+const PERIOD = /^\d{4}-Q[1-4]$/;
 
 /** company.listed の項目 */
 const LISTING_FIELDS = ["symbol", "name", "sector", "sharesOutstanding", "price"];
@@ -382,6 +389,24 @@ export class EventLog {
         const priced = Number.isSafeInteger(p.price) && (p.price as number) > 0 && Number.isSafeInteger(p.volume) && (p.volume as number) > 0;
         return priced || (p.price === null && p.volume === 0) ? null : "invalid price or volume";
       }
+      case "shares.allotted": {
+        // 上場の日の最初の配分（#110）。まだ何もしていない参加者に、最初の板寄せより前に、発行済株式数の内で配る
+        const l = this.listings.get(p.symbol as string);
+        if (!l) return "symbol is not listed";
+        if (l.lastAuction !== null) return "the symbol is already auctioned";
+        if (st!.pending || st!.valuedDate !== null || [...this.commits].some((c) => c.startsWith(`${agentId}:`))) return "the agent already started trading";
+        if (!Number.isSafeInteger(p.qty) || (p.qty as number) <= 0) return "qty must be a positive integer";
+        if (l.allotted + (p.qty as number) > l.sharesOutstanding) return "allotments exceed sharesOutstanding";
+        return null;
+      }
+      case "company.disclosed": {
+        // 決算の発表（MARKET_DESIGN §5）。売上・純利益は円、1株あたり利益と配当は0.1円単位
+        if (!this.listings.has(p.symbol as string)) return "symbol is not listed";
+        if (Object.keys(p).some((k) => !DISCLOSED_FIELDS.includes(k))) return "unknown field in a disclosure";
+        const int = (v: unknown) => Number.isSafeInteger(v);
+        if (!int(p.revenue) || (p.revenue as number) < 0 || !int(p.netIncome) || !int(p.eps) || !int(p.dividendPerShare) || (p.dividendPerShare as number) < 0) return "invalid figures";
+        return null;
+      }
       case "prices.open":
         if (this.closed.has(p.date as string) || !isBusinessDay(p.date as string, H)) return "market was closed";
         return d.recordedAt >= cutoffOf(p.date as string) ? null : "open prices recorded before the cutoff";
@@ -423,7 +448,9 @@ export class EventLog {
         const start = p.startDate;
         // 開始日は、登録した時点で締めがまだ来ていない最初の営業日だけ。先の日にすると、その前の日を臨時休場にできなくなるため
         if (!isValidDate(start) || start !== tradingDateFor(d.recordedAt, H)) return "startDate must be the next trading date";
-        return p.initialCash === INITIAL_CASH ? null : "initialCash must be INITIAL_CASH";
+        // 最初の現金は参加者ごとに決める（AI投資家は INITIAL_CASH。マーケットメイカーなどは別の額、#110）
+        const cash = p.initialCash;
+        return Number.isSafeInteger(cash) && (cash as number) > 0 && (cash as number) <= MAX_INITIAL_CASH ? null : "initialCash must be a positive amount up to MAX_INITIAL_CASH";
       }
       case "agent.run":
         return p.purpose === "post" || p.purpose === "order" ? this.inputProblem(p.inputSeqs, null) : "purpose must be post or order";
@@ -466,7 +493,14 @@ export class EventLog {
         if (st!.pending) return "the committed sheet is not filled yet";
         if (p.date !== nextBusinessDay(st!.asOf, H) || st!.valuedDate === p.date) return "valuation must be for the day after the last post-close";
         if (this.catchUpDue(st!)) return "apply corporate actions moved by the market closure first";
+        // 上場した銘柄は、その日の板寄せが済んでから、板寄せの価格で評価する（書く順で評価の価格が変わらないように）
+        const held = Object.keys(this.ctx.accountOf(agentId).holdings);
+        if (held.some((s) => this.listings.has(s) && !this.auctions.has(`${s}:${String(p.date)}`))) return "auction the held listed symbols of the date first";
+        // 上場していない銘柄は、これまでどおりその日の終値で評価する。終値なしで評価できるのは、
+        // 取引対象がすべて上場した銘柄で、その日の板寄せが全部済んだとき（その日の価格がそろってから）
         const close = this.closes.get(p.date as string);
+        const auctioned = this.universe.size > 0 && [...this.universe].every((s) => this.listings.has(s) && this.auctions.has(`${s}:${String(p.date)}`));
+        if (close === undefined && auctioned && p.closeSeq === undefined) return null;
         return close !== undefined && p.closeSeq === close ? null : "closeSeq must be prices.close of the date";
       }
       case "corporate_actions.applied": {
@@ -518,7 +552,7 @@ export class EventLog {
         break;
       }
       case "company.listed":
-        this.listings.set(p.symbol as string, { sharesOutstanding: p.sharesOutstanding as number, prices: [{ date: "", price: p.price as number, seq: e.seq }], lastAuction: null, listedAt: e.recordedAt });
+        this.listings.set(p.symbol as string, { sharesOutstanding: p.sharesOutstanding as number, prices: [{ date: "", price: p.price as number, seq: e.seq }], lastAuction: null, listedAt: e.recordedAt, allotted: 0 });
         break;
       case "auction.cleared": {
         const l = this.listings.get(p.symbol as string)!;
@@ -528,6 +562,9 @@ export class EventLog {
         if (p.price !== null) l.prices.push({ date: p.date as string, price: p.price as number, seq: e.seq });
         break;
       }
+      case "shares.allotted":
+        this.listings.get(p.symbol as string)!.allotted += p.qty as number;
+        break;
       case "universe.set":
         this.universe = new Set(p.symbols as string[]);
         break;
@@ -613,7 +650,9 @@ export class EventLog {
       if (!tradingDate) continue;
       const ip = e.payload as Record<string, unknown>;
       if (e.type === "source.captured" && !((ip.publishedAt as number) < cutoffOf(tradingDate))) return "input published after the cutoff";
-      if ((e.type === "prices.open" || e.type === "prices.close" || e.type === "valuation.recorded") && !((ip.date as string) < tradingDate)) return "price input not before the trading date";
+      if ((e.type === "prices.open" || e.type === "prices.close" || e.type === "valuation.recorded" || e.type === "auction.cleared") && !((ip.date as string) < tradingDate)) return "price input not before the trading date";
+      // 決算の発表は、記録した時刻が締めより前のものだけ（source.captured の公開時刻と同じ決まり）
+      if (e.type === "company.disclosed" && !(e.recordedAt < cutoffOf(tradingDate))) return "input disclosed after the cutoff";
     }
     return null;
   }
@@ -655,6 +694,13 @@ function keysOf(type: EventType, p: Record<string, unknown>): string[] | string 
     case "company.listed":
       if (typeof p.symbol !== "string" || !SYMBOL.test(p.symbol)) return "invalid symbol";
       return [`listed:${p.symbol}`];
+    case "shares.allotted":
+      if (typeof p.symbol !== "string" || !SYMBOL.test(p.symbol)) return "invalid symbol";
+      return k(["agentId"], () => [`allot:${String(id)}:${String(p.symbol)}`]);
+    case "company.disclosed":
+      if (typeof p.symbol !== "string" || !SYMBOL.test(p.symbol)) return "invalid symbol";
+      if (typeof p.period !== "string" || !PERIOD.test(p.period)) return "invalid period";
+      return [`disclosed:${p.symbol}:${p.period}`];
     case "auction.cleared":
       if (typeof p.symbol !== "string" || !SYMBOL.test(p.symbol)) return "invalid symbol";
       return k(["date"], () => [`auction:${String(p.symbol)}:${String(p.date)}`]);
@@ -698,6 +744,8 @@ interface ListingState {
   lastAuction: string | null;
   /** 上場を記録した時刻。締めがこれより後の日からだけ板寄せできる */
   listedAt: number;
+  /** 最初の配分（shares.allotted）で配った株数の合計 */
+  allotted: number;
 }
 
 /** その日より前の直近の価格（値幅の基準。なければ上場の価格） */
