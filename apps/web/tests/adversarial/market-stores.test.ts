@@ -1,10 +1,9 @@
 // 検証役（大枠 #139：#113 PR-3b・#138 の確認）。架空の6社の市場を、メモリの保管と Postgres（PGlite）の保管で
-// 同じように回し、保管の違いで記録や台帳が変わらないか、決算の発表が先読みに使われないかを確かめる。
+// 同じように回し、保管の違いで記録や台帳が変わらないかを確かめる。
 // 成り立つはずのこと（#113 の lead コメント、MARKET_DESIGN §5、EVENT_LOG §3.2）：
 // (1) 同じ時計・同じ salt の並びなら、メモリと PGlite で、記録（ハッシュまで）も、作り直した台帳も同じになる
-// (2) どの注文票の入力の決算の発表も、その約定日の締めより前に記録したもの。マーケットメイカーは、締めより前に発表済みの
-//     直近の四半期を入力から落とさない（後の発表を使わず、前の発表を抜かさない）
-// (3) 上場の直後の発表のあとの決算の発表は、大引け（15:30）より後にしか記録できない（MARKET_DESIGN §5「決算は引け後 15:30」）
+// (2) 上場の直後の発表のあとの決算の発表は、大引け（15:30）より後にしか記録できない（MARKET_DESIGN §5「決算は引け後 15:30」）。
+//     記録の側（追記の検査）ではまだ確かめていない（下の it.fails。lead の判断で #72 に移した低い指摘）
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { EventStore } from "../../src/contracts";
@@ -12,7 +11,6 @@ import { verifyChain } from "../../src/events/chain";
 import { replay } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
 import { IngestedMarketData } from "../../src/ingest/market-data";
-import { cutoffOf } from "../../src/ledger/ledger";
 import { INITIAL_CASH } from "../../src/ledger/types";
 import { type RunnerDeps, runDay } from "../../src/runner/day";
 import { ruleAgents } from "../../src/runner/rule-agents";
@@ -20,7 +18,7 @@ import { RunnerValues } from "../../src/runner/values";
 import { COMPANIES } from "../../src/runner/world/companies";
 import { discloseDue } from "../../src/runner/world/disclosure";
 import { listCompanies } from "../../src/runner/world/listing";
-import { liquidityAgents, makerId, setUpParticipants } from "../../src/runner/world/participants";
+import { liquidityAgents, setUpParticipants } from "../../src/runner/world/participants";
 import { InMemoryEventStore } from "../../src/store/memory-store";
 import { PgEventStore, readAllEvents } from "../../src/store/pg-store";
 import { PgValueStore, type ValuesPort } from "../../src/store/pg-values";
@@ -35,7 +33,6 @@ const SEED = 20261106;
 const QUARTER = 3;
 const DAYS = ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-16", "2026-11-17", "2026-11-18"];
 const AIS = ["ai-ma5", "ai-reversal", "ai-hold"];
-const HOUR = 3_600_000;
 const holidayTables = new Map([[FIXTURE_HOLIDAYS.contentSha256, FIXTURE_HOLIDAYS]]);
 const p = (e: LogEvent) => e.payload as Record<string, unknown>;
 const salts = () => {
@@ -101,45 +98,33 @@ describe("メモリと PGlite の保管で、架空の市場を8営業日回す"
     }
   });
 
-  it("どの注文票の入力の決算の発表も、約定日の締めより前の記録。マーケットメイカーは、それまでの直近の発表を落とさない", () => {
-    const events = mem.events;
-    const disclosed = events.filter((e) => e.type === "company.disclosed");
-    for (const sheet of events.filter((e) => e.type === "order_sheet.committed")) {
-      const date = p(sheet).tradingDate as string;
-      const inputs = (p(sheet).inputSeqs as number[]).map((s) => events[s - 1]!);
-      for (const e of inputs.filter((x) => x.type === "company.disclosed")) expect(e.recordedAt, `sheet ${sheet.seq} uses disclosure ${e.seq}`).toBeLessThan(cutoffOf(date));
-      const maker = COMPANIES.find((c) => makerId(c.symbol) === p(sheet).agentId);
-      if (!maker) continue;
-      const expected = disclosed.filter((e) => p(e).symbol === maker.symbol && e.recordedAt < cutoffOf(date)).slice(-4).map((e) => e.seq);
-      const run = events[(p(sheet).runSeq as number) - 1]!;
-      const own = (p(run).inputSeqs as number[]).filter((s) => events[s - 1]!.type === "company.disclosed" && p(events[s - 1]!).symbol === maker.symbol);
-      expect(own.sort((a, b) => a - b), `sheet ${sheet.seq} on ${date}`).toEqual(expected);
-    }
-  });
-
-  it("上場の直後の発表のほかは、板寄せの日の15:30より後、次の営業日の締めより前に記録する", () => {
-    const later = mem.events.filter((e) => e.type === "company.disclosed").slice(COMPANIES.length);
-    expect(later.length).toBe(12);
-    for (const e of later) {
-      const i = DAYS.findIndex((d) => e.recordedAt >= cutoffOf(d) + 7 * HOUR && (DAYS[DAYS.indexOf(d) + 1] === undefined || e.recordedAt < cutoffOf(DAYS[DAYS.indexOf(d) + 1]!)));
-      expect(i, `disclosure ${e.seq}`).toBeGreaterThanOrEqual(0);
-      expect((i + 1) % QUARTER).toBe(0);
-    }
-  });
+  // 判断の入力の決算が直近4件だけであること・発表が15:30より後であることは、daily-production.test.ts（毎日の実行の流れ）と
+  // tests/runner/world/market.test.ts（15:30 の判定そのもの）が確かめるので、ここでは保管の違いで変わらないことに絞る
 });
 
-// 欠陥（宛先：core、src/events/append.ts の company.disclosed）：決算の発表の記録の時刻を確かめていない。
-// runner は時計で 15:30 より後に書くが、検査は通すので、取引時間の途中（10:00）に書いた発表も保管・照合の両方が受け入れる。
-// MARKET_DESIGN §5 は「決算は引け後 15:30」。上場の直後の最初の発表をどう扱うか（上場の時刻に合わせるか）は lead が決める
-it.fails("上場の直後の発表のあと、次の四半期の発表を取引日の 10:00 に書こうとすると断る", async () => {
+/** 上場と上場の直後の発表まで済ませた保管に、次の四半期の発表を at の時刻に書こうとする */
+async function discloseAt(at: number) {
   const clock = new FakeClock(jst("2026-11-06", 18));
   const values = new RunnerValues(salts());
   const store = new InMemoryEventStore(values, holidayTables, clock);
   await store.append({ type: "holidays.adopted", actor: "operator:owner", refs: [], payload: { holidaysSha256: FIXTURE_HOLIDAYS.contentSha256 } });
   await listCompanies(store, SEED);
   expect((await discloseDue(store, SEED, clock, COMPANIES, QUARTER)).length).toBe(COMPANIES.length);
-  clock.set(jst("2026-11-10", 10));
+  clock.set(at);
   const listing = (await store.read(0, 1000)).find((e) => e.type === "company.listed" && p(e).symbol === COMPANIES[0]!.symbol)!;
-  const r = await store.append({ type: "company.disclosed", actor: "system", refs: [listing.seq], payload: { symbol: COMPANIES[0]!.symbol, period: "2026-Q4", revenue: 1, netIncome: 1, eps: 10, dividendPerShare: 0 } });
+  return store.append({ type: "company.disclosed", actor: "system", refs: [listing.seq], payload: { symbol: COMPANIES[0]!.symbol, period: "2026-Q4", revenue: 1, netIncome: 1, eps: 10, dividendPerShare: 0 } });
+}
+
+it("比べるため：同じ中身の発表を、取引日の引け後（16:00）に書くなら受け入れる", async () => {
+  expect(await discloseAt(jst("2026-11-10", 16))).toMatchObject({ ok: true });
+});
+
+// 欠陥（宛先：core、src/events/append.ts の company.disclosed。lead の判断で #72 に移した低い指摘）：決算の発表の記録の時刻を
+// 確かめていない。runner は時計で 15:30 より後に書くが、検査は通すので、取引時間の途中（10:00）に書いた発表も保管・照合の両方が
+// 受け入れる。MARKET_DESIGN §5 は「決算は引け後 15:30」。上の試験と中身は同じで、時刻だけが違うので、断るなら時刻を理由に断るはず。
+// 上場の直後の最初の発表をどう扱うか（上場の時刻に合わせるか）は lead が決める
+it.fails("上場の直後の発表のあと、次の四半期の発表を取引日の 10:00 に書こうとすると、時刻を理由に断る", async () => {
+  const r = await discloseAt(jst("2026-11-10", 10));
   expect(r.ok).toBe(false);
+  expect(r.ok ? "" : r.reason).toMatch(/15:30|close|recorded ?at|time/i);
 });
