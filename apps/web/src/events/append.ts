@@ -3,7 +3,9 @@
 // 中身の検査は、順序と時点の判定に使う項目だけ。口座の再計算と照合、訂正・調整は別のPR（§8の3）。
 // 祝日の一覧の版と取引対象は、ログの holidays.adopted・universe.set が決める（§3.5）。照合でも、記録したときの版を使う。
 import { coveredHolidays, type HolidayTable } from "../holidays/table";
+import { MAX_PRICE, TICK } from "../ledger/auction";
 import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusinessDay, tradingDateFor, validateSheet } from "../ledger/ledger";
+import type { Listing } from "../ledger/ledger";
 import { INITIAL_CASH, type Account, type Order, type RejectReason } from "../ledger/types";
 import { CanonicalizeError } from "./canonical";
 import { sealEvent } from "./chain";
@@ -17,6 +19,7 @@ const WRITERS: Record<EventType, Writer> = {
   "prices.open": "system",
   "prices.close": "system",
   "corporate_action.announced": "system",
+  "company.listed": "system",
   "market.closed": "operator",
   "holidays.adopted": "operator",
   "universe.set": "operator",
@@ -71,7 +74,7 @@ const JUDGED_DATES: Partial<Record<EventType, string[]>> = {
 };
 
 /** 注文の中身で決まる拒否の理由（validateSheet の注文ごとの検査） */
-const ORDER_REASONS: ReadonlySet<RejectReason> = new Set<RejectReason>(["invalid_order", "unknown_symbol", "invalid_qty", "insufficient_holdings"]);
+const ORDER_REASONS: ReadonlySet<RejectReason> = new Set<RejectReason>(["invalid_order", "unknown_symbol", "invalid_qty", "insufficient_holdings", "invalid_price"]);
 
 /** 銘柄コード（例：7203、130A。テストでは架空の英字） */
 const SYMBOL = /^[0-9A-Z]{3,8}$/;
@@ -135,6 +138,8 @@ export class EventLog {
   /** いま採用している祝日の一覧と、範囲の外を例外にする集合 */
   private calendar: { table: HolidayTable; covered: ReadonlySet<string> } | null = null;
   private universe: ReadonlySet<string> = new Set();
+  /** 上場した銘柄（company.listed）。指値の値幅の基準の価格と、1件の株数の上限 */
+  private readonly listings = new Map<string, Listing>();
   /** 記録に出た一番遅い日付。一覧を替えても、ここまでの休場日は変えさせない */
   private latest = "";
 
@@ -249,7 +254,7 @@ export class EventLog {
     if (this.runProblem(d, agentId, "order") || this.inputProblem(p.inputSeqs, tradingDate) || this.inputProblem((run?.payload as Record<string, unknown> | undefined)?.inputSeqs, tradingDate)) return "invalid_sheet";
     const v = validateSheet(
       { agentId, tradingDate, committedAt: d.recordedAt, orders: p.orders as Order[] },
-      { universe: this.universe, alreadyCommitted: this.commits.has(`${agentId}:${tradingDate}`), account: this.ctx.accountOf(agentId), holidays: this.holidays(), accountAsOf: st.asOf },
+      { universe: this.universe, alreadyCommitted: this.commits.has(`${agentId}:${tradingDate}`), account: this.ctx.accountOf(agentId), holidays: this.holidays(), accountAsOf: st.asOf, listings: this.listings },
     );
     if (!v.ok) return v.reason;
     // 前の注文票が約定していない、またはその日以後をもう評価した口座では確定できない（§3.3 の順序）
@@ -320,6 +325,14 @@ export class EventLog {
           if (a.startDate >= exDate || a.asOf < before || (a.asOf === before && a.catchUp?.date === before)) continue;
           return `agent ${id} already finished the post-close of ${before}`;
         }
+        return null;
+      }
+      case "company.listed": {
+        // 架空の企業の上場（MARKET_DESIGN §1・§2）。社名・業種は空でない文字列、発行済株式数は正の整数、最初の価格は呼値に合う値
+        if (typeof p.name !== "string" || p.name === "" || typeof p.sector !== "string" || p.sector === "") return "name and sector are required";
+        if (!Number.isSafeInteger(p.sharesOutstanding) || (p.sharesOutstanding as number) <= 0) return "sharesOutstanding must be a positive integer";
+        const price = p.price;
+        if (!Number.isSafeInteger(price) || (price as number) < TICK || (price as number) > MAX_PRICE || (price as number) % TICK !== 0) return "price must be a positive multiple of the tick";
         return null;
       }
       case "prices.open":
@@ -446,6 +459,9 @@ export class EventLog {
         this.calendar = { table, covered: coveredHolidays(table, `${table.firstYear}-01-01`, `${table.lastYear}-12-31`) };
         break;
       }
+      case "company.listed":
+        this.listings.set(p.symbol as string, { sharesOutstanding: p.sharesOutstanding as number, refPrice: p.price as number });
+        break;
       case "universe.set":
         this.universe = new Set(p.symbols as string[]);
         break;
@@ -569,6 +585,9 @@ function keysOf(type: EventType, p: Record<string, unknown>): string[] | string 
       if (typeof p.symbol !== "string" || !SYMBOL.test(p.symbol)) return "invalid symbol";
       if (p.kind !== "split" && p.kind !== "dividend") return "invalid kind";
       return k(["exDate"], () => [`announce:${String(p.symbol)}:${String(p.kind)}:${String(p.exDate)}`]);
+    case "company.listed":
+      if (typeof p.symbol !== "string" || !SYMBOL.test(p.symbol)) return "invalid symbol";
+      return [`listed:${p.symbol}`];
     case "agent.registered":
       return k(["agentId"], () => [`agent:${String(id)}`]);
     case "order_sheet.committed":

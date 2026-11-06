@@ -1,4 +1,5 @@
 // 模擬売買の台帳（docs/PAPER_TRADING_RULES.md）。純関数だけで、外部や時計に依存しない。
+import { priceBand, TICK } from "./auction";
 import { cutoffOf, isValidDate, previousBusinessDay, tradingDateFor } from "./calendar";
 import { INITIAL_CASH, LOT, type Account, type Deciyen, type Fill, type Order, type OrderSheet, type RejectReason } from "./types";
 
@@ -17,6 +18,15 @@ export interface CommitContext {
   holidays: ReadonlySet<string>;
   /** account に反映済みの、最後の引け後処理（評価と分割・配当の反映）の営業日 */
   accountAsOf: string;
+  /** 上場した銘柄（company.listed）。指値の値幅と、1件の株数の上限に使う。ない銘柄には指値を出せない */
+  listings?: ReadonlyMap<string, Listing>;
+}
+
+export interface Listing {
+  /** 発行済株式数。1件の注文の株数の上限 */
+  sharesOutstanding: number;
+  /** 値幅の基準の価格（前日の価格。板寄せの価格がまだなければ上場の価格） */
+  refPrice: Deciyen;
 }
 
 /**
@@ -39,6 +49,14 @@ export function validateSheet(sheet: OrderSheet, ctx: CommitContext): { ok: true
     const held = ctx.account.holdings[o.symbol]?.qty ?? 0;
     // 100株単位。ただし端数を含む全株の売りは認める
     if (o.qty % LOT !== 0 && !(o.side === "sell" && o.qty === held)) return { ok: false, reason: "invalid_qty" };
+    const listing = ctx.listings?.get(o.symbol);
+    if (listing && o.qty > listing.sharesOutstanding) return { ok: false, reason: "invalid_qty" };
+    if (o.limit !== undefined) {
+      // 指値は、呼値に合い、基準の価格から決まる値幅の内側（MARKET_DESIGN §2）
+      if (!listing || !Number.isSafeInteger(o.limit) || o.limit % TICK !== 0) return { ok: false, reason: "invalid_price" };
+      const band = priceBand(listing.refPrice);
+      if (o.limit < band.lower || o.limit > band.upper) return { ok: false, reason: "invalid_price" };
+    }
     if (o.side === "sell") selling.set(o.symbol, (selling.get(o.symbol) ?? 0) + o.qty);
   }
   for (const [symbol, qty] of selling) {
@@ -69,6 +87,7 @@ function fillOne(acc: Account, o: Order, price: Deciyen | null): { account: Acco
   const expired = (reason: Fill["reason"]) => ({ account: acc, fill: { ...base, qty: 0, price, amount: 0, status: "expired" as const, reason } });
   if (price === null) return expired("no_open_price");
   if (!Number.isSafeInteger(price) || price <= 0) throw new Error(`invalid open price for ${o.symbol}: ${price}`);
+  if (o.limit !== undefined && (o.side === "buy" ? price > o.limit : price < o.limit)) return expired("limit_not_reached");
 
   const h = acc.holdings[o.symbol] ?? { qty: 0, cost: 0 };
   if (!Number.isSafeInteger(o.qty) || o.qty <= 0 || (o.qty % LOT !== 0 && !(o.side === "sell" && o.qty === h.qty))) {
