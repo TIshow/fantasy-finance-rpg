@@ -1,7 +1,8 @@
 // 検証（verifier、#139）：AI の判断の出力が、記録の正規化（NFC・安全な整数・U+0000 を含まない）に合わないとき、
 // 1つの AI のせいで、その日の全員の判断が止まらないか。runner（src/runner/day.ts）は、判断が例外を投げた AI を
-// 失敗の判断の記録（ok: false）にして次の AI へ進む。出力が記録に書けない形のときも、同じく次へ進むべき
-// （LLM の出力は、NFC でない文字や小数の株数を返しうる。#29 で LLM を入れる前に直す）。
+// 失敗の判断の記録（ok: false）にして次の AI へ進む。出力が記録に書けない形のときも、失敗の判断の記録
+// （errorCode: invalid_output）にして次へ進む（LLM の出力は、NFC でない文字や小数の株数を返しうる）。
+// 以前は runDay ごと例外で止まっていた（verifier が #139 で報告し、#148 で直った）。
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { productionSetup, runDaily } from "../../scripts/daily-lib";
@@ -55,22 +56,28 @@ async function memoryDay(bad: RunnerAgent) {
   return { outcome, events: await store.read(0, 100_000) };
 }
 
+/** 書けない出力の AI は、注文票も投稿も書かず、失敗の判断の記録（invalid_output）だけを残す */
+const failedAsInvalid = (events: readonly LogEvent[]) =>
+  events.some((e) => e.type === "agent.run" && p(e).agentId === BAD && p(e).ok === false && p(e).errorCode === "invalid_output") &&
+  !events.some((e) => (e.type === "order_sheet.committed" || e.type === "post.published") && p(e).agentId === BAD);
+
 /** その日、AI 以外の参加者（売買役7つ）がすべて注文票を確定したか */
 const othersCommitted = (events: readonly LogEvent[]) => events.filter((e) => e.type === "order_sheet.committed" && p(e).agentId !== BAD && p(e).tradingDate === DAY).length;
 
 describe("判断の出力が記録に書けない形でも、ほかの参加者の判断は進む（メモリの保管）", () => {
-  // 欠陥（宛先 platform）：src/runner/day.ts の decide で、canonicalize(decision)（出力の正規化）が try の外にあり、
-  // 正規化できない出力だと runDay ごと例外になる。回し直しても同じ判断を作り直すので、その日は締めまで誰も判断できない
-  it.fails("投稿の本文が NFC でない（か + 結合用の濁点）", async () => {
+  // 直った（#148）：以前は decide の canonicalize(decision)（出力の正規化）が try の外にあり、runDay ごと例外になっていた
+  it("投稿の本文が NFC でない（か + 結合用の濁点）", async () => {
     const r = await memoryDay(fixed({ orders: [], post: { board: COMPANIES[0]!.symbol, text: "が" }, note: "" }));
     expect(r.outcome).toBe("ok");
     expect(othersCommitted(r.events)).toBe(COMPANIES.length + 1);
+    expect(failedAsInvalid(r.events)).toBe(true);
   });
 
-  it.fails("注文の株数が小数（150.5株）", async () => {
+  it("注文の株数が小数（150.5株）", async () => {
     const r = await memoryDay(fixed({ orders: [{ symbol: COMPANIES[0]!.symbol, side: "buy", qty: 150.5 }], post: null, note: "" }));
     expect(r.outcome).toBe("ok");
     expect(othersCommitted(r.events)).toBe(COMPANIES.length + 1);
+    expect(failedAsInvalid(r.events)).toBe(true);
   });
 
   it("100株単位でない株数（150株）は、注文票の拒否として残り、ほかの参加者は進む（比較のため）", async () => {
@@ -91,17 +98,16 @@ describe("投稿の本文に U+0000 があっても、ほかの参加者の判�
 
   const bad = fixed({ orders: [], post: { board: COMPANIES[0]!.symbol, text: "a\u0000b" }, note: "" });
 
-  // 欠陥（宛先 platform）：#110 PR-2d で、正規化（checkText）が U+0000 を断るようになった。そのため、メモリの保管でも、
-  // 上の NFC の場合と同じく、decide の canonicalize(decision) が try の外で例外になり、runDay ごと止まる
-  it.fails("メモリの保管でも、その日の全員が注文票を確定する", async () => {
+  // 直った（#148）：#110 PR-2d で正規化（checkText）が U+0000 を断るようになり、メモリの保管でも runDay ごと止まっていた
+  it("メモリの保管でも、その日の全員が注文票を確定する", async () => {
     const r = await memoryDay(bad);
     expect(r.outcome).toBe("ok");
     expect(othersCommitted(r.events)).toBe(COMPANIES.length + 1);
+    expect(failedAsInvalid(r.events)).toBe(true);
   });
 
-  // 欠陥（宛先 platform）：Postgres の保管でも同じく runDaily が例外で止まる（#110 PR-2d の前は、PgValueStore.putBody が
-  // 断っていた）。回し直しても同じ判断を作り直して、また止まる。その日は締めまで、後に並ぶ全員の判断がなくなる
-  it.fails("Postgres の保管でも、その日の全員が注文票を確定する（回し直しを2回まで許す）", async () => {
+  // 直った（#148）：以前は Postgres の保管でも runDaily が例外で止まり、回し直しても同じ判断を作り直して、また止まっていた
+  it("Postgres の保管でも、その日の全員が注文票を確定する（回し直しを2回まで許す）", async () => {
     await resetSchema(pg);
     await migrate(db);
     const clock = new FakeClock(jst(DAY, 6, 50));
@@ -128,5 +134,8 @@ describe("投稿の本文に U+0000 があっても、ほかの参加者の判�
     }
     const events = await readAllEvents(db);
     expect(events.filter((e) => e.type === "order_sheet.committed" && p(e).agentId !== BAD && p(e).tradingDate === DAY).length, errors.join(" / ")).toBe(3 + COMPANIES.length + 1);
+    // 1回目で進む（回し直しは要らない）。書けない出力の AI は、失敗の判断の記録だけを残す
+    expect(errors).toEqual([]);
+    expect(failedAsInvalid(events)).toBe(true);
   }, 120_000);
 });
