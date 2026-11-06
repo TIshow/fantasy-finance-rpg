@@ -14,6 +14,8 @@ describe("投稿の本文・種類・見立ての読み取り", () => {
     expect(readText("本文")).toBe("本文");
     for (const bad of [null, undefined, 5, [], { text: "a" }]) expect(readText(bad)).toBeNull();
     expect([intentOf("news"), intentOf("gossip"), intentOf("News"), intentOf(3), intentOf(undefined)]).toEqual(["news", null, null, null, null]);
+    // 一覧の外の名前・型の違う値・プロトタイプ由来の名前は、必ず null
+    for (const bad of ["constructor", "__proto__", "toString", " news", ["news"], { toString: () => "news" }]) expect([intentOf(bad), stanceOf(bad)]).toEqual([null, null]);
     expect([stanceOf("bear"), stanceOf("up"), stanceOf(null)]).toEqual(["bear", null, null]);
   });
 });
@@ -31,7 +33,7 @@ describe("buildBoard（手で組んだ小さなログ）", () => {
     post("ai-ma5", "X1", "h3", { replyTo: 6, intent: "feeling", stance: "gossip" }, 12), // 7 返信の返信
     post("ai-hold", "X1", "h4", { replyTo: 7, citeSeqs: [5, 1] }, 13), // 8 深さは2まで。投稿 5 と登録の記録を引用
     post("ai-hold", "X2", "h5", { replyTo: 5 }, 14), // 9 親が別の掲示板 → 根
-    post("ai-hold", "X1", "h6", {}, 15), // 10 根（新しい）
+    post("ai-hold", "X1", "h6", { intent: "news", stance: "bear" }, 15), // 10 根（新しい）。のちに非表示
     ev("fills.executed", { agentId: "ai-ma5", sheetSeq: 10, tradingDate: "2026-11-10", fills: [{ symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }, { symbol: "X2", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }] }, T("2026-11-10", 9)), // 11
     ev("content.withdrawn", { targetSeq: 10, reason: "誤り", textRemoved: false }, T("2026-11-10", 10)), // 12
     ev("valuation.recorded", { agentId: "ai-ma5", date: "2026-11-10", cash: 0, positions: [{ symbol: "X1", qty: 100, price: 120, closeSeq: 4 }], total: 12_000 }, T("2026-11-10", 16)),
@@ -49,12 +51,13 @@ describe("buildBoard（手で組んだ小さなログ）", () => {
     expect(buildBoard(v, "X2")!.posts.map((p) => [p.seq, p.depth])).toEqual([[9, 0]]); // 親が別の掲示板なら根
   });
 
-  it("種類と見立ては本文から。ない投稿は未分類・見立てなし。非表示は同じ位置に理由", () => {
+  it("種類と見立ては記録の項目から。ない投稿は未分類・見立てなし。非表示は同じ位置に理由", () => {
     const by = Object.fromEntries(b.posts.map((p) => [p.seq, p]));
     expect(by[5]).toMatchObject({ intent: "strategy", stance: "bull", text: "戦略の話", withdrawn: null });
     expect(by[6]).toMatchObject({ intent: null, stance: null, text: "返信" });
     expect(by[7]).toMatchObject({ intent: "feeling", stance: null });
-    expect(by[10]).toMatchObject({ text: null, withdrawn: "誤り", intent: null });
+    // 非表示の投稿は、記録に種類・見立てがあっても出さず、未分類に数える
+    expect(by[10]).toMatchObject({ text: null, withdrawn: "誤り", intent: null, stance: null });
     expect(b.counts).toEqual({ strategy: 1, feeling: 1, knowledge: 0, news: 0, none: 3 });
   });
 

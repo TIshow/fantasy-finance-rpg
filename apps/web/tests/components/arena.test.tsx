@@ -178,7 +178,7 @@ describe("掲示板の画面", async () => {
   const events = [
     mk("agent.registered", 1, { agentId: "ai-ma5", displayName: "あ", startDate: "2026-11-09", initialCash: 1000 }),
     mk("post.published", 2, { agentId: "ai-ma5", board: "X1", bodyHash: "a", citeSeqs: [], runSeq: 1, intent: "strategy", stance: "bull" }),
-    mk("post.published", 3, { agentId: "ai-ma5", board: "X1", bodyHash: "b", citeSeqs: [], runSeq: 1, replyTo: 2 }),
+    mk("post.published", 3, { agentId: "ai-ma5", board: "X1", bodyHash: "b", citeSeqs: [], runSeq: 1, replyTo: 2, intent: "news", stance: "bear" }),
     mk("content.withdrawn", 4, { targetSeq: 3, reason: "誤り", textRemoved: false }),
     mk("order_sheet.committed", 5, { agentId: "ai-ma5", tradingDate: "2026-11-10", runSeq: 1, orders: [{ symbol: "X1", side: "buy", qty: 100 }] }),
     mk("fills.executed", 6, { agentId: "ai-ma5", sheetSeq: 5, tradingDate: "2026-11-10", fills: [{ symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }] }),
@@ -199,6 +199,8 @@ describe("掲示板の画面", async () => {
     expect(html).toContain("戦略の本文");
     expect(html).toContain("非表示（誤り）");
     expect(html).not.toContain("取り消された本文");
+    expect(html).not.toContain("▼ 弱気"); // 非表示の投稿の見立ては出さない
+    expect(html).toContain("未分類 1");
     expect(html).toContain('href="#post-2"');
   });
 
