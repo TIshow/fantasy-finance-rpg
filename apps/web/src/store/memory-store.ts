@@ -51,15 +51,23 @@ export class InMemoryEventStore implements EventStore {
    */
   static async fromEvents(events: readonly LogEvent[], values: ValueStore, holidayTables: ReadonlyMap<string, HolidayTable>, clock: Clock, readMax = READ_MAX): Promise<InMemoryEventStore> {
     const store = new InMemoryEventStore(values, holidayTables, clock, readMax);
-    for (const e of events) {
-      const problem = await store.log.admit(e);
-      if (problem) throw new Error(problem);
-      await store.ledger.apply(e);
-      store.applied++;
-    }
+    await store.adopt(events);
     const last = events.at(-1);
     if (last && !(clock.now() >= last.recordedAt)) throw new RangeError("clock is earlier than the last recordedAt");
     return store;
+  }
+
+  /**
+   * 保存済みのイベントを、いまの末尾の続きとして取り込む（DB の保管が、別の処理の書いた分に追いつくのにも使う）。
+   * 各イベントを EventLog.admit に通してから台帳に当てる。通らなければ例外。時計は見ない（追記が断る）。
+   */
+  async adopt(events: readonly LogEvent[]): Promise<void> {
+    for (const e of events) {
+      const problem = await this.log.admit(e);
+      if (problem) throw new Error(problem);
+      await this.ledger.apply(e);
+      this.applied++;
+    }
   }
 
   async read(afterSeq = 0, limit = this.readMax): Promise<readonly LogEvent[]> {
