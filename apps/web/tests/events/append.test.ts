@@ -210,6 +210,8 @@ describe("書ける者と入力の形（§3・§4）", () => {
     expect(r3.ok && r3.event.payload).toMatchObject({ reason: "invalid_qty", ordersUnreadable: true });
     expect(await reason(log.append({ ...sys("prices.open", jst("2026-11-10", 9), {}), payload: null as unknown as Record<string, unknown> }))).toBe("payload must be an object");
     expect(await reason(log.append(op("ledger.adjusted", jst("2026-11-10", 9), { agentId: "alpha" })))).toBe("invalid correctionSeq");
+    // NUL 文字は Postgres に保存できないので、保存の前に、追記の拒否として返す（#110 PR-2d）
+    expect(await reason(log.append(op("agent.suspended", jst("2026-11-10", 9), { agentId: "*", scope: "orders", reason: "点検\u0000" })))).toBe("NUL character at $.payload.reason");
   });
 });
 

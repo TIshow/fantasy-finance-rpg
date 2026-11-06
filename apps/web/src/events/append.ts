@@ -6,7 +6,7 @@ import { coveredHolidays, type HolidayTable } from "../holidays/table";
 import { MAX_PRICE, TICK } from "../ledger/auction";
 import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusinessDay, tradingDateFor, validateSheet } from "../ledger/ledger";
 import type { Listing } from "../ledger/ledger";
-import { registrationProblem, type Account, type Order, type RejectReason } from "../ledger/types";
+import { registrationProblem, type Account, type Order, type ParticipantKind, type RejectReason } from "../ledger/types";
 import { CanonicalizeError } from "./canonical";
 import { sealEvent } from "./chain";
 import { POST_INTENTS, POST_STANCES, type Actor, type EventType, type LogEvent } from "./types";
@@ -126,6 +126,8 @@ interface AgentState {
    * 追加の処理、評価、次の注文票の確定のどれかで消える
    */
   catchUp: { date: string; closedSeq: number } | null;
+  /** 参加者の種類（agent.registered の kind。書いていなければ AI投資家） */
+  kind: ParticipantKind;
 }
 
 /** 臨時休場の日を足した休場日の集合（calendar は has() だけを使う） */
@@ -398,6 +400,8 @@ export class EventLog {
         if (l.lastAuction !== null) return "the symbol is already auctioned";
         // 最初の評価の日に板寄せができる銘柄だけ（できないと、評価が書けず先へ進めない）
         if (!this.universe.has(p.symbol as string)) return "symbol is not in the universe";
+        // AI投資家は現金だけで始め、株は自分の売買でしか持たない（#110 PR-2d）
+        if (st!.kind === "investor") return "shares cannot be allotted to an investor";
         if (cutoffOf(nextBusinessDay(st!.asOf, H)) <= l.listedAt) return "the symbol cannot be auctioned on the first valuation date";
         if (st!.pending || st!.valuedDate !== null || [...this.commits].some((c) => c.startsWith(`${agentId}:`))) return "the agent already started trading";
         if (!Number.isSafeInteger(p.qty) || (p.qty as number) <= 0) return "qty must be a positive integer";
@@ -598,7 +602,7 @@ export class EventLog {
         break;
       }
       case "agent.registered":
-        this.agents.set(agentId, { startDate: p.startDate as string, asOf: previousBusinessDay(p.startDate as string, this.holidays()), valuedDate: null, pending: null, catchUp: null });
+        this.agents.set(agentId, { startDate: p.startDate as string, asOf: previousBusinessDay(p.startDate as string, this.holidays()), valuedDate: null, pending: null, catchUp: null, kind: (p.kind as ParticipantKind | undefined) ?? "investor" });
         break;
       case "order_sheet.committed":
         this.sheetsByDate.set(p.tradingDate as string, [...(this.sheetsByDate.get(p.tradingDate as string) ?? []), e.seq]);

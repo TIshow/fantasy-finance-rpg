@@ -91,19 +91,21 @@ describe("参加者の種類・最初の現金・最初の配分（#110 PR-2c）
   it("配分は、システムだけが、参加者ごと・銘柄ごとに1回、発行済株式数の内で、最初の板寄せより前に書ける", async () => {
     const { w, listed } = await setup();
     const at = jst("2026-11-09", 20);
-    expect(await w.rule({ ...sys("shares.allotted", at, { agentId: "alpha", symbol: "NEO1", qty: 100 }), actor: "operator:owner" })).toBe("shares.allotted must be written by system");
+    // AI投資家ではない参加者 nz で、配分の決まりを確かめる（AI投資家に配らないことは次の試験）
+    await w.add(op("agent.registered", jst("2026-11-09", 19, 50), { agentId: "nz", startDate: T, kind: "noise", initialCash: 30_000_000 * 10 }));
+    expect(await w.rule({ ...sys("shares.allotted", at, { agentId: "nz", symbol: "NEO1", qty: 100 }), actor: "operator:owner" })).toBe("shares.allotted must be written by system");
     expect(await w.rule(sys("shares.allotted", at, { agentId: "mm", symbol: "NEO1", qty: 100 }))).toContain("allot:mm:NEO1");
-    expect(await w.rule(sys("shares.allotted", at, { agentId: "alpha", symbol: "OLD1", qty: 100 }))).toBe("symbol is not listed");
-    expect(await w.rule(sys("shares.allotted", at, { agentId: "alpha", symbol: "NEO1", qty: 495_001 }))).toBe("allotments exceed sharesOutstanding");
-    expect(await w.rule(sys("shares.allotted", at, { agentId: "alpha", symbol: "NEO1", qty: 0 }))).toBe("qty must be a positive integer");
-    expect(await w.rule(sys("shares.allotted", at, { agentId: "alpha", symbol: "NEO1", qty: 100, memo: "x" }))).toBe("unknown field in an allotment");
+    expect(await w.rule(sys("shares.allotted", at, { agentId: "nz", symbol: "OLD1", qty: 100 }))).toBe("symbol is not listed");
+    expect(await w.rule(sys("shares.allotted", at, { agentId: "nz", symbol: "NEO1", qty: 495_001 }))).toBe("allotments exceed sharesOutstanding");
+    expect(await w.rule(sys("shares.allotted", at, { agentId: "nz", symbol: "NEO1", qty: 0 }))).toBe("qty must be a positive integer");
+    expect(await w.rule(sys("shares.allotted", at, { agentId: "nz", symbol: "NEO1", qty: 100, memo: "x" }))).toBe("unknown field in an allotment");
     // 取引対象にない銘柄や、最初の評価の日（11/10）の締めより後に上場した銘柄は、その日に板寄せができないので配らない
     await w.add(sys("company.listed", at, { symbol: "NEO2", name: "ネオ銀行", sector: "銀行", sharesOutstanding: 500_000, price: 5_000 }));
-    expect(await w.rule(sys("shares.allotted", at, { agentId: "alpha", symbol: "NEO2", qty: 100 }))).toBe("symbol is not in the universe");
+    expect(await w.rule(sys("shares.allotted", at, { agentId: "nz", symbol: "NEO2", qty: 100 }))).toBe("symbol is not in the universe");
     // 注文票を確定したあとの参加者には配らない。板寄せのあとの銘柄も
-    await w.commit("alpha", [], jst("2026-11-09", 21));
-    expect(await w.rule(sys("shares.allotted", jst("2026-11-09", 22), { agentId: "alpha", symbol: "NEO1", qty: 100 }))).toBe("the agent already started trading");
-    await w.add(op("agent.registered", jst("2026-11-09", 22), { agentId: "late", startDate: T, initialCash: INITIAL_CASH }));
+    await w.commit("nz", [], jst("2026-11-09", 21));
+    expect(await w.rule(sys("shares.allotted", jst("2026-11-09", 22), { agentId: "nz", symbol: "NEO1", qty: 100 }))).toBe("the agent already started trading");
+    await w.add(op("agent.registered", jst("2026-11-09", 22), { agentId: "late", startDate: T, kind: "noise", initialCash: INITIAL_CASH }));
     await w.add(sys("auction.cleared", cutoffOf(T) + 60_000, { symbol: "NEO1", date: T, refSeq: listed, sheetSeqs: [w.log.events.find((e) => e.type === "order_sheet.committed")!.seq], price: null, volume: 0 }, [listed, w.log.events.find((e) => e.type === "order_sheet.committed")!.seq]));
     expect(await w.rule(sys("shares.allotted", cutoffOf(T) + 120_000, { agentId: "late", symbol: "NEO1", qty: 100 }))).toBe("the symbol is already auctioned");
     const after = cutoffOf(T) + 180_000;
@@ -123,10 +125,15 @@ describe("参加者の種類・最初の現金・最初の配分（#110 PR-2c）
     }
     // ばらばらに売買する参加者には配れる
     expect(await w.ledger.check({ type: "shares.allotted", payload: { agentId: "nz", symbol: "NEO1", qty: 100 } })).toBeNull();
-    // 追記の処理だけを通して AI投資家に配った記録を作ると、確かめ直しが断る
-    const r = await w.log.append(sys("shares.allotted", at, { agentId: "alpha", symbol: "NEO1", qty: 100 }));
-    expect(r.ok).toBe(true);
-    await expect(replay(w.log.events, NO_VALUES, CTX)).rejects.toThrow(/seq \d+ \(shares\.allotted\): shares cannot be allotted to an investor/);
+    // 追記の処理も断る
+    for (const agentId of ["alpha", "plain"]) {
+      expect(await w.rule(sys("shares.allotted", at, { agentId, symbol: "NEO1", qty: 100 })), agentId).toBe("shares cannot be allotted to an investor");
+    }
+    // 保存済みの mm への配分を alpha に書き換えた記録は、確かめ直しが断る
+    const events = w.log.events;
+    const k = events.findIndex((e) => e.type === "shares.allotted");
+    const forged = events.map((e, n) => (n === k ? { ...e, payload: { ...(e.payload as Record<string, unknown>), agentId: "alpha" } } : e));
+    await expect(replay(forged, NO_VALUES, CTX)).rejects.toThrow(/seq \d+ \(shares\.allotted\): shares cannot be allotted to an investor/);
     expect(w.ledger.account("alpha")).toEqual({ cash: INITIAL_CASH, holdings: {} });
   });
 });
