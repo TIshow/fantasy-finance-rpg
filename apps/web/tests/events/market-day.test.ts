@@ -75,6 +75,17 @@ describe("参加者の種類・最初の現金・最初の配分（#110 PR-2c）
     expect(await w.rule(reg("zero", { kind: "noise", initialCash: 0 }))).toBe("initialCash must be a positive amount up to MAX_INITIAL_CASH");
     const again = await replay(w.log.events, NO_VALUES, CTX);
     expect(again.kindOf("noise")).toBe("noise");
+    expect(() => again.kindOf("nobody")).toThrow("unknown agent nobody");
+    expect(await w.rule(reg("x", { kind: null, initialCash: INITIAL_CASH }))).toBe("kind must be investor, market_maker or noise");
+    // 保存済みの登録を書き換えたものは、確かめ直し（台帳）が断る
+    const saved = w.log.events.find((e) => e.type === "agent.registered" && (e.payload as Record<string, unknown>).agentId === "plain")!;
+    for (const [patch, why] of [
+      [{ kind: "bank" }, "kind must be investor, market_maker or noise"],
+      [{ kind: "investor", initialCash: MM_CASH }, "initialCash of an investor must be INITIAL_CASH"],
+      [{ initialCash: MM_CASH }, "initialCash of an investor must be INITIAL_CASH"],
+    ] as const) {
+      await expect(new Ledger(NO_VALUES).apply({ ...saved, seq: 1, payload: { ...(saved.payload as Record<string, unknown>), ...patch } })).rejects.toThrow(why);
+    }
   });
 
   it("配分は、システムだけが、参加者ごと・銘柄ごとに1回、発行済株式数の内で、最初の板寄せより前に書ける", async () => {

@@ -263,12 +263,14 @@ export class Ledger {
     const at = `seq ${e.seq} (${e.type})`;
     const none = () => {};
     switch (e.type) {
-      case "agent.registered":
-        if (registrationProblem(p.kind, p.initialCash)) throw new Error(`${at}: ${registrationProblem(p.kind, p.initialCash)}`);
+      case "agent.registered": {
+        const why = registrationProblem(p.kind, p.initialCash);
+        if (why) throw new Error(`${at}: ${why}`);
         return () => {
           this.accounts.set(p.agentId as string, newAccount(p.initialCash as number));
           this.kinds.set(p.agentId as string, (p.kind as ParticipantKind | undefined) ?? "investor");
         };
+      }
       case "shares.allotted": {
         // 最初の配分。取得原価は上場の価格 × 株数（現金は動かさない）
         const listing = (this.listed.get(p.symbol as string) ?? [])[0];
