@@ -12,6 +12,7 @@ import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay } from "../src/le
 import { INITIAL_CASH } from "../src/ledger/types";
 import { type RunnerAgent, type RunnerDeps, type StageResult, runDay } from "../src/runner/day";
 import { ruleAgents } from "../src/runner/rule-agents";
+import { discloseDue } from "../src/runner/world/disclosure";
 import type { RunnerValues } from "../src/runner/values";
 import { listCompanies } from "../src/runner/world/listing";
 import { liquidityAgents, setUpParticipants } from "../src/runner/world/participants";
@@ -80,6 +81,8 @@ export async function productionSetup({ store, clock, seed, holidayTable }: Prep
     await must("holidays.adopted", store.append({ type: "holidays.adopted", actor: "operator:owner", refs: [], payload: { holidaysSha256: holidayTable.contentSha256 } }));
   }
   await listCompanies(store, seed);
+  // 決算の発表：上場の直後の四半期と、前の実行が引けのあとに書けなかった分（時期が来ていて、まだ書いていないもの）
+  await discloseDue(store, seed, clock);
   const startDate = firstOpenDay(clock.now(), holidayTable);
   await setUpParticipants(store, startDate);
   const investors = await ruleAgents();
@@ -124,7 +127,10 @@ async function runLocked(date: string, o: DailyOptions): Promise<StageResult[]> 
     clock: o.clock,
     waitUntil: o.waitUntil ?? (async () => {}),
   };
-  return runDay(date, deps);
+  const results = await runDay(date, deps);
+  // 引けのあと（15:30 を過ぎ、板寄せの日が20日たまったとき）に、次の四半期の決算を発表する。時期が来ていなければ何も書かない
+  const disclosed = await discloseDue(store, o.seed ?? WORLD_SEED, o.clock);
+  return disclosed.length > 0 ? [...results, { stage: "disclose", status: "written", detail: disclosed.join(",") }] : results;
 }
 
 /** 判断の段が締めに間に合わなかった（全員の判断がその日はなくなる）。実行を失敗として終わらせる印 */

@@ -71,6 +71,8 @@ describe("本番の入口で20営業日を回す（PGlite）", () => {
     // 決算の発表：上場の直後の1回（6社）と、板寄せが20日たまった最後の日の引けのあとの1回（6社）
     const disclosed = of("company.disclosed");
     expect(disclosed.length).toBeGreaterThanOrEqual(1);
+    expect(disclosed).toHaveLength(12);
+    expect(new Set(disclosed.map((e) => p(e).period))).toEqual(new Set(["2026-Q3", "2026-Q4"]));
     expect(new Set(disclosed.map((e) => p(e).symbol))).toEqual(new Set(COMPANIES.map((c) => c.symbol)));
 
     // 板寄せの値段：6社それぞれに値段のついた日があり、6社そろって値段のついた日もある
