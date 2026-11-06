@@ -9,6 +9,7 @@ import type { ValueStore } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
 import { pgDb, pgDbFromEnv } from "../../src/store/pg-db";
 import { PgEventStore, checkAppendOnlyRole, type PgStoreDeps } from "../../src/store/pg-store";
+import { PgValueStore } from "../../src/store/pg-values";
 import { migrate, type SqlDb } from "../../src/store/sql";
 import { describeEventStoreContract, holidayTable, seedAgent } from "../contracts/conformance";
 import { FakeClock, jst } from "../contracts/fakes";
@@ -179,7 +180,7 @@ describe("追記だけであること（DB が守る）", () => {
       expect(await checkAppendOnlyRole(db)).toEqual([]);
       // 運営者の手順に入れる確認の SQL（db/ops/check_app_role.sql）も、想定の結果を返す
       const check = (await pg.query(readFileSync(new URL("../../db/ops/check_app_role.sql", import.meta.url), "utf8"))).rows[0];
-      expect(check).toEqual({ who: "ffr_app", superuser: false, write_all_data: false, can_select: true, can_insert: true, can_update: false, can_delete: false, can_truncate: false });
+      expect(check).toEqual({ who: "ffr_app", superuser: false, write_all_data: false, can_select: true, can_insert: true, can_update: false, can_delete: false, can_truncate: false, values_can_select: true, values_can_insert: true, values_can_update: false, values_can_delete: false, values_can_truncate: false });
       expect((await store.read()).length).toBe(5);
       for (const sql of ["UPDATE events SET type = 'x'", "DELETE FROM events", "TRUNCATE events", "DROP TABLE events"]) await expect(pg.exec(sql)).rejects.toThrow(/permission denied|must be owner/);
       const clock = new FakeClock(jst("2026-11-09", 23));
@@ -254,6 +255,23 @@ describe.skipIf(!testUrl)("PgEventStore（pg ドライバ・TEST_DATABASE_URL）
       expect(await verifyChain(await a.read())).toEqual([]);
     } finally {
       await Promise.all([d1.close(), d2.close()]);
+    }
+  });
+
+  it("ログの外の値と本文を pg ドライバで置いて読み戻せる。更新・削除は断られる", async () => {
+    const d = pgDb({ connectionString: testUrl!, schema, max: 2 });
+    try {
+      await d.exec("DROP TABLE IF EXISTS events CASCADE; DROP TABLE IF EXISTS stored_values CASCADE");
+      await migrate(d);
+      const store = await PgValueStore.open(d);
+      const v = await store.putValue({ NEO1: 10_000, big: Number.MAX_SAFE_INTEGER });
+      const b = await store.putBody("本文 👨‍👩‍👧");
+      const again = await PgValueStore.open(d);
+      expect(again.get(v)?.value).toEqual({ NEO1: 10_000, big: Number.MAX_SAFE_INTEGER });
+      expect(again.body(b)?.value).toBe("本文 👨‍👩‍👧");
+      await expect(d.exec("DELETE FROM stored_values")).rejects.toThrow(/append-only/);
+    } finally {
+      await d.close();
     }
   });
 
