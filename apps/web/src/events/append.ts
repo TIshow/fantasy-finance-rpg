@@ -153,6 +153,8 @@ export class EventLog {
   private readonly listings = new Map<string, ListingState>();
   /** 板寄せの結果（キーは「銘柄:日付」） */
   private readonly auctions = new Map<string, number>();
+  /** 最後に板寄せをした日（全銘柄で）。板寄せの日付は、銘柄を問わず戻らない */
+  private lastAuctionDate = "";
   /** 約定日ごとの、確定した注文票の seq（板寄せに渡す全員の注文票） */
   private readonly sheetsByDate = new Map<string, number[]>();
   /** 記録に出た一番遅い日付。一覧を替えても、ここまでの休場日は変えさせない */
@@ -372,6 +374,9 @@ export class EventLog {
         if (this.closed.has(date) || !isBusinessDay(date, H)) return "market was closed";
         if (d.recordedAt < cutoffOf(date)) return "auction recorded before the cutoff";
         if (l.lastAuction !== null && l.lastAuction >= date) return "a later auction of the symbol is already recorded";
+        // 現金の確かめは、注文票のほかの銘柄の値幅も使うので、ほかの銘柄の前の日の板寄せを後から書くと結果が変わる
+        if (date < this.lastAuctionDate) return "a later auction is already recorded";
+        if (cutoffOf(date) <= l.listedAt) return "auction before the listing";
         if (p.refSeq !== priceBefore(l, date)?.seq) return "refSeq must be the latest price before the date";
         if (!sameSeqs(p.sheetSeqs, this.sheetsByDate.get(date) ?? [])) return "sheetSeqs must be every committed sheet for the date";
         const priced = Number.isSafeInteger(p.price) && (p.price as number) > 0 && Number.isSafeInteger(p.volume) && (p.volume as number) > 0;
@@ -450,7 +455,10 @@ export class EventLog {
         const auctionSeqs = listed.map((s) => this.auctions.get(`${s}:${pend.tradingDate}`));
         if (auctionSeqs.some((s) => s === undefined)) return "the listed symbols of the sheet are not auctioned yet";
         if (listed.length === 0 ? p.auctionSeqs !== undefined : !sameSeqs(p.auctionSeqs, (auctionSeqs as number[]).sort((a, b) => a - b))) return "auctionSeqs must be the auctions of the listed symbols in the sheet";
-        if (!orders.some((o) => !this.listings.has(o.symbol)) && p.openSeq === undefined) return null;
+        if (!orders.some((o) => !this.listings.has(o.symbol)) && p.openSeq === undefined) {
+          // 始値を使わない約定も、その日の締めのあと（注文票がそろい、板寄せが済んでから）
+          return d.recordedAt >= cutoffOf(pend.tradingDate) ? null : "fills recorded before the cutoff";
+        }
         const open = this.opens.get(pend.tradingDate);
         return open !== undefined && p.openSeq === open ? null : "openSeq must be prices.open of the trading date";
       }
@@ -510,12 +518,13 @@ export class EventLog {
         break;
       }
       case "company.listed":
-        this.listings.set(p.symbol as string, { sharesOutstanding: p.sharesOutstanding as number, prices: [{ date: "", price: p.price as number, seq: e.seq }], lastAuction: null });
+        this.listings.set(p.symbol as string, { sharesOutstanding: p.sharesOutstanding as number, prices: [{ date: "", price: p.price as number, seq: e.seq }], lastAuction: null, listedAt: e.recordedAt });
         break;
       case "auction.cleared": {
         const l = this.listings.get(p.symbol as string)!;
         this.auctions.set(`${String(p.symbol)}:${String(p.date)}`, e.seq);
         l.lastAuction = p.date as string;
+        this.lastAuctionDate = p.date as string;
         if (p.price !== null) l.prices.push({ date: p.date as string, price: p.price as number, seq: e.seq });
         break;
       }
@@ -687,6 +696,8 @@ interface ListingState {
   prices: { date: string; price: number; seq: number }[];
   /** 最後に板寄せをした日（価格がつかなかった日も含む） */
   lastAuction: string | null;
+  /** 上場を記録した時刻。締めがこれより後の日からだけ板寄せできる */
+  listedAt: number;
 }
 
 /** その日より前の直近の価格（値幅の基準。なければ上場の価格） */

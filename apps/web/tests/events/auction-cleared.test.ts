@@ -82,11 +82,36 @@ describe("auction.cleared（#110 PR-2b）", () => {
     expect(await w.rule(auction(listed, sheets, { price: null, volume: 100 }))).toBe("invalid price or volume");
   });
 
+  it("板寄せの日付は、銘柄を問わず戻らない。上場より前の日の板寄せは書けない", async () => {
+    const { w, listed, sheets } = await setup();
+    const neo2 = await w.add(sys("company.listed", jst("2026-11-09", 23), { symbol: "NEO2", name: "ネオ銀行", sector: "銀行", sharesOutstanding: 500_000, price: 5_000 }));
+    await w.add(op("universe.set", jst("2026-11-09", 23), { symbols: ["NEO1", "NEO2"] }));
+    // NEO2 の上場は 11/9 の締めのあとなので、11/9 の板寄せはない
+    expect(await w.rule(sys("auction.cleared", cutoffOf(T) + 60_000, { symbol: "NEO2", date: "2026-11-09", refSeq: neo2, sheetSeqs: [], price: null, volume: 0 }, [neo2]))).toBe("auction before the listing");
+    await w.add(auction(listed, sheets));
+    // NEO1 の T のあとに、NEO2 の前の日を書くことはできない（どちらの順で書いても結果が同じになるように）
+    const at = cutoffOf("2026-11-11") + 60_000;
+    expect(await w.rule(sys("auction.cleared", at, { symbol: "NEO2", date: "2026-11-09", refSeq: neo2, sheetSeqs: [], price: null, volume: 0 }, [neo2]))).toBe("a later auction is already recorded");
+    // 同じ日の別の銘柄は書ける。価格がつかなかったので、次の日の基準は上場の価格のまま
+    await w.add(sys("auction.cleared", cutoffOf(T) + 90_000, { symbol: "NEO2", date: T, refSeq: neo2, sheetSeqs: sheets, price: null, volume: 0 }, [neo2, ...sheets]));
+    expect(await w.rule(sys("auction.cleared", at, { symbol: "NEO1", date: "2026-11-11", refSeq: sheets[0], sheetSeqs: [], price: null, volume: 0 }, [sheets[0]!]))).toBe("refSeq must be the latest price before the date");
+  });
+
+  it("臨時休場の日は板寄せを書けず、約定は板寄せを指さずに全件失効", async () => {
+    const { w, listed, sheets } = await setup();
+    await w.add(op("market.closed", jst(T, 8, 40), { date: T, reason: "x" }));
+    expect(await w.rule(auction(listed, sheets))).toBe("market was closed");
+    const r = await w.ledger.computeFills("beta", sheets[1]!, undefined, []);
+    expect(r.payload.fills.map((f) => f.reason)).toEqual(["market_closed"]);
+    expect(await w.rule(sys("fills.executed", jst(T, 9), { agentId: "beta", tradingDate: T, sheetSeq: sheets[1], auctionSeqs: [listed], ...r.payload }, [sheets[1]!, listed]))).toBe("market was closed");
+    await w.add(sys("fills.executed", jst(T, 9), { agentId: "beta", tradingDate: T, sheetSeq: sheets[1], ...r.payload }, [sheets[1]!]));
+  });
+
   it("価格と約定量は、台帳が注文票から作り直して確かめる（買いしかない日は価格がつかない）", async () => {
     const { w, listed, sheets } = await setup();
     expect(await w.try(auction(listed, sheets, { price: 10_000, volume: 100 }))).toContain("recomputed");
     expect(await w.try(auction(listed, sheets))).toBe("ok");
-    // 同じ銘柄の、前の日の板寄せはもう書けない。板寄せのあとの日は臨時休場にできない
+    // 同じ銘柄の、前の日の板寄せはもう書けない（上場より前の日も）。板寄せのあとの日は臨時休場にできない
     expect(await w.try(sys("auction.cleared", cutoffOf(T) + 120_000, { symbol: "NEO1", date: "2026-11-09", refSeq: listed, sheetSeqs: [], price: null, volume: 0 }, [listed]))).toBe("a later auction of the symbol is already recorded");
     expect(await w.try(op("market.closed", cutoffOf(T) + 120_000, { date: T, reason: "x" }))).toBe("auction already recorded");
   });
