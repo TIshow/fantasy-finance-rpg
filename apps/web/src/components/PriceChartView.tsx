@@ -9,14 +9,14 @@ export function PriceChartView({ chart, days, color = "#00E5FF" }: { chart: Pric
   return (
     <div className="border-2 border-line bg-[#120826] p-3">
       <svg role="img" aria-label={chart.label} viewBox={`-4 -4 ${CHART_W + 8} ${H + 8}`} className="h-auto w-full">
-        {chart.listedY !== null && <line x1="0" x2={CHART_W} y1={chart.listedY} y2={chart.listedY} stroke="#3A1F5C" strokeDasharray="4 4" />}
+        <line x1="0" x2={CHART_W} y1={chart.listedY} y2={chart.listedY} stroke="#8E78B4" strokeDasharray="4 4" />
         {chart.segments.map((s) => <polyline key={s} points={s} fill="none" stroke={color} strokeWidth="3" />)}
         {chart.dots.map((d) => <circle key={`${d.x}`} cx={d.x} cy={d.y} r="3.5" fill={color} />)}
         {chart.gaps.map((gx) => <path key={`g${gx}`} d={`M${gx - 5} ${PRICE_H - 12} L${gx + 5} ${PRICE_H - 12} L${gx} ${PRICE_H - 2} Z`} fill="none" stroke="#FF2E88" strokeWidth="1.5" />)}
-        {chart.bars.map((b) => <rect key={b.label} x={b.x - chart.barWidth / 2} y={PRICE_H + GAP + VOLUME_H - b.h} width={chart.barWidth} height={b.h} fill="#B9A6D6" opacity="0.7" />)}
+        {chart.bars.map((b) => <rect key={b.seq} x={b.x - chart.barWidth / 2} y={PRICE_H + GAP + VOLUME_H - b.h} width={chart.barWidth} height={b.h} fill="#B9A6D6" opacity="0.7" />)}
       </svg>
       <div className="flex flex-wrap justify-between gap-x-4 font-num text-xs text-sub">
-        <span>上 {chart.highText}　下 {chart.lowText}</span>
+        <span>{chart.range ? `ついた価格の高値 ${chart.range.highText}　安値 ${chart.range.lowText}` : "ついた価格はありません（すべて値つかず）"}</span>
         <span>破線＝上場時の価格　▽＝値つかず　下の棒＝出来高</span>
       </div>
       <table className="mt-3 w-full border-collapse text-right font-num text-xs">

@@ -15,13 +15,12 @@ export interface PriceChart {
   /** 値つかずの日の x */
   gaps: number[];
   /** 出来高の棒（x は中心、h は高さ。出来高0の日は h=0） */
-  bars: { x: number; h: number; label: string }[];
+  bars: { seq: number; x: number; h: number; label: string }[];
   barWidth: number;
-  /** 上場時の価格の y（破線）。価格の範囲の外なら null */
-  listedY: number | null;
-  /** 価格の範囲（上・下）の表示 */
-  highText: string;
-  lowText: string;
+  /** 上場時の価格の y（破線）。縦軸の範囲は上場時の価格を含むので、いつも枠の中 */
+  listedY: number;
+  /** 価格のついた日の高値・安値の表示。1日も価格がつかなければ null（縦軸の範囲ではなく、ついた価格だけ） */
+  range: { highText: string; lowText: string } | null;
   label: string;
 }
 
@@ -59,14 +58,18 @@ export function priceChart(days: readonly AuctionDay[], listedPrice: Deciyen, te
   flush();
 
   const maxVolume = Math.max(1, ...days.map((d) => d.volume));
-  const bars = days.map((d, i) => ({ x: x(i), h: Math.round((d.volume / maxVolume) * VOLUME_H * 10) / 10, label: `${d.dateText} ${d.volumeText}` }));
+  const bars = days.map((d, i) => ({ seq: d.seq, x: x(i), h: Math.round((d.volume / maxVolume) * VOLUME_H * 10) / 10, label: `${d.dateText} ${d.volumeText}` }));
   const noPrice = gaps.length;
+  // 記録が年をまたぐときだけ、説明の日付に年をつける
+  const first = days[0]!;
+  const last = days.at(-1)!;
+  const crossYear = first.date.slice(0, 4) !== last.date.slice(0, 4);
+  const [from, to] = crossYear ? [first.date.replaceAll("-", "/"), last.date.replaceAll("-", "/")] : [first.dateText, last.dateText];
   return {
     segments, dots, gaps, bars,
     barWidth: Math.max(2, Math.round(step * 0.6 * 10) / 10),
-    listedY: listedPrice >= bottom && listedPrice <= top ? y(listedPrice) : null,
-    highText: text(hi),
-    lowText: text(lo),
-    label: `${days[0]!.dateText}〜${days.at(-1)!.dateText} の値段の推移と出来高（${days.length}日のうち${noPrice}日は値つかず）`,
+    listedY: y(listedPrice),
+    range: prices.length === 0 ? null : { highText: text(Math.max(...prices)), lowText: text(Math.min(...prices)) },
+    label: `${from}〜${to} の値段の推移と出来高（${days.length}日のうち${noPrice}日は値つかず）`,
   };
 }
