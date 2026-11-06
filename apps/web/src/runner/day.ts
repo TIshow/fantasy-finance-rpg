@@ -47,6 +47,11 @@ export interface DecisionInput {
   account: Account;
   /** 取引対象のうち上場した銘柄（銘柄コードの順）。記録の seq を inputSeqs に入れる */
   listed: readonly ListedInput[];
+  /**
+   * 最初の現金（登録の initialCash）と、最初に配った株（shares.allotted。銘柄ごとの合計）。登録と配分の記録の seq を
+   * inputSeqs に入れる。売買役が、最初からのずれで注文を片寄らせるのに使う
+   */
+  start: { cash: Deciyen; shares: Readonly<Record<string, number>> };
 }
 
 export interface Decision {
@@ -367,9 +372,13 @@ class Day {
         const applied = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id && inRange(pl(e).exDate as string) && (pl(e).announcedSeqs as number[]).some((s) => splits.some((x) => x.seq === s)));
         const listed = this.listedInputs(date);
         const listedSeqs = listed.flatMap((x) => [x.listing.seq, x.refPrice.seq, ...x.auctions.map((a) => a.seq), ...x.disclosures.map((q) => q.seq)]);
-        inputSeqs = [...new Set([...closes.map((e) => e.seq), ...splits.map((x) => x.seq), ...applied.map((e) => e.seq), basis.seq, ...listedSeqs])];
+        const allotted = this.log.events.filter((e) => e.type === "shares.allotted" && pl(e).agentId === id);
+        const shares: Record<string, number> = {};
+        for (const e of allotted) shares[pl(e).symbol as string] = (shares[pl(e).symbol as string] ?? 0) + (pl(e).qty as number);
+        const start = { cash: pl(registered).initialCash as Deciyen, shares };
+        inputSeqs = [...new Set([...closes.map((e) => e.seq), ...splits.map((x) => x.seq), ...applied.map((e) => e.seq), basis.seq, ...listedSeqs, registered.seq, ...allotted.map((e) => e.seq)])];
         const raw = closes.map((e) => ({ seq: e.seq, date: pl(e).date as string, prices: this.deps.values.get(pl(e).valuesHash as string)!.value as CloseInput["prices"] }));
-        const input = deepFreeze(structuredClone({ agentId: id, tradingDate: date, at: this.deps.clock.now(), closes: adjustCloses(raw, splits), splits, account: this.ledger.account(id), listed }));
+        const input = deepFreeze(structuredClone({ agentId: id, tradingDate: date, at: this.deps.clock.now(), closes: adjustCloses(raw, splits), splits, account: this.ledger.account(id), listed, start }));
         let d: Decision;
         try {
           d = await agent.decide(input);
