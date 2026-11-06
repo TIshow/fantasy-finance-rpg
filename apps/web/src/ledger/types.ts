@@ -60,6 +60,10 @@ export type FillReason =
   | "no_open_price"
   /** 指値が、約定の価格に届かない（買いは価格が指値より高い、売りは安い） */
   | "limit_not_reached"
+  /** 板寄せで、その日の価格がつかなかった（docs/MARKET_DESIGN.md §3 の3） */
+  | "no_price"
+  /** 板寄せで、同じ側の注文が多く、優先の順で回らなかった（§3 の4） */
+  | "outmatched"
   /** 臨時休場の日の注文票を閉じるとき。executeSheet は返さず、追記の処理が使う（docs/EVENT_LOG.md §3.3） */
   | "market_closed";
 

@@ -53,7 +53,11 @@ describe("company.listed（#110 PR-2a）", () => {
   it("システムだけが書け、同じ銘柄の上場は1回だけ", async () => {
     const { log } = await setup();
     expect(await reason(log, { ...sys("company.listed", 3, { ...listing, symbol: "NEO2" }), actor: "operator:owner" })).toBe("company.listed must be written by system");
-    expect(await reason(log, sys("company.listed", jst("2026-11-09", 23), listing))).toContain("listed:NEO1");
+    await ok(log, sys("company.listed", jst("2026-11-09", 23), { ...listing, symbol: "NEO2" }));
+    expect(await reason(log, sys("company.listed", jst("2026-11-09", 23), { ...listing, symbol: "NEO2" }))).toContain("listed:NEO2");
+    // 取引対象に入れたあとの銘柄は上場させない（上場は、取引対象に入れる前）
+    await ok(log, op("universe.set", jst("2026-11-09", 23), { symbols: ["NEO1", "OLD1"] }));
+    expect(await reason(log, sys("company.listed", jst("2026-11-09", 23), { ...listing, symbol: "OLD1" }))).toBe("list the company before adding it to the universe");
   });
 
   it("形の崩れた上場の記録は理由を返して断る", async () => {

@@ -2,7 +2,8 @@
 // 約定・分割配当・評価の中身を作る関数（compute*）と、記録を照合する関数（replay）は同じ計算を使う。
 // 価格と分割・配当の内容はログの外にあり（§5.2）、ValueStore から受け取ってハッシュを確かめる。
 import { applyCorporateActions, type Dividend, type Split } from "../ledger/corporate";
-import { executeSheet, newAccount, totalValue } from "../ledger/ledger";
+import { priceBand, runAuction, type AuctionOrder } from "../ledger/auction";
+import { executeSheet, newAccount, reserveBuys, totalValue, type AuctionedFill } from "../ledger/ledger";
 import { INITIAL_CASH, type Account, type Deciyen, type Fill, type Order } from "../ledger/types";
 import { EventLog, type AppendContext } from "./append";
 import { canonicalize } from "./canonical";
@@ -19,6 +20,20 @@ type Announcement = { kind: "split"; from: number; to: number } | { kind: "divid
 type Payload = Record<string, unknown>;
 /** 台帳に当てる（または当てられるかを確かめる）イベント */
 type Candidate = Pick<LogEvent, "seq" | "type" | "payload">;
+
+/** 上場した銘柄の価格（company.listed の最初の価格と、価格のついた auction.cleared）。上場の記録の date は "" */
+interface ListedPrice {
+  date: string;
+  price: Deciyen;
+  seq: number;
+}
+
+/** 当てた板寄せの結果。各注文（キーは「注文票の seq:注文票の中の位置」）が何株約定したか */
+interface Cleared {
+  symbol: string;
+  date: string;
+  fills: Map<string, AuctionedFill>;
+}
 
 interface LatestClose {
   price: Deciyen;
@@ -43,6 +58,10 @@ export class Ledger {
   private readonly closesByDate = new Map<string, Prices>();
   /** AIごと・銘柄ごとの、反映した分割の権利落ち日 */
   private readonly splitsApplied = new Map<string, Map<string, string[]>>();
+  /** 上場した銘柄ごとの価格の履歴（記録の順） */
+  private readonly listed = new Map<string, ListedPrice[]>();
+  /** 板寄せの結果（auction.cleared の seq ごと） */
+  private readonly cleared = new Map<number, Cleared>();
   /** 再計算に一度失敗したら、それ以降は受け付けない（途中から進めると口座がずれるため） */
   private failed: string | null = null;
 
@@ -56,24 +75,83 @@ export class Ledger {
     return { cash: a.cash, holdings: Object.fromEntries(Object.entries(a.holdings).map(([k, h]) => [k, { ...h }])) };
   }
 
-  /** 約定の中身。sheetSeq は order_sheet.committed、openSeq は prices.open（臨時休場なら undefined） */
-  async computeFills(agentId: string, sheetSeq: number, openSeq: number | undefined) {
+  /**
+   * 約定の中身。sheetSeq は order_sheet.committed、openSeq は prices.open、auctionSeqs はその日の auction.cleared（上場した銘柄の分）。
+   * openSeq も auctionSeqs もなければ臨時休場で、全件失効
+   */
+  async computeFills(agentId: string, sheetSeq: number, openSeq: number | undefined, auctionSeqs: readonly number[] = []) {
     const sheet = this.payloadOf(sheetSeq, "order_sheet.committed");
     if (sheet.agentId !== agentId) throw new Error(`seq ${sheetSeq} is not a sheet of ${agentId}`);
     const orders = sheet.orders as Order[];
     const before = this.account(agentId);
     let account: Account;
     let fills: Fill[];
-    if (openSeq === undefined) {
+    if (openSeq === undefined && auctionSeqs.length === 0) {
       // 臨時休場：全件失効（売り→買いの並びは executeSheet と同じ）
       account = before;
       fills = [...orders.filter((o) => o.side === "sell"), ...orders.filter((o) => o.side === "buy")].map((o) => ({ symbol: o.symbol, side: o.side, requestedQty: o.qty, qty: 0, price: null, amount: 0, status: "expired", reason: "market_closed" }));
     } else {
-      if (this.payloadOf(openSeq, "prices.open").date !== sheet.tradingDate) throw new Error(`seq ${openSeq} is not the open of ${String(sheet.tradingDate)}`);
-      const opens = (await this.valuesOf(openSeq, "prices.open")) as Prices;
-      ({ account, fills } = executeSheet(before, { agentId, tradingDate: sheet.tradingDate as string, committedAt: this.byseq[sheetSeq - 1]!.recordedAt, orders }, opens));
+      // 上場した銘柄の注文は、その日のその銘柄の板寄せの結果で約定する
+      const auctioned = new Map<number, AuctionedFill>();
+      for (const [i, o] of orders.entries()) {
+        if (!this.listed.has(o.symbol)) continue;
+        const c = auctionSeqs.map((s) => this.cleared.get(s)).find((x) => x?.symbol === o.symbol && x.date === sheet.tradingDate);
+        const f = c?.fills.get(`${sheetSeq}:${i}`);
+        if (!f) throw new Error(`no auction result for order ${i} (${o.symbol}) of seq ${sheetSeq}`);
+        auctioned.set(i, f);
+      }
+      let opens: Prices = {};
+      if (openSeq !== undefined) {
+        if (this.payloadOf(openSeq, "prices.open").date !== sheet.tradingDate) throw new Error(`seq ${openSeq} is not the open of ${String(sheet.tradingDate)}`);
+        opens = (await this.valuesOf(openSeq, "prices.open")) as Prices;
+      }
+      ({ account, fills } = executeSheet(before, { agentId, tradingDate: sheet.tradingDate as string, committedAt: this.byseq[sheetSeq - 1]!.recordedAt, orders }, opens, auctioned));
     }
     return { account, payload: { fills, accountHash: await accountHash(account) } };
+  }
+
+  /**
+   * 板寄せの中身（docs/MARKET_DESIGN.md §3）。sheetSeqs はその日の全員の注文票。
+   * 各注文票の買いを、口座の現金で先に確かめて減らし（§3 の5）、この銘柄の注文を集めて runAuction にかける。
+   * 基準の価格は、その日より前の直近の価格（なければ上場の価格）
+   */
+  computeAuction(symbol: string, date: string, sheetSeqs: readonly number[]) {
+    const ref = this.priceBefore(symbol, date);
+    if (!ref) throw new Error(`${symbol} is not listed`);
+    const upperOf = (s: string) => {
+      const r = this.priceBefore(s, date);
+      return r ? priceBand(r.price).upper : undefined;
+    };
+    const input: AuctionOrder[] = [];
+    // 現金で減らした株数（注文の株数より少なければ、理由は insufficient_cash）
+    const reserved = new Map<string, { requested: number; qty: number }>();
+    for (const s of sheetSeqs) {
+      const sheet = this.payloadOf(s, "order_sheet.committed");
+      if (sheet.tradingDate !== date) throw new Error(`seq ${s} is not a sheet for ${date}`);
+      const orders = sheet.orders as Order[];
+      const qtys = reserveBuys(this.account(sheet.agentId as string).cash, orders, upperOf);
+      for (const [i, o] of orders.entries()) {
+        if (o.symbol !== symbol) continue;
+        reserved.set(`${s}:${i}`, { requested: o.qty, qty: qtys[i]! });
+        if (qtys[i]! > 0) input.push({ sheetSeq: s, index: i, committedAt: this.byseq[s - 1]!.recordedAt, side: o.side, qty: qtys[i]!, limit: o.limit ?? null });
+      }
+    }
+    const r = runAuction({ symbol, prevPrice: ref.price, orders: input });
+    const fills = new Map<string, AuctionedFill>();
+    for (const [key, { qty }] of reserved) if (qty === 0) fills.set(key, { price: r.price, qty: 0, reason: "insufficient_cash" });
+    for (const f of r.fills) {
+      const { requested } = reserved.get(`${f.sheetSeq}:${f.index}`)!;
+      const reason = f.qty < f.requestedQty ? f.reason : f.qty < requested ? ("insufficient_cash" as const) : undefined;
+      fills.set(`${f.sheetSeq}:${f.index}`, { price: r.price, qty: f.qty, ...(reason ? { reason } : {}) });
+    }
+    return { fills, payload: { refSeq: ref.seq, price: r.price, volume: r.volume } };
+  }
+
+  /** その日より前の、上場した銘柄の直近の価格 */
+  private priceBefore(symbol: string, date: string): ListedPrice | undefined {
+    let best: ListedPrice | undefined;
+    for (const x of this.listed.get(symbol) ?? []) if (x.date < date && (!best || x.date >= best.date)) best = x;
+    return best;
   }
 
   /** 分割・配当の反映の中身。公表は §3.3 の決め方（権利落ち日が exDate、seq の昇順）で渡す */
@@ -186,8 +264,18 @@ export class Ledger {
         // 値と種類をいま確かめる（引け後処理まで待つと、その権利落ち日の引け後処理が全員止まる）
         await this.valuesOf(e.seq, "corporate_action.announced", e);
         return none;
+      case "company.listed":
+        return () => this.listed.set(p.symbol as string, [{ date: "", price: p.price as number, seq: e.seq }]);
+      case "auction.cleared": {
+        const r = this.computeAuction(p.symbol as string, p.date as string, p.sheetSeqs as number[]);
+        same(at, { refSeq: p.refSeq, price: p.price, volume: p.volume }, r.payload);
+        return () => {
+          this.cleared.set(e.seq, { symbol: p.symbol as string, date: p.date as string, fills: r.fills });
+          if (r.payload.price !== null) this.listed.get(p.symbol as string)!.push({ date: p.date as string, price: r.payload.price, seq: e.seq });
+        };
+      }
       case "fills.executed": {
-        const r = await this.computeFills(p.agentId as string, p.sheetSeq as number, p.openSeq as number | undefined);
+        const r = await this.computeFills(p.agentId as string, p.sheetSeq as number, p.openSeq as number | undefined, (p.auctionSeqs as number[] | undefined) ?? []);
         same(at, { fills: p.fills, accountHash: p.accountHash }, r.payload);
         return () => this.accounts.set(p.agentId as string, r.account);
       }
