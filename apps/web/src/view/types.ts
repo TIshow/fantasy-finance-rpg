@@ -76,7 +76,7 @@ export interface View {
   timeline: TimelineItem[];
   /** 架空の市場の記録（上場・板寄せ・決算）。記録がなければ companies は空 */
   market: MarketView;
-  /** 登録された参加者の種類。AI投資家だけが順位・カードに出る（#126） */
+  /** 登録された参加者の種類。順位・カードを AI投資家だけに絞るのに使う（#126 の3本目） */
   participants: { agentId: string; kind: ParticipantKind }[];
   evidence: Evidence[];
   threads: SymbolThread[];

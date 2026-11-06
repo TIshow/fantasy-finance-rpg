@@ -30,6 +30,8 @@ export interface AuctionDay {
   volumeText: string;
   /** 価格がつかなかった日に評価に使われる、直近の価格（記録にある値）。価格がついた日は null */
   carriedText: string | null;
+  /** その価格を借りた記録（company.listed か、価格のついた auction.cleared）の seq。評価の記録の priceSeq と同じになる */
+  carriedSeq: number | null;
 }
 
 export interface DisclosureView {
@@ -59,7 +61,8 @@ type P = Record<string, any>; // 連鎖の検査を通ったイベントの中�
 
 export function buildMarket(events: readonly LogEvent[]): MarketView {
   const companies = new Map<string, CompanyMarket>();
-  const lastPrice = new Map<string, Deciyen>();
+  // 直近の価格とその記録の seq（台帳の priceOnOrBefore と同じ規則：上場の価格から始め、価格のついた板寄せで更新する）
+  const lastPrice = new Map<string, { price: Deciyen; seq: number }>();
   for (const e of [...events].sort((a, b) => a.seq - b.seq)) {
     const p = e.payload as P;
     switch (e.type) {
@@ -69,17 +72,17 @@ export function buildMarket(events: readonly LogEvent[]): MarketView {
           days: [],
           disclosures: [],
         });
-        lastPrice.set(p.symbol, p.price);
+        lastPrice.set(p.symbol, { price: p.price, seq: e.seq });
         break;
       case "auction.cleared": {
         const c = companies.get(p.symbol);
         if (!c) break;
         const price: Deciyen | null = p.price;
         const carried = price === null ? (lastPrice.get(p.symbol) ?? null) : null;
-        if (price !== null) lastPrice.set(p.symbol, price);
+        if (price !== null) lastPrice.set(p.symbol, { price, seq: e.seq });
         c.days.push({
           seq: e.seq, date: p.date, dateText: formatMonthDay(p.date), price, priceText: price === null ? NO_PRICE_TEXT : formatYenMark(price),
-          volume: p.volume, volumeText: `${group(p.volume)}株`, carriedText: carried === null ? null : formatYenMark(carried),
+          volume: p.volume, volumeText: `${group(p.volume)}株`, carriedText: carried === null ? null : formatYenMark(carried.price), carriedSeq: carried?.seq ?? null,
         });
         break;
       }
