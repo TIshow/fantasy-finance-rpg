@@ -276,6 +276,8 @@ export class Ledger {
         const listing = (this.listed.get(p.symbol as string) ?? [])[0];
         if (!listing) throw new Error(`${at}: ${String(p.symbol)} is not listed`);
         const a = this.account(p.agentId as string);
+        // AI投資家は現金だけで始め、株は自分の売買でしか持たない（#110 PR-2d）
+        if (this.kinds.get(p.agentId as string) === "investor") throw new Error(`${at}: shares cannot be allotted to an investor`);
         const h = a.holdings[p.symbol as string] ?? { qty: 0, cost: 0 };
         a.holdings[p.symbol as string] = { qty: h.qty + (p.qty as number), cost: h.cost + listing.price * (p.qty as number) };
         return () => this.accounts.set(p.agentId as string, a);

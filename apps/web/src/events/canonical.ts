@@ -1,5 +1,5 @@
 // RFC 8785（JSON Canonicalization Scheme）による正規化（docs/EVENT_LOG.md §5.1）。
-// 数は安全な整数だけに限る。文字列は NFC で、対になっていないサロゲートを含まないこと。
+// 数は安全な整数だけに限る。文字列は NFC で、対になっていないサロゲートと U+0000（Postgres の text に保存できない）を含まないこと。
 // 黙って直すと、保存した値とハッシュの元がずれるので、条件に合わない値は例外にする。
 
 /** 対になっていないサロゲート（u フラグでは、対になったものは1文字として扱われ一致しない） */
@@ -13,6 +13,8 @@ const MAX_DEPTH = 64;
 
 export function checkText(s: string, where: string): void {
   if (LONE_SURROGATE.test(s)) throw new CanonicalizeError(`lone surrogate at ${where}`);
+  // U+0000 は Postgres の text に保存できず、保存のときに失敗するだけで断った記録が残らない（#110 PR-2d）
+  if (s.includes("\u0000")) throw new CanonicalizeError(`NUL character at ${where}`);
   if (s !== s.normalize("NFC")) throw new CanonicalizeError(`not NFC at ${where}`);
 }
 

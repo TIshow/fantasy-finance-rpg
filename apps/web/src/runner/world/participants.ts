@@ -59,7 +59,11 @@ export async function setUpParticipants(store: EventStore, startDate: string, co
 const refPrice = (x: ListedInput): Deciyen => x.refPrice.price;
 /** 仮の注文の形（成行は limit: null）を、注文票の形（成行は limit を書かない）にする */
 const toOrder = ({ limit, ...o }: LiquidityOrder): Order => (limit === null ? o : { ...o, limit });
-/** 規則の記録。注文を決める値（段の幅・株数・目標の株数・乱数のシードなど）を settings に入れ、説明の文と一緒にハッシュにする */
+/**
+ * 規則の記録。注文を決める値（段の幅・株数・目標の株数・乱数のシードなど）を settings に入れ、説明の文と一緒にハッシュにする。
+ * 規則の文（text）か数字（liquidity.ts の MAKER_PARAMS・NOISE_PARAMS）を変えたら、文を新しい動きに合わせて書き直し、版（version）を
+ * 上げる（記録を読む人が新旧の規則を区別できるように。いまは本番の記録がないので "1" のまま。#139 の変更では文を書き直した）
+ */
 const ruleModel = async (modelId: string, text: string, params: Record<string, number>) => {
   const settings = Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)]));
   return {
@@ -74,7 +78,9 @@ const ruleModel = async (modelId: string, text: string, params: Record<string, n
  */
 export async function makerAgent(company: Company): Promise<RunnerAgent> {
   const id = makerId(company.symbol);
-  const text = "Quote buy and sell limits around the fair price from disclosed results; lean against the inventory.";
+  const text =
+    "Quote buy and sell limits around the fair price from disclosed results; lean against the inventory. " +
+    "When the center is outside the daily price band, quote both a buy and a sell at the band edge so that a price forms and moves toward the fair price.";
   return {
     id,
     ...(await ruleModel("market-maker", text, { ...MAKER_PARAMS, target: ALLOTMENT.maker.target })),
@@ -91,14 +97,18 @@ export async function makerAgent(company: Company): Promise<RunnerAgent> {
 
 /** ばらばらに売買する参加者。前日の価格（値幅の基準の価格）のまわりに、固定シードの乱数で小さい注文を出す */
 export async function noiseAgent(seed: number): Promise<RunnerAgent> {
-  const text = "Place small random market and limit orders around the previous price with a fixed seed.";
+  const text =
+    "Place small random market and limit orders around the previous price with a fixed seed. " +
+    "Lean toward buying when shares fall below the first allotment and toward selling when cash falls below the first cash, keeping a random part.";
   return {
     id: NOISE_ID,
     ...(await ruleModel("noise", text, { ...NOISE_PARAMS, seed })),
     decide(input: DecisionInput) {
       const markets = input.listed.map((x) => ({ symbol: x.symbol, prevPrice: refPrice(x), band: priceBand(refPrice(x)) }));
       const holdings = Object.fromEntries(Object.entries(input.account.holdings).map(([s, h]) => [s, h.qty]));
-      const orders = noiseOrders({ seed, tradingDate: input.tradingDate, markets, holdings, cash: input.account.cash });
+      // 片寄りの基準は、記録された最初の現金と配分（コードの定数ではなく。あとから上場した企業や、配分の数字を変えたときも合うように）
+      const baseline = { shares: input.start.shares, cash: input.start.cash };
+      const orders = noiseOrders({ seed, tradingDate: input.tradingDate, markets, holdings, cash: input.account.cash, baseline });
       return { orders: orders.map(toOrder), post: null, note: `random orders with seed ${seed}` };
     },
   };
