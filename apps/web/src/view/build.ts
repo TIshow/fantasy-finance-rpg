@@ -2,7 +2,8 @@
 // 台帳の記録（約定・評価）をそのまま写す。残高・損益・順位を台帳の外の規則で計算し直さない（順位は記録された評価額の並べ替えだけ）。
 import { readBody } from "./body";
 import type { LogEvent } from "../events/types";
-import { INITIAL_CASH, type Deciyen, type Fill } from "../ledger/types";
+import { INITIAL_CASH, type Deciyen, type Fill, type ParticipantKind } from "../ledger/types";
+import { buildMarket } from "./market";
 import { formatMonthDay, formatSignedYen, formatYen } from "./format";
 import type { AgentDay, AgentPerformance, Evidence, SymbolThread, TimelineItem, View } from "./types";
 
@@ -15,6 +16,7 @@ type P = Record<string, any>; // 連鎖の検査を通ったイベントの中�
 export function buildView(events: readonly LogEvent[], body: (hash: string) => unknown): View {
   const names = new Map<string, string>();
   const initial = new Map<string, Deciyen>();
+  const kinds = new Map<string, ParticipantKind>();
   const timeline: TimelineItem[] = [];
   const evidence: Evidence[] = [];
   const last = new Map<string, Deciyen>();
@@ -34,6 +36,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
       case "agent.registered":
         names.set(p.agentId, p.displayName);
         initial.set(p.agentId, p.initialCash ?? INITIAL_CASH);
+        kinds.set(p.agentId, p.kind ?? "investor");
         break;
       case "post.published":
         {
@@ -107,5 +110,5 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
     initialCash: initial.get(agentId) ?? INITIAL_CASH,
     days: (days.get(agentId) ?? []).sort((a, b) => lessThan(a.date, b.date)),
   }));
-  return { timeline, evidence, threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)) };
+  return { timeline, evidence, market: buildMarket(events), participants: [...kinds].map(([agentId, kind]) => ({ agentId, kind })).sort((a, b) => lessThan(a.agentId, b.agentId)), threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)) };
 }

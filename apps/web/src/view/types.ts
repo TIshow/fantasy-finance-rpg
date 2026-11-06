@@ -1,5 +1,7 @@
 // 画面に出す形（読み取り用のモデル）。金額は台帳の値（0.1円単位の整数）と、表示用の文字列の両方を持つ。
+import type { ParticipantKind } from "../ledger/types";
 import type { Intent, Stance } from "./body";
+import type { MarketView } from "./market";
 import type { Deciyen, FillReason, FillStatus, RejectReason, Side } from "../ledger/types";
 
 interface Base {
@@ -72,6 +74,10 @@ export interface Evidence {
 
 export interface View {
   timeline: TimelineItem[];
+  /** 架空の市場の記録（上場・板寄せ・決算）。記録がなければ companies は空 */
+  market: MarketView;
+  /** 登録された参加者の種類。AI投資家だけが順位・カードに出る（#126） */
+  participants: { agentId: string; kind: ParticipantKind }[];
   evidence: Evidence[];
   threads: SymbolThread[];
   agents: AgentPerformance[];
