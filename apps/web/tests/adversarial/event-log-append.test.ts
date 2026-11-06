@@ -152,7 +152,7 @@ describe("権限（§3 の書ける者・AIの身元）", () => {
   // 文書の表から独立に書き写した「書ける者」
   const DOC_WRITER: Record<EventType, "system" | "operator" | "agent"> = {
     "source.captured": "system", "prices.open": "system", "prices.close": "system", "corporate_action.announced": "system",
-    "market.closed": "operator", "holidays.adopted": "operator", "universe.set": "operator", "agent.registered": "operator",
+    "market.closed": "operator", "holidays.adopted": "operator", "universe.set": "operator", "agent.registered": "operator", "company.listed": "system", "auction.cleared": "system",
     "agent.run": "system", "post.published": "agent", "order_sheet.committed": "agent", "order_sheet.rejected": "system",
     "fills.executed": "system", "valuation.recorded": "system", "corporate_actions.applied": "system",
     "correction.issued": "operator", "ledger.adjusted": "operator", "content.withdrawn": "operator",

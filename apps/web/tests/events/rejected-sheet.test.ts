@@ -97,7 +97,7 @@ describe("拒否した注文票の記録（§3.2・§7）", () => {
 
   it("検査は通るが正規化できない注文（余分な項目に小数）は、invalid_order の読めない拒否として残る", async () => {
     const { log, src, run } = await setup();
-    const orders = [{ symbol: "AAA", side: "buy", qty: 100, limit: 1234.5 }] as unknown as Order[];
+    const orders = [{ symbol: "AAA", side: "buy", qty: 100, memo: 1234.5 }] as unknown as Order[];
     const r = await log.commitSheet(jst("2026-11-10", 7), "alpha", { tradingDate: "2026-11-10", orders, runSeq: run, inputSeqs: [src] });
     expect(r.ok && [r.rejected, r.event.payload]).toEqual(["invalid_order", { agentId: "alpha", tradingDate: "2026-11-10", reason: "invalid_order", runSeq: run, inputSeqs: [src], ordersUnreadable: true }]);
     expect(await admitAll(log.events)).toBeNull();

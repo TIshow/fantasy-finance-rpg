@@ -88,7 +88,7 @@ describe("臨時休場のあとの追加の引け後処理（§3.3）", () => {
     expect(early.ok && early.rejected).toBe("account_not_ready");
     // 読めない注文でも同じ（validateSheet の後の検査で拒む。照合でも、注文によらずに account_not_ready を出し直せる）
     const run = await w.add(w.sys("agent.run", jst(D, 20, 1), { agentId: "alpha", purpose: "order", inputSeqs: [], ok: true }));
-    const unread = await w.log.commitSheet(jst(D, 20, 2), "alpha", { tradingDate: NEXT, orders: [{ symbol: "AAA", side: "buy", qty: 100, limit: 0.5 }] as unknown as Order[], runSeq: run, inputSeqs: [] });
+    const unread = await w.log.commitSheet(jst(D, 20, 2), "alpha", { tradingDate: NEXT, orders: [{ symbol: "AAA", side: "buy", qty: 100, memo: 0.5 }] as unknown as Order[], runSeq: run, inputSeqs: [] });
     expect(unread.ok && [unread.rejected, (unread.event.payload as Record<string, unknown>).ordersUnreadable]).toEqual(["account_not_ready", true]);
     if (unread.ok) await w.ledger.apply(unread.event);
 
