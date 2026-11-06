@@ -2,13 +2,14 @@
 // 検査と台帳の計算は、メモリ上の保管（InMemoryEventStore）にそのまま任せる。この保管は、その結果を DB に書く。
 // 追記は、プロセスの中で1件ずつ直列にし、DB でもトランザクションの先頭で advisory lock（同時に1つだけ書かせる鍵）を取る。
 // 別のプロセスが書いた分は、鍵を取ったあとに読んで追いついてから、検査にかける。
+// read・last も、追いついて検査（EventLog.admit）を終えたイベントだけを返す。検査に通らない行が DB にあれば、読む側も止まる。
 // 追記だけであることは DB でも守る（db/001_events.sql。アプリの役割から UPDATE・DELETE を外し、トリガでも断る）。
 import type { Clock, CommitResult, DraftInput, EventStore, SheetInput } from "../contracts";
 import type { AppendResult } from "../events/append";
 import type { ValueStore } from "../events/replay";
 import { SCHEMA, type LogEvent } from "../events/types";
 import type { HolidayTable } from "../holidays/table";
-import { InMemoryEventStore, READ_MAX } from "./memory-store";
+import { ADOPT, InMemoryEventStore, READ_MAX } from "./memory-store";
 import type { SqlDb, SqlRunner } from "./sql";
 
 /** advisory lock の番号。この表への追記だけが使う */
@@ -51,7 +52,36 @@ export interface PgStoreDeps {
   /** 時計の権威（recordedAt はここから決める。呼び出し側の値は無視する） */
   clock: Clock;
   readMax?: number;
+  /** true なら、開くときに checkAppendOnlyRole を確かめ、問題があれば例外にする（本番の接続はこれを付ける） */
+  requireAppendOnlyRole?: boolean;
 }
+
+/**
+ * いまの接続の役割が、追記だけの約束を権限で守られているかを確かめ、問題の一覧を返す（空なら問題なし）。
+ * 表の持ち主・スーパーユーザーは、トリガを外せるので、アプリの接続には使わない。
+ */
+export async function checkAppendOnlyRole(db: SqlRunner): Promise<string[]> {
+  const { rows } = await db.query<Record<string, boolean>>(
+    `SELECT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser,
+            pg_has_role(current_user, (SELECT tableowner FROM pg_tables WHERE tablename = 'events' AND schemaname = current_schema()), 'USAGE') AS owner,
+            has_table_privilege('events', 'INSERT') AS can_insert,
+            has_table_privilege('events', 'UPDATE') AS can_update,
+            has_table_privilege('events', 'DELETE') AS can_delete,
+            has_table_privilege('events', 'TRUNCATE') AS can_truncate`,
+  );
+  const r = rows[0] ?? {};
+  const problems: string[] = [];
+  if (r.superuser) problems.push("the role is a superuser");
+  if (r.owner) problems.push("the role is (or is a member of) the owner of events");
+  if (!r.can_insert) problems.push("the role cannot INSERT into events");
+  for (const [k, op] of [["can_update", "UPDATE"], ["can_delete", "DELETE"], ["can_truncate", "TRUNCATE"]] as const) if (r[k]) problems.push(`the role can ${op} events`);
+  return problems;
+}
+
+/** jsonb は U+0000 を持てない（書き込みで失敗する）。書く前に見つけて断る */
+const hasNul = (v: unknown): boolean =>
+  typeof v === "string" ? v.includes("\u0000") : Array.isArray(v) ? v.some(hasNul) : typeof v === "object" && v !== null ? Object.entries(v).some(([k, x]) => hasNul(k) || hasNul(x)) : false;
+const NUL_REASON = "contains U+0000, which the database cannot store";
 
 export class PgEventStore implements EventStore {
   private mem: InMemoryEventStore | null = null;
@@ -61,7 +91,13 @@ export class PgEventStore implements EventStore {
   /** 表は migrate（sql.ts）で作っておく。保存済みのイベントを先頭から読み、検査し直して状態を作る */
   static async open(db: SqlDb, deps: PgStoreDeps): Promise<PgEventStore> {
     const store = new PgEventStore(db, deps);
-    await store.serial(() => store.db.transaction((tx) => store.synced(tx)));
+    if (deps.requireAppendOnlyRole) {
+      const problems = await checkAppendOnlyRole(db);
+      if (problems.length > 0) throw new Error(`database role is not append-only: ${problems.join("; ")}`);
+    }
+    const mem = await store.sync();
+    const last = await mem.last();
+    if (last && !(deps.clock.now() >= last.recordedAt)) throw new RangeError("clock is earlier than the last recordedAt");
     return store;
   }
 
@@ -76,20 +112,26 @@ export class PgEventStore implements EventStore {
   async read(afterSeq = 0, limit = this.readMax): Promise<readonly LogEvent[]> {
     if (!Number.isInteger(afterSeq) || afterSeq < 0) throw new RangeError("afterSeq must be an integer >= 0");
     if (!Number.isInteger(limit) || limit < 1) throw new RangeError("limit must be an integer >= 1");
-    return readRows(this.db, afterSeq, Math.min(limit, this.readMax));
+    return (await this.sync()).read(afterSeq, limit);
   }
 
   async last(): Promise<LogEvent | null> {
-    const { rows } = await this.db.query<Row>(`SELECT ${COLUMNS} FROM events ORDER BY seq DESC LIMIT 1`);
-    return rows[0] ? toEvent(rows[0]) : null;
+    return (await this.sync()).last();
   }
 
   append(draft: DraftInput): Promise<AppendResult> {
+    if (hasNul(draft)) return Promise.resolve({ ok: false, reason: `draft ${NUL_REASON}` });
     return this.write((mem) => mem.append(draft));
   }
 
   commitSheet(agentId: string, sheet: SheetInput): Promise<CommitResult> {
+    if (hasNul([agentId, sheet])) return Promise.resolve({ ok: false, reason: `sheet ${NUL_REASON}` });
     return this.write((mem) => mem.commitSheet(agentId, sheet));
+  }
+
+  /** DB の末尾まで追いつき、検査を終えた状態を返す（読むだけ。鍵は取らない） */
+  private sync(): Promise<InMemoryEventStore> {
+    return this.serial(() => this.db.transaction((tx) => this.synced(tx)));
   }
 
   /** 鍵を取り、DB の末尾まで追いついた状態で run を流す。書けたイベントは同じトランザクションで DB に足す */
@@ -118,7 +160,7 @@ export class PgEventStore implements EventStore {
       for (let after = (await mem.last())?.seq ?? 0; ; ) {
         const page = await readRows(tx, after, this.readMax);
         if (page.length === 0) return mem;
-        await mem.adopt(page);
+        await mem[ADOPT](page);
         after = page.at(-1)!.seq;
       }
     } catch (err) {

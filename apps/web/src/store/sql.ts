@@ -17,7 +17,7 @@ export interface SqlDb extends SqlRunner {
 
 const DB_DIR = new URL("../../db/", import.meta.url);
 
-/** apps/web/db/*.sql を名前の順に流す。何度流しても同じ結果になる書き方にしてある */
+/** apps/web/db/*.sql を名前の順に流す。CLI・scripts・試験からだけ呼ぶ（db/ をファイルとして読むので、Next.js でまとめる画面のコードからは呼ばない）。何度流しても同じ結果になる書き方にしてある */
 export async function migrate(db: SqlDb): Promise<void> {
   const files = readdirSync(DB_DIR).filter((f) => /^\d+_.*\.sql$/.test(f)).sort();
   if (files.length === 0) throw new Error("no migration files in db/");

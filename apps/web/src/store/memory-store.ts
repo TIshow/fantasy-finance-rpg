@@ -8,6 +8,12 @@ import type { LogEvent } from "../events/types";
 import type { HolidayTable } from "../holidays/table";
 import type { Account } from "../ledger/types";
 
+/**
+ * DB の保管（pg-store.ts）だけが使う口の名前。呼び出し側が作ったイベントを時計を通さずに取り込めてしまうので、
+ * 普通の名前の公開メソッドにはしない（D-034）。
+ */
+export const ADOPT = Symbol("InMemoryEventStore.adopt");
+
 /** limit を省いたときに1回の read で返す件数の上限 */
 export const READ_MAX = 1000;
 
@@ -51,17 +57,17 @@ export class InMemoryEventStore implements EventStore {
    */
   static async fromEvents(events: readonly LogEvent[], values: ValueStore, holidayTables: ReadonlyMap<string, HolidayTable>, clock: Clock, readMax = READ_MAX): Promise<InMemoryEventStore> {
     const store = new InMemoryEventStore(values, holidayTables, clock, readMax);
-    await store.adopt(events);
+    await store[ADOPT](events);
     const last = events.at(-1);
     if (last && !(clock.now() >= last.recordedAt)) throw new RangeError("clock is earlier than the last recordedAt");
     return store;
   }
 
   /**
-   * 保存済みのイベントを、いまの末尾の続きとして取り込む（DB の保管が、別の処理の書いた分に追いつくのにも使う）。
+   * 保存済みのイベントを、いまの末尾の続きとして取り込む（DB の保管が、別の処理の書いた分に追いつくのにも使う。ADOPT の説明を参照）。
    * 各イベントを EventLog.admit に通してから台帳に当てる。通らなければ例外。時計は見ない（追記が断る）。
    */
-  async adopt(events: readonly LogEvent[]): Promise<void> {
+  async [ADOPT](events: readonly LogEvent[]): Promise<void> {
     for (const e of events) {
       const problem = await this.log.admit(e);
       if (problem) throw new Error(problem);

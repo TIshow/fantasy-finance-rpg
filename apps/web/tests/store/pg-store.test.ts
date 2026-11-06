@@ -7,7 +7,7 @@ import { verifyChain } from "../../src/events/chain";
 import type { ValueStore } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
 import { pgDb, pgDbFromEnv } from "../../src/store/pg-db";
-import { PgEventStore, type PgStoreDeps } from "../../src/store/pg-store";
+import { PgEventStore, checkAppendOnlyRole, type PgStoreDeps } from "../../src/store/pg-store";
 import { migrate, type SqlDb } from "../../src/store/sql";
 import { describeEventStoreContract, holidayTable, seedAgent } from "../contracts/conformance";
 import { FakeClock, jst } from "../contracts/fakes";
@@ -71,7 +71,14 @@ describe("PgEventStore の作り直しと複数の処理", async () => {
     await expect(PgEventStore.open(db, { values: noValues, holidayTables: g.holidayTables, clock })).rejects.toThrow("values are not available");
     await pg.exec("ALTER TABLE events DISABLE TRIGGER USER"); // 持ち主が無理に書き換えた場合
     await pg.exec("UPDATE events SET recorded_at = recorded_at + 1 WHERE seq = 11");
-    await expect(PgEventStore.open(db, { values: g.values, holidayTables: g.holidayTables, clock })).rejects.toThrow();
+    await expect(PgEventStore.open(db, { values: g.values, holidayTables: g.holidayTables, clock })).rejects.toThrow(/^seq 11 /);
+  });
+
+  it("時計が最後のイベントより前なら開かない", async () => {
+    await resetSchema(pg);
+    await migrate(db);
+    for (const e of g.events) await db.query(insertSql.replace("'{}'", "$7::jsonb").replace("'[]', '[]'", "$8::jsonb, $9::jsonb"), [...row(e), JSON.stringify(e.payload), JSON.stringify(e.keys), JSON.stringify(e.refs)]);
+    await expect(PgEventStore.open(db, { values: g.values, holidayTables: g.holidayTables, clock: new FakeClock(lastAt - 1) })).rejects.toThrow(RangeError);
   });
 });
 
@@ -105,6 +112,27 @@ describe("PgEventStore の失敗と同時の書き込み", () => {
     const all = await a.read();
     expect(all.map((e) => e.seq)).toEqual(Array.from({ length: 11 }, (_, i) => i + 1));
     expect(await verifyChain(all)).toEqual([]);
+  });
+
+  it("連鎖は続いていても検査に通らない行（ハッシュが違う）が DB にあれば、読む側も止まる", async () => {
+    const clock = new FakeClock(0);
+    const store = await fresh({ clock });
+    await seedAgent(store, clock);
+    const last = (await store.last())!;
+    await db.query(insertSql, [6, "source.captured", last.recordedAt, "system", last.hash, "e".repeat(64)]);
+    await expect(store.read()).rejects.toThrow(/^seq 6 /);
+    await expect(store.last()).rejects.toThrow(/^seq 6 /);
+  });
+
+  it("jsonb に書けない U+0000 を含む中身は、書かずに理由を返す（例外にしない）", async () => {
+    const clock = new FakeClock(0);
+    const store = await fresh({ clock });
+    const run = await seedAgent(store, clock);
+    clock.set(jst("2026-11-10", 8));
+    expect(await store.append({ ...source(clock.now()), payload: { publishedAt: 1, fetchedAt: 2, note: "a\u0000b" } })).toMatchObject({ ok: false, reason: expect.stringContaining("U+0000") });
+    const order = { symbol: "TSTA\u0000", side: "buy", qty: 1, limit: 100 } as never;
+    expect(await store.commitSheet("ai-a", { tradingDate: "2026-11-10", orders: [order], runSeq: run, inputSeqs: [4] })).toMatchObject({ ok: false, reason: expect.stringContaining("U+0000") });
+    expect((await store.last())?.seq).toBe(5);
   });
 
   it("別の処理が書いたあとの追記は、その分を含めた検査にかける（二重の登録を断る）", async () => {
@@ -143,8 +171,11 @@ describe("追記だけであること（DB が守る）", () => {
 
   it("アプリの役割（ffr_app）は、読むことと追記だけができ、更新・削除・TRUNCATE は権限で断られる", async () => {
     const store = await seeded();
+    expect(await checkAppendOnlyRole(db)).toEqual(expect.arrayContaining(["the role is a superuser", "the role can UPDATE events"])); // 持ち主・スーパーユーザーは不可
+    await expect(PgEventStore.open(db, { values: noValues, holidayTables: tables, clock: new FakeClock(jst("2026-11-09", 22)), requireAppendOnlyRole: true })).rejects.toThrow("not append-only");
     try {
       await pg.exec("SET ROLE ffr_app");
+      expect(await checkAppendOnlyRole(db)).toEqual([]);
       expect((await store.read()).length).toBe(5);
       for (const sql of ["UPDATE events SET type = 'x'", "DELETE FROM events", "TRUNCATE events", "DROP TABLE events"]) await expect(pg.exec(sql)).rejects.toThrow(/permission denied|must be owner/);
       const clock = new FakeClock(jst("2026-11-09", 23));
@@ -154,6 +185,21 @@ describe("追記だけであること（DB が守る）", () => {
     } finally {
       await pg.exec("RESET ROLE");
     }
+  });
+
+  it("アプリの役割が一時テーブルで events を装っても、トリガは本物の表の末尾を見て、連鎖が続かない行を断る", async () => {
+    const store = await seeded();
+    const last = (await store.last())!;
+    try {
+      await pg.exec("SET ROLE ffr_app");
+      await pg.exec("CREATE TEMP TABLE events (seq bigint, hash text, recorded_at bigint); INSERT INTO events VALUES (99, 'x', 0)");
+      await expect(db.query(insertSql.replace("INTO events", "INTO public.events"), [100, "x.y", 0, "system", "f".repeat(64), "e".repeat(64)])).rejects.toThrow(/does not continue the log/);
+      await pg.exec("DROP TABLE pg_temp.events");
+      await expect(db.query(insertSql, [6, "source.captured", last.recordedAt - 1, "system", last.hash, "d".repeat(64)])).rejects.toThrow(/does not continue the log/);
+    } finally {
+      await pg.exec("RESET ROLE");
+    }
+    expect((await store.last())?.seq).toBe(5);
   });
 
   it("migrate は何度流しても同じ結果になり、中身を消さない", async () => {
@@ -186,6 +232,25 @@ describe.skipIf(!testUrl)("PgEventStore（pg ドライバ・TEST_DATABASE_URL）
     const a = admin();
     await a.exec(`DROP SCHEMA ${schema} CASCADE`);
     await a.close();
+  });
+
+  it("別々の接続を持つ2つの保管が同時に書いても、advisory lock で直列になり、seq と連鎖が崩れない", async () => {
+    const [d1, d2] = [pgDb({ connectionString: testUrl!, schema, max: 3 }), pgDb({ connectionString: testUrl!, schema, max: 3 })];
+    try {
+      await d1.exec("DROP TABLE IF EXISTS events CASCADE");
+      await migrate(d1);
+      const clock = new FakeClock(0);
+      const a = await PgEventStore.open(d1, { values: noValues, holidayTables: tables, clock });
+      await seedAgent(a, clock);
+      const b = await PgEventStore.open(d2, { values: noValues, holidayTables: tables, clock });
+      clock.set(jst("2026-11-09", 23));
+      const results = await Promise.all(Array.from({ length: 12 }, (_, i) => (i % 2 ? a : b).append(source(jst("2026-11-09", 23)))));
+      expect(results.every((r) => r.ok)).toBe(true);
+      expect(results.map((r) => (r.ok ? r.event.seq : 0)).sort((x, y) => x - y)).toEqual(Array.from({ length: 12 }, (_, i) => i + 6));
+      expect(await verifyChain(await a.read())).toEqual([]);
+    } finally {
+      await Promise.all([d1.close(), d2.close()]);
+    }
   });
 
   describeEventStoreContract("PgEventStore（pg）", async (env) => {
