@@ -3,12 +3,10 @@
 // ファイルやDBへの書き出しはしない。保存済みのイベントの列からの作り直し（fromEvents）だけを用意する。
 import type { Clock, CommitResult, DraftInput, EventStore, SheetInput } from "../contracts";
 import { EventLog, type AppendResult } from "../events/append";
-import { canonicalize } from "../events/canonical";
-import { bodyHash } from "../events/hash";
 import { Ledger, type ValueStore } from "../events/replay";
 import type { LogEvent } from "../events/types";
 import type { HolidayTable } from "../holidays/table";
-import { INITIAL_CASH, type Account } from "../ledger/types";
+import type { Account } from "../ledger/types";
 
 /** limit を省いたときに1回の read で返す件数の上限 */
 export const READ_MAX = 1000;
@@ -18,15 +16,14 @@ export const READ_MAX = 1000;
  * 呼び出し側が実行時に recordedAt を渡しても無視する。書けたイベントは同じ直列の中で台帳（Ledger）にも当て、
  * 注文票の検査（validateSheet）はその口座で行う。返すイベントは sealEvent が深く凍結したもの。
  *
- * 台帳が断るイベント（ログの外の値がない・ハッシュが合わない、約定・分割配当・評価の中身が再計算と違う）は、
- * 書く前に同じ計算（Ledger.compute*）で確かめて ok: false で返す（EVENT_LOG §4「1つでも満たさなければ書かない」・§7）。
+ * 台帳が断るイベント（ログの外の値がない・ハッシュが合わない、約定・板寄せ・分割配当・評価の中身が再計算と違う）は、
+ * 書く前に Ledger.check（状態を変えずに apply と同じ計算をする）で確かめて ok: false で返す（EVENT_LOG §4「1つでも満たさなければ書かない」・§7）。
  * read・last・account は、台帳に当て終えたイベントまでを見せる。
  * それでも書いた後に台帳が断ったら（内部の食い違い）、その後の追記をすべて断る。
  */
 export class InMemoryEventStore implements EventStore {
   private readonly log: EventLog;
   private readonly ledger: Ledger;
-  private readonly values: ValueStore;
   private queue: Promise<unknown> = Promise.resolve();
   private stopped: string | null = null;
   /** 台帳に当て終えたイベントの数。読む側にはここまでを見せる */
@@ -43,7 +40,6 @@ export class InMemoryEventStore implements EventStore {
     private readonly readMax = READ_MAX,
   ) {
     if (!Number.isInteger(readMax) || readMax < 1) throw new RangeError("readMax must be an integer >= 1");
-    this.values = values;
     this.ledger = new Ledger(values);
     this.log = new EventLog({ holidayTables, accountOf: (id) => this.ledger.account(id) });
   }
@@ -84,7 +80,9 @@ export class InMemoryEventStore implements EventStore {
 
   append(draft: DraftInput): Promise<AppendResult> {
     return this.serial(async () => {
-      const refused = await this.ledgerRefuses(draft);
+      // 台帳が断るイベントは書かない。check は状態を変えずに apply と同じ計算をする（同じ直列の中で呼ぶ）。
+      // 追記の検査より先に呼ぶので、両方が断るときは台帳の理由が返る
+      const refused = await this.ledger.check(draft);
       if (refused) return { ok: false, reason: refused };
       // 時計の値を最後に置く（実行時に混ざった recordedAt を上書きする。D-034）
       return this.log.append({ ...draft, recordedAt: this.clock.now() });
@@ -93,42 +91,6 @@ export class InMemoryEventStore implements EventStore {
 
   commitSheet(agentId: string, sheet: SheetInput): Promise<CommitResult> {
     return this.serial(() => this.log.commitSheet(this.clock.now(), agentId, sheet));
-  }
-
-  /**
-   * 台帳がこのイベントを断るなら理由。Ledger.apply が確かめることを、書く前に同じ計算で確かめる。
-   * 値の形の検査は replay.ts の isPrices・isAnnouncement と同じ（core に、書く前の検査を Ledger に出す口を頼む）
-   */
-  private async ledgerRefuses(d: DraftInput): Promise<string | null> {
-    const p = d.payload;
-    try {
-      switch (d.type) {
-        case "agent.registered":
-          return p.initialCash === INITIAL_CASH ? null : "initialCash must be INITIAL_CASH";
-        case "prices.open":
-        case "prices.close":
-        case "corporate_action.announced": {
-          const v = typeof p.valuesHash === "string" ? this.values.get(p.valuesHash) : undefined;
-          if (!v) return "values are not available";
-          if ((await bodyHash(v.salt, { value: v.value })) !== p.valuesHash) return "values do not match valuesHash";
-          return (d.type === "corporate_action.announced" ? isAnnouncement(v.value) : isPrices(v.value)) ? null : `values have the wrong shape for ${d.type}`;
-        }
-        case "fills.executed": {
-          const r = await this.ledger.computeFills(p.agentId as string, p.sheetSeq as number, p.openSeq as number | undefined);
-          return same({ fills: p.fills, accountHash: p.accountHash }, r.payload) ? null : "fills do not match the ledger";
-        }
-        case "corporate_actions.applied": {
-          const r = await this.ledger.computeCorporate(p.agentId as string, p.asOf as string, p.exDate as string, p.announcedSeqs as number[]);
-          return same({ actions: p.actions, accountHash: p.accountHash }, r.payload) ? null : "corporate actions do not match the ledger";
-        }
-        case "valuation.recorded":
-          return same({ cash: p.cash, positions: p.positions, total: p.total }, this.ledger.computeValuation(p.agentId as string, p.date as string)) ? null : "valuation does not match the ledger";
-        default:
-          return null;
-      }
-    } catch (err) {
-      return err instanceof Error ? err.message : "ledger refused the event";
-    }
   }
 
   /** 1件ずつ直列に書き、書けたイベントを台帳に当てる。前の失敗は次に伝えない */
@@ -153,14 +115,4 @@ export class InMemoryEventStore implements EventStore {
     this.queue = result.catch(() => undefined);
     return result;
   }
-}
-
-const same = (a: unknown, b: unknown) => canonicalize(a) === canonicalize(b);
-const posInt = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
-const isPrices = (v: unknown) => typeof v === "object" && v !== null && !Array.isArray(v) && Object.values(v).every((x) => x === null || posInt(x));
-function isAnnouncement(v: unknown): boolean {
-  if (typeof v !== "object" || v === null) return false;
-  const a = v as Record<string, unknown>;
-  if (a.kind === "split") return posInt(a.from) && posInt(a.to);
-  return a.kind === "dividend" && typeof a.perShare === "number" && Number.isSafeInteger(a.perShare) && a.perShare >= 0;
 }

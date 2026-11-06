@@ -143,6 +143,11 @@ class Day {
     return u ? (pl(u).symbols as string[]) : [];
   }
 
+  /** 上場した銘柄（company.listed）と、その記録の時刻。これらの価格は外から取り込まず、板寄せで決める */
+  private listings(): Map<string, number> {
+    return new Map(this.log.events.filter((e) => e.type === "company.listed").map((e) => [pl(e).symbol as string, e.recordedAt]));
+  }
+
   /** ログの停止・再開から、いまの停止を求める（EventLog と同じ決め方。"*" は全体） */
   private suspended(agentId: string, scope: "posts" | "orders"): boolean {
     const on = new Map<string, Set<string>>();
@@ -157,7 +162,7 @@ class Day {
   }
 
   /**
-   * 窓から全銘柄の date の観測を引いて prices.* を書き、出典ごとに source.captured を書く。1銘柄でもなければ待つ。
+   * 窓から、取引対象のうち上場した銘柄以外の date の観測を引いて prices.* を書き、出典ごとに source.captured を書く。1銘柄でもなければ待つ。
    * 済んでいれば、その記録の取得時刻までの観測で、欠けた source.captured だけを補う（prices.* の後に落ちたとき）
    */
   private async ingest(date: string, kind: "open" | "close"): Promise<LogEvent | StageResult> {
@@ -165,7 +170,8 @@ class Day {
     const recorded = this.find(stage, (p) => p.date === date);
     const view = this.deps.market.asOf(recorded ? (pl(recorded).fetchedAt as number) + 1 : this.deps.clock.now());
     const obs: PriceObservation[] = [];
-    for (const symbol of this.universe()) {
+    const listed = this.listings();
+    for (const symbol of this.universe().filter((x) => !listed.has(x))) {
       // 新しい日の観測があっても、その日の最新の版を選ぶ（後から前の日を回し直せるように）
       const o = (await view.history(symbol)).filter((x) => x.date === date && x.kind === kind).at(-1);
       if (!o) return { stage, status: "waiting", detail: `no ${kind} of ${symbol} for ${date}` };
@@ -312,16 +318,45 @@ class Day {
     return out;
   }
 
-  /** 始値を取り込み、確定した注文票を約定させる */
+  /**
+   * 締めのあと、上場した銘柄ごとに板寄せの結果（auction.cleared）を書き、上場していない銘柄の始値を取り込んで、
+   * 確定した注文票を約定させる。上場した銘柄の注文は板寄せの結果で、ほかの銘柄の注文は始値で約定する（MARKET_DESIGN §3）
+   */
   async open(date: string): Promise<StageResult> {
-    const open = await this.ingest(date, "open");
-    if (!("seq" in open)) return open;
+    if (this.deps.clock.now() < cutoffOf(date)) return { stage: "open", status: "waiting", detail: "before the cutoff" };
+    const listed = this.listings();
+    const sheets = this.log.events.filter((e) => e.type === "order_sheet.committed" && pl(e).tradingDate === date);
+    // 板寄せの日付は戻せない（後の日を先に書くと、前の日をもう書けない）。前の営業日の板寄せがそろうまで待つ
+    // （回し忘れた日があり、追いつきが前の日で止まっているとき）
+    const prev = previousBusinessDay(date, this.log.holidays());
+    const behind = this.universe().filter((x) => listed.has(x) && cutoffOf(prev) > listed.get(x)! && !this.find("auction.cleared", (p) => p.symbol === x && p.date === prev));
+    if (behind.length > 0) return { stage: "open", status: "waiting", detail: `auctions of ${prev} not done: ${behind.join(",")}` };
     let wrote = false;
-    for (const sheet of this.log.events.filter((e) => e.type === "order_sheet.committed" && pl(e).tradingDate === date)) {
+    // 板寄せには、その日の全員の注文票を渡す（締めのあとなので、もう増えない）。銘柄コードの順に書く
+    // 臨時休場の日は板寄せをしない（休場の扱いは #27 の判断待ち）
+    const closed = this.find("market.closed", (p) => p.date === date) !== undefined;
+    for (const symbol of this.universe().filter((x) => listed.has(x))) {
+      // 締めのあとに上場した銘柄は、その日の板寄せがない
+      if (closed || cutoffOf(date) <= listed.get(symbol)! || this.find("auction.cleared", (p) => p.symbol === symbol && p.date === date)) continue;
+      const sheetSeqs = sheets.map((e) => e.seq);
+      const { payload } = this.ledger.computeAuction(symbol, date, sheetSeqs);
+      await this.append("auction.cleared", "system", { symbol, date, ...payload, sheetSeqs }, [payload.refSeq, ...sheetSeqs]);
+      wrote = true;
+    }
+    let openSeq: number | undefined;
+    if (this.universe().some((x) => !listed.has(x))) {
+      const open = await this.ingest(date, "open");
+      if (!("seq" in open)) return open;
+      openSeq = open.seq;
+    }
+    for (const sheet of sheets) {
       const agentId = pl(sheet).agentId as string;
       if (this.find("fills.executed", (p) => p.agentId === agentId && p.tradingDate === date)) continue;
-      const f = await this.ledger.computeFills(agentId, sheet.seq, open.seq);
-      await this.append("fills.executed", "system", { agentId, tradingDate: date, sheetSeq: sheet.seq, openSeq: open.seq, ...f.payload }, [sheet.seq, open.seq]);
+      const symbols = new Set((pl(sheet).orders as Order[]).map((o) => o.symbol).filter((x) => listed.has(x)));
+      const auctionSeqs = this.log.events.filter((e) => e.type === "auction.cleared" && pl(e).date === date && symbols.has(pl(e).symbol as string)).map((e) => e.seq);
+      const f = await this.ledger.computeFills(agentId, sheet.seq, openSeq, auctionSeqs);
+      const refs = [sheet.seq, ...(openSeq === undefined ? [] : [openSeq]), ...auctionSeqs];
+      await this.append("fills.executed", "system", { agentId, tradingDate: date, sheetSeq: sheet.seq, ...(openSeq === undefined ? {} : { openSeq }), ...(auctionSeqs.length > 0 ? { auctionSeqs } : {}), ...f.payload }, refs);
       wrote = true;
     }
     return { stage: "open", status: wrote ? "written" : "done" };

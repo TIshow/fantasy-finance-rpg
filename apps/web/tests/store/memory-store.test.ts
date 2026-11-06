@@ -62,11 +62,28 @@ describe("InMemoryEventStore の作り直しと台帳", async () => {
     await seedAgent(store, clock);
     clock.set(jst("2026-11-10", 16));
     const close: DraftInput = { type: "prices.close", actor: "system", refs: [], payload: { date: "2026-11-10", source: "fixture", fetchedAt: jst("2026-11-10", 16), valuesHash: "b".repeat(64) } };
-    expect(await store.append(close)).toEqual({ ok: false, reason: "values are not available" });
+    expect(await store.append(close)).toEqual({ ok: false, reason: "seq 6: values are not available" });
     expect((await store.last())?.seq).toBe(5);
     const next = await store.append({ type: "source.captured", actor: "system", refs: [], payload: { publishedAt: jst("2026-11-10", 15, 30), fetchedAt: jst("2026-11-10", 16) } });
     expect(next.ok && next.event.seq).toBe(6);
     expect(store.account("ai-a").cash).toBeGreaterThan(0);
+  });
+
+  it("板寄せの結果は、台帳が注文票から作り直した価格・約定量と違えば書かない（Ledger.check）", async () => {
+    const clock = new FakeClock(0);
+    const store = new InMemoryEventStore(noValues, tables, clock);
+    const op = (type: DraftInput["type"], payload: Record<string, unknown>): DraftInput => ({ type, actor: "operator:owner", refs: [], payload });
+    for (const d of [op("holidays.adopted", { holidaysSha256: holidayTable.contentSha256 }), { ...op("company.listed", { symbol: "NEO1", name: "ネオ電機", sector: "電機", sharesOutstanding: 500_000, price: 10_000 }), actor: "system" as const }, op("universe.set", { symbols: ["NEO1"] })]) {
+      const r = await store.append(d);
+      if (!r.ok) throw new Error(r.reason);
+    }
+    clock.set(jst("2026-11-10", 8, 31));
+    const cleared = (price: number | null, volume: number): DraftInput => ({ type: "auction.cleared", actor: "system", refs: [2], payload: { symbol: "NEO1", date: "2026-11-10", refSeq: 2, sheetSeqs: [], price, volume } });
+    // 注文票がない日は価格がつかない
+    expect(await store.append(cleared(10_000, 100))).toEqual({ ok: false, reason: expect.stringMatching(/^seq 4 \(auction\.cleared\): recorded .* but recomputed /) });
+    expect((await store.last())?.seq).toBe(3);
+    const ok = await store.append(cleared(null, 0));
+    expect(ok.ok && ok.event.seq).toBe(4);
   });
 
   it("再計算と違う約定、値がない始値は書かずに断り、正しいものは書ける", async () => {
@@ -78,14 +95,14 @@ describe("InMemoryEventStore の作り直しと台帳", async () => {
     const s1 = await InMemoryEventStore.fromEvents(g.events.slice(0, f), g.values, g.holidayTables, new FakeClock(fe.recordedAt));
     const wrong = draftOf(fe);
     wrong.payload.accountHash = "c".repeat(64);
-    expect(await s1.append(wrong)).toEqual({ ok: false, reason: "fills do not match the ledger" });
+    expect(await s1.append(wrong)).toEqual({ ok: false, reason: expect.stringMatching(/^seq \d+ \(fills\.executed\): recorded .* but recomputed /) });
     expect((await s1.append(draftOf(fe))).ok && (await s1.last())?.hash).toBe(fe.hash);
 
     const o = at("prices.open");
     const oe = g.events[o]!;
     const hidden: ValueStore = { get: (h) => (h === (oe.payload as Record<string, unknown>).valuesHash ? undefined : g.values.get(h)) };
     const s2 = await InMemoryEventStore.fromEvents(g.events.slice(0, o), hidden, g.holidayTables, new FakeClock(oe.recordedAt));
-    expect(await s2.append(draftOf(oe))).toEqual({ ok: false, reason: "values are not available" });
+    expect(await s2.append(draftOf(oe))).toEqual({ ok: false, reason: `seq ${o + 1}: values are not available` });
     expect((await s2.last())?.seq).toBe(o);
   });
 
