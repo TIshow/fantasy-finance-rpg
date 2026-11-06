@@ -13,6 +13,7 @@ import { INITIAL_CASH } from "../src/ledger/types";
 import { type RunnerAgent, type RunnerDeps, type StageResult, runDay } from "../src/runner/day";
 import { ruleAgents } from "../src/runner/rule-agents";
 import type { RunnerValues } from "../src/runner/values";
+import { discloseDue } from "../src/runner/world/disclosure";
 import { listCompanies } from "../src/runner/world/listing";
 import { liquidityAgents, setUpParticipants } from "../src/runner/world/participants";
 import { PgEventStore, readAllEvents } from "../src/store/pg-store";
@@ -71,8 +72,9 @@ export function firstOpenDay(now: number, table: HolidayTable): string {
 }
 
 /**
- * 本番の準備（何度呼んでも二重に書かない）：祝日の一覧の採用 → 架空の企業の上場と取引対象 → AI投資家と売買役の登録と最初の配分。
- * 返す参加者は、runner に渡すAI投資家（規則）と売買役
+ * 本番の準備（何度呼んでも二重に書かない）：祝日の一覧の採用 → 架空の企業の上場と取引対象 → 上場の前の四半期の決算の発表
+ * → AI投資家と売買役の登録と最初の配分。返す参加者は、runner に渡すAI投資家（規則）と売買役。
+ * 次の四半期からの発表は、runDaily が runDay の afterClose で書く
  */
 export async function productionSetup({ store, clock, seed, holidayTable }: PrepareContext): Promise<RunnerAgent[]> {
   const events = await read(store);
@@ -80,6 +82,7 @@ export async function productionSetup({ store, clock, seed, holidayTable }: Prep
     await must("holidays.adopted", store.append({ type: "holidays.adopted", actor: "operator:owner", refs: [], payload: { holidaysSha256: holidayTable.contentSha256 } }));
   }
   await listCompanies(store, seed);
+  await discloseDue(store, seed, clock);
   const startDate = firstOpenDay(clock.now(), holidayTable);
   await setUpParticipants(store, startDate);
   const investors = await ruleAgents();
@@ -113,7 +116,8 @@ async function runLocked(date: string, o: DailyOptions): Promise<StageResult[]> 
   const holidayTables = new Map([[holidayTable.contentSha256, holidayTable]]);
   const values = await PgValueStore.open(o.db);
   const store = await PgEventStore.open(o.db, { values, holidayTables, clock: o.clock, requireAppendOnlyRole: o.requireAppendOnlyRole });
-  const agents = await (o.prepare ?? productionSetup)({ store, clock: o.clock, seed: o.seed ?? WORLD_SEED, holidayTable });
+  const seed = o.seed ?? WORLD_SEED;
+  const agents = await (o.prepare ?? productionSetup)({ store, clock: o.clock, seed, holidayTable });
   const deps: RunnerDeps = {
     store,
     market: o.market ?? new IngestedMarketData(o.clock),
@@ -123,6 +127,8 @@ async function runLocked(date: string, o: DailyOptions): Promise<StageResult[]> 
     agents,
     clock: o.clock,
     waitUntil: o.waitUntil ?? (async () => {}),
+    // 決算の発表（index 1 から）。時期は保管と同じ時計で決める（disclosure.ts の注意書き）。上場していなければ何も書かない
+    afterClose: () => discloseDue(store, seed, o.clock),
   };
   return runDay(date, deps);
 }

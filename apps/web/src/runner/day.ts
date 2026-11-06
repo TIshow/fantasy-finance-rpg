@@ -79,6 +79,11 @@ export interface RunnerDeps {
   waitUntil(at: number): Promise<void>;
   /** 判断の入力に渡す終値の日数（新しい方から） */
   inputDays?: number;
+  /**
+   * 引け後の処理のあとに呼ぶ、運営の記録を書く処理（架空の企業の決算の発表。#113）。書いたものの一覧を返す。
+   * 前の日までの追いつきのあと（判断の前）と、その日の引け後の処理のあとに呼ぶ。呼び直しても二重に書かないこと
+   */
+  afterClose?: () => Promise<readonly string[]>;
 }
 
 const HOUR = 3_600_000;
@@ -89,19 +94,30 @@ export const scheduleOf = (date: string) => ({ decideAt: cutoffOf(date) - 1.5 * 
 export type StageResult = { stage: string; status: "written" | "done" | "waiting" | "skipped"; detail?: string };
 
 export async function runDay(date: string, deps: RunnerDeps): Promise<StageResult[]> {
-  const day = await Day.load(deps);
+  let day = await Day.load(deps);
   if (!isBusinessDay(date, day.log.holidays())) return [{ stage: "day", status: "skipped", detail: "not a business day" }];
   const prev = previousBusinessDay(date, day.log.holidays());
   const s = scheduleOf(date);
   const out: StageResult[] = [];
   await deps.waitUntil(s.decideAt);
   out.push(...(await day.catchUp(prev)));
+  // 前の日までの発表を、判断の前に書く（追いつきで何日分も進めた日に、発表が判断の後にずれないように）
+  if (await afterClose(deps, out)) day = await Day.load(deps);
   out.push(await day.decide(date, prev));
   await deps.waitUntil(s.openAt);
   out.push(await day.open(date));
   await deps.waitUntil(s.closeAt);
   out.push(...(await day.catchUp(date)));
+  await afterClose(deps, out);
   return out;
+}
+
+/** deps.afterClose を呼び、結果を段として足す。書いたら true（保管の外で書いたので、Day を読み直す） */
+async function afterClose(deps: RunnerDeps, out: StageResult[]): Promise<boolean> {
+  if (!deps.afterClose) return false;
+  const wrote = await deps.afterClose();
+  out.push(wrote.length > 0 ? { stage: "disclose", status: "written", detail: wrote.join(",") } : { stage: "disclose", status: "done" });
+  return wrote.length > 0;
 }
 
 type Payload = Record<string, unknown>;

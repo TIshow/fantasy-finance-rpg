@@ -221,6 +221,31 @@ describe("上場した銘柄だけのとき、判断を記録したあと注文�
   });
 });
 
+describe("runDay の afterClose で発表するとき、回し忘れた日を追いつきで進めた日は", async () => {
+  // 3日回したあと、4日目（板寄せが4日分そろう日）を回さずに、5日目を回す
+  const w = await world(4, { days: DAYS.slice(0, 3) });
+  const deps: RunnerDeps = { ...w.deps, afterClose: () => discloseDue(w.store, SEED, w.clock, COMPANIES, 4) };
+  const results = await runDay(DAYS[4]!, deps);
+  const events = await w.store.read(0, 100_000);
+
+  it("4日目の分の発表を、5日目の判断の前に書き、5日目の判断の入力に入れる", () => {
+    expect(results.map((r) => r.stage)).toEqual(["open", "after_close", "disclose", "decide", "open", "open", "after_close", "disclose"]);
+    expect(results[2]).toMatchObject({ status: "written", detail: COMPANIES.map((c) => `${c.symbol}:2026-Q4`).join(",") });
+    expect(results.at(-1)).toEqual({ stage: "disclose", status: "done" });
+    const q1 = of(events, "company.disclosed").filter((e) => p(e).period === "2026-Q4");
+    expect(q1).toHaveLength(COMPANIES.length);
+    const run = runOf(events, sheetOf(events, "ai-ma5", DAYS[4]!)!);
+    expect(p(run).inputSeqs).toEqual(expect.arrayContaining(q1.map((e) => e.seq)));
+    expect(Math.max(...q1.map((e) => e.seq))).toBeLessThan(run.seq);
+  });
+
+  it("もう一度回しても、何も書かない", async () => {
+    const again = await runDay(DAYS[4]!, deps);
+    expect(again.filter((r) => r.stage === "disclose")).toEqual([{ stage: "disclose", status: "done" }, { stage: "disclose", status: "done" }]);
+    expect((await w.store.read(0, 100_000)).length).toBe(events.length);
+  });
+});
+
 describe("外の銘柄の終値で動いていた世界を、上場した銘柄だけに切り替える", async () => {
   const scenario = buildScenario(7);
   const clock = new FakeClock(0);

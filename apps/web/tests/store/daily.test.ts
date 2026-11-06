@@ -3,11 +3,13 @@
 import { execFileSync } from "node:child_process";
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { holidayTable } from "../../src/holidays";
+import { holidayTable, holidaysFor } from "../../src/holidays";
 import { IngestedMarketData, type SourceQuote, staticSource } from "../../src/ingest/market-data";
+import { cutoffOf, nextBusinessDay } from "../../src/ledger/ledger";
 import { INITIAL_CASH } from "../../src/ledger/types";
 import { scheduleOf } from "../../src/runner/day";
 import { ruleAgents } from "../../src/runner/rule-agents";
+import { QUARTER_DAYS } from "../../src/runner/world/disclosure";
 import { readAllEvents } from "../../src/store/pg-store";
 import type { SqlDb } from "../../src/store/sql";
 import { type PrepareContext, firstOpenDay, jstDate, missedCutoff, productionSetup, runDaily, verifyDatabase } from "../../scripts/daily-lib";
@@ -194,6 +196,49 @@ describe("本番の準備（productionSetup）", () => {
     expect(await counts()).toEqual(expected);
     await verifyDatabase(db, holidayTable);
   });
+
+  it("決算は、上場の直後に上場の前の四半期を6社分発表し、板寄せの20日目の引け後に次の四半期を発表する。回し直しても二重にならない", async () => {
+    await fresh();
+    const H = holidaysFor("2026-11-09", "2027-01-31", holidayTable);
+    const days = ["2026-11-09"];
+    while (days.length < QUARTER_DAYS + 2) days.push(nextBusinessDay(days.at(-1)!, H));
+    const clock = new FakeClock(jst(days[0]!, 7));
+    const waitUntil = async (at: number) => void (at > clock.now() && clock.set(at));
+    const o = { db, clock, prepare: productionSetup, holidayTable, waitUntil };
+    // 引け後の発表の段（disclose）が書いた日だけを集める
+    const wroteOn: Record<string, string | undefined> = {};
+    for (const d of days) {
+      const r = await runDaily(d, o);
+      const w = r.filter((x) => x.stage === "disclose" && x.status === "written");
+      if (w.length > 0) wroteOn[d] = w.map((x) => x.detail).join(",");
+      expect(missedCutoff(r)).toBe(false);
+    }
+    const events = await readAllEvents(db);
+    const disclosed = events.filter((e) => e.type === "company.disclosed");
+    const pl = (e: (typeof events)[number]) => e.payload as { symbol: string; period: string };
+    // 上場の直後：6社それぞれ1件、最初の板寄せより前
+    const firstAuction = events.find((e) => e.type === "auction.cleared")!;
+    const atListing = disclosed.filter((e) => e.seq < firstAuction.seq);
+    expect(atListing).toHaveLength(6);
+    expect(new Set(atListing.map((e) => pl(e).symbol)).size).toBe(6);
+    // 20日目の引け後（15:30 以降、次の日の締めより前）に、次の四半期を6社分。ほかの日には書かない
+    const day20 = days[QUARTER_DAYS - 1]!;
+    expect(Object.keys(wroteOn)).toEqual([day20]);
+    const next = disclosed.filter((e) => e.seq > firstAuction.seq);
+    expect(next).toHaveLength(6);
+    for (const e of next) {
+      expect(e.recordedAt).toBeGreaterThanOrEqual(cutoffOf(day20) + 7 * 3_600_000);
+      expect(e.recordedAt).toBeLessThan(cutoffOf(days[QUARTER_DAYS]!));
+      expect(pl(e).period).not.toBe(pl(atListing.find((x) => pl(x).symbol === pl(e).symbol)!).period);
+    }
+    // 次の日（21日目）の判断は、その発表を入力に入れる（締めより前に記録したので）
+    const run21 = events.find((e) => e.type === "agent.run" && (e.payload as { agentId: string }).agentId === "ai-ma5" && e.recordedAt > cutoffOf(day20) + 8 * 3_600_000)!;
+    expect((run21.payload as { inputSeqs: number[] }).inputSeqs).toEqual(expect.arrayContaining(next.map((e) => e.seq)));
+    await verifyDatabase(db, holidayTable);
+    const n = events.length;
+    for (const d of days.slice(-3)) await runDaily(d, o);
+    expect((await readAllEvents(db)).length).toBe(n);
+  }, 120_000);
 
   it("日本時間の日付は、UTC では前の日になる朝7時でも合う", () => {
     expect(jstDate(jst("2026-11-09", 7))).toBe("2026-11-09");
