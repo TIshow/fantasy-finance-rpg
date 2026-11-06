@@ -59,7 +59,11 @@ export async function setUpParticipants(store: EventStore, startDate: string, co
 const refPrice = (x: ListedInput): Deciyen => x.refPrice.price;
 /** 仮の注文の形（成行は limit: null）を、注文票の形（成行は limit を書かない）にする */
 const toOrder = ({ limit, ...o }: LiquidityOrder): Order => (limit === null ? o : { ...o, limit });
-/** 規則の記録。注文を決める値（段の幅・株数・目標の株数・乱数のシードなど）を settings に入れ、説明の文と一緒にハッシュにする */
+/**
+ * 規則の記録。注文を決める値（段の幅・株数・目標の株数・乱数のシードなど）を settings に入れ、説明の文と一緒にハッシュにする。
+ * 本番の記録が始まったあとに、規則か数字（liquidity.ts の MAKER_PARAMS・NOISE_PARAMS）を変えるときは、版（version）を上げる
+ * （いまは本番の記録がないので "1" のまま。#139 で数字を変えたときも上げていない）
+ */
 const ruleModel = async (modelId: string, text: string, params: Record<string, number>) => {
   const settings = Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)]));
   return {

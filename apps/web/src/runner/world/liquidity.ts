@@ -48,7 +48,7 @@ export interface MakerParams {
   maxSkewBp: number;
 }
 
-export const MAKER_PARAMS: MakerParams = { spreadBp: 100, levels: 3, qtyPerLevel: 300, skewPerLotBp: 20, maxSkewBp: 300 };
+export const MAKER_PARAMS: MakerParams = { spreadBp: 50, levels: 3, qtyPerLevel: 300, skewPerLotBp: 20, maxSkewBp: 150 };
 
 export interface MakerInput {
   symbol: string;
@@ -126,7 +126,7 @@ export interface NoiseParams {
   maxOffsetBp: number;
 }
 
-export const NOISE_PARAMS: NoiseParams = { chance: 0.6, maxQty: 300, marketShare: 0.3, maxOffsetBp: 300 };
+export const NOISE_PARAMS: NoiseParams = { chance: 1, maxQty: 300, marketShare: 0.9, maxOffsetBp: 300 };
 
 export interface NoiseInput {
   /** 世界のシードと約定日（日ごとに別の乱数の列になる） */

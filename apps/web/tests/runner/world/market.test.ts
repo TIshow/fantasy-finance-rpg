@@ -106,9 +106,9 @@ describe("架空の市場を10営業日回す", async () => {
       expect(auctions.map((e) => p(e).symbol)).toEqual(COMPANIES.map((c) => c.symbol).sort());
     }
     // 価格がつくのは、ばらばらに売買する参加者や規則のAIの注文が、マーケットメイカーの指値に届いた日だけ
-    // （いまの設定では60回のうち22回。板が薄いことは #113 で lead に伝える）
+    // （#139 で売買役の数字を変えたあとは、60回のうち57回。変える前は22回）
     const priced = of("auction.cleared").filter((e) => p(e).price !== null);
-    expect(priced.length).toBe(22);
+    expect(priced.length).toBe(57);
     expect(of("auction.cleared").filter((e) => p(e).date === DAYS[0]).every((e) => p(e).price !== null)).toBe(true);
   });
 
