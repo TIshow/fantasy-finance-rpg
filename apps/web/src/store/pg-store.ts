@@ -137,8 +137,11 @@ export class PgEventStore implements EventStore {
     return this.write((mem) => mem.append(draft));
   }
 
+  /**
+   * 注文票は先回りで断らず、記録の処理に任せる。U+0000 を含む注文票は、メモリの保管と同じく
+   * order_sheet.rejected（ordersUnreadable）として拒否を記録に残す（正規化が U+0000 を断るので、DB には書かれない。#110 PR-2d）
+   */
   commitSheet(agentId: string, sheet: SheetInput): Promise<CommitResult> {
-    if (hasNul([agentId, sheet])) return Promise.resolve({ ok: false, reason: `sheet ${NUL_REASON}` });
     return this.write((mem) => mem.commitSheet(agentId, sheet));
   }
 

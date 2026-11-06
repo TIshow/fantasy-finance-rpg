@@ -126,15 +126,20 @@ describe("PgEventStore の失敗と同時の書き込み", () => {
     await expect(store.last()).rejects.toThrow(/^seq 6 /);
   });
 
-  it("jsonb に書けない U+0000 を含む中身は、書かずに理由を返す（例外にしない）", async () => {
+  it("jsonb に書けない U+0000 を含む追記は、書かずに理由を返す（例外にしない）。注文票は、メモリの保管と同じく拒否を記録に残す", async () => {
     const clock = new FakeClock(0);
     const store = await fresh({ clock });
     const run = await seedAgent(store, clock);
     clock.set(jst("2026-11-10", 8));
     expect(await store.append({ ...source(clock.now()), payload: { publishedAt: 1, fetchedAt: 2, note: "a\u0000b" } })).toMatchObject({ ok: false, reason: expect.stringContaining("U+0000") });
-    const order = { symbol: "TSTA\u0000", side: "buy", qty: 1, limit: 100 } as never;
-    expect(await store.commitSheet("ai-a", { tradingDate: "2026-11-10", orders: [order], runSeq: run, inputSeqs: [4] })).toMatchObject({ ok: false, reason: expect.stringContaining("U+0000") });
     expect((await store.last())?.seq).toBe(5);
+    const order = { symbol: "TSTA\u0000", side: "buy", qty: 1, limit: 100 } as never;
+    const sheet = { tradingDate: "2026-11-10", orders: [order], runSeq: run, inputSeqs: [4] };
+    const r = await store.commitSheet("ai-a", sheet);
+    expect(r).toMatchObject({ ok: true, event: { seq: 6, type: "order_sheet.rejected", payload: { agentId: "ai-a", ordersUnreadable: true } } });
+    // DB から開き直しても、同じ拒否の記録が読める（DB に書けている）
+    const reopened = await PgEventStore.open(db, { values: noValues, holidayTables: tables, clock });
+    expect((await reopened.last())?.hash).toBe(r.ok ? r.event.hash : "");
   });
 
   it("別の処理が書いたあとの追記は、その分を含めた検査にかける（二重の登録を断る）", async () => {
