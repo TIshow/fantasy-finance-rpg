@@ -37,6 +37,18 @@ function businessDays(n: number): string[] {
   return out;
 }
 
+/** 自己約定：同じ参加者の売りと買いが、同じ日の同じ銘柄の板寄せで約定したもの（lead の決定で認めない）。「参加者 日付 銘柄」を返す */
+export function selfMatches(events: readonly LogEvent[]): string[] {
+  const out: string[] = [];
+  for (const e of events) {
+    if (e.type !== "fills.executed") continue;
+    const sides = new Map<string, Set<string>>();
+    for (const f of (p(e).fills as { symbol: string; side: string; qty: number }[]) ?? []) if (f.qty > 0) sides.set(f.symbol, (sides.get(f.symbol) ?? new Set()).add(f.side));
+    for (const [symbol, s] of sides) if (s.size === 2) out.push(`${String(p(e).agentId)} ${String(p(e).tradingDate)} ${symbol}`);
+  }
+  return out;
+}
+
 export interface MarketStats {
   /** 社ごとの、値段がついた日数 */
   pricedDays: Record<string, number>;
@@ -45,6 +57,8 @@ export interface MarketStats {
   /** 社ごとの、値段のつかない日が続いた最大の日数 */
   longestGap: Record<string, number>;
   disclosures: number;
+  /** 自己約定の件数（0であること） */
+  selfMatches: number;
 }
 
 /** 種 seed の世界を days 営業日回し、値段のつき方と、最後の売買役の口座をまとめる */
@@ -87,6 +101,7 @@ async function run(seed: number, days: readonly string[]) {
     allSixDays: days.filter((d) => SYMBOLS.every((s) => priced.get(s)!.has(d))).length,
     longestGap,
     disclosures: events.filter((e) => e.type === "company.disclosed").length,
+    selfMatches: selfMatches(events).length,
   };
   const ids = [...new Set(events.filter((e) => e.type === "agent.registered").map((e) => p(e).agentId as string))];
   const accounts = Object.fromEntries(await Promise.all(ids.map(async (id) => [id, await store.account(id)] as const)));
@@ -96,7 +111,7 @@ async function run(seed: number, days: readonly string[]) {
 /** SEEDS[index] の種で60営業日を回し、目標を確かめる（seed-<index>.test.ts から呼ぶ） */
 export function longRun(index: number) {
   const seed = SEEDS[index]!;
-  it(`種 ${seed}：各社が48日以上・6社そろって30日以上、値段がつき、値段のつかない日が続くのは3日まで。売買役の株と現金は尽きない`, async () => {
+  it(`種 ${seed}：各社が48日以上・6社そろって30日以上、値段がつき、値段のつかない日が続くのは3日まで。自己約定がなく、売買役の株と現金は尽きない`, async () => {
     const { stats: s, accounts } = await run(seed, businessDays(DAYS));
     // 種ごとの結果を出す（目標までの余裕を、試験が落ちる前に見られるように）
     console.log(`seed ${seed}: ${JSON.stringify(s)}`);
@@ -107,6 +122,8 @@ export function longRun(index: number) {
       expect(s.longestGap[sym], `${sym}: ${JSON.stringify(s)}`).toBeLessThanOrEqual(3);
     }
     expect(s.allSixDays, JSON.stringify(s)).toBeGreaterThanOrEqual(30);
+    // どの日も、どの銘柄でも、同じ参加者の売りと買いが同じ板寄せで約定しない
+    expect(s.selfMatches).toBe(0);
     // 最後の日に、どの口座も台帳の不変条件を守り、売買役（マーケットメイカーとばらばらの参加者）の株と現金は0になっていない
     for (const [id, a] of Object.entries(accounts)) {
       expect(a, id).not.toBeNull();

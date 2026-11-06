@@ -35,6 +35,21 @@ const checkLots = (name: string, v: number) => {
   if (!Number.isSafeInteger(v) || v <= 0 || v % LOT !== 0) throw new Error(`${name} must be a positive multiple of ${LOT}`);
 };
 
+/**
+ * その日に使う目安の価格（#139 の lead の決定）。前の営業日に値段がつかなかった銘柄では、業績から出した目安の価格を、その日の
+ * 値幅の中に収まるところまで（いちばん近い値幅の端まで）寄せる。寄せたあとの価格は値幅の端と同じなので、値幅の端の日にはならず、
+ * マーケットメイカーは売りと買いの両方を出す。前の営業日に値段がついていれば、業績から出した価格をそのまま使う。
+ * 「前の営業日に値段がつかなかった」は、記録された板寄せの結果だけから決めて渡す（先読みしないように）。
+ * pulledFrom は、寄せたときだけ寄せる前の価格（記録に残す）。寄せなければ null
+ */
+export function dayFair(fair: Deciyen, band: PriceBand, prevUnpriced: boolean): { fair: Deciyen; pulledFrom: Deciyen | null } {
+  checkBand(band);
+  checkCount("fair", fair);
+  if (!prevUnpriced) return { fair, pulledFrom: null };
+  const pulled = clamp(fair, band);
+  return pulled === fair ? { fair, pulledFrom: null } : { fair: pulled, pulledFrom: fair };
+}
+
 export interface MakerParams {
   /** 目安の価格から、1段ごとに離す幅（基点。100 = 1%） */
   spreadBp: number;
@@ -68,7 +83,8 @@ export interface MakerInput {
  * マーケットメイカーの注文。中心は目安の価格で、持ち株が目標より多ければ下げ（売りやすく）、少なければ上げる。
  * 中心から spreadBp ずつ離して、買いと売りの指値を levels 段ずつ出す。買いは刻みに切り下げ、売りは切り上げ、値幅の内側に収める。
  * 値幅に押しつけられて同じ値段に重なった段はまとめる。中心が値幅の内側で、買いと売りが同じ値段に重なったら、買いを外す
- * （自分どうしで約定しないように）。中心が値幅の外なら、値幅の端の値段で売りと買いの両方を出す（その日に値段がつくように）。
+ * （自分どうしで約定しないように）。目安の価格が値幅の外の日（端の日）は、目安に向かう側だけを、値幅の端の値段に出す（上の外なら
+ * 上限で売りだけ、下の外なら下限で買いだけ）。端の日でなければ、持ち株でずらした中心を値幅の内側に収める。どの場合も、自分の買いが自分の売りに届く値段では出さない（自己約定はしない。#139 の lead の決定）。
  * 売りは持っている株数まで（重なりを確かめる前に減らす）。買いは「指値 × 株数」の合計が現金を超えない分まで、目安に近い段から（足りない段は飛ばし、安い段を出す）
  */
 export function makerOrders(input: MakerInput, params: MakerParams = MAKER_PARAMS): LiquidityOrder[] {
@@ -77,7 +93,10 @@ export function makerOrders(input: MakerInput, params: MakerParams = MAKER_PARAM
   checkLots("qtyPerLevel", params.qtyPerLevel);
   const lots = Math.trunc((input.held - input.target) / LOT);
   const skewBp = Math.max(-params.maxSkewBp, Math.min(params.maxSkewBp, lots * params.skewPerLotBp));
-  const center = Math.round((input.fair * (BP - skewBp)) / BP);
+  // 値幅の端の日かどうかは、目安の価格で決める（ばらばらの参加者と同じ決め方。記録された決算だけから説明できるように）。
+  // 端の日でなければ、持ち株でずらした中心を値幅の内側に収める（中心だけが外に出ても、売りと買いの両方を出す）
+  const edge = input.fair > input.band.upper ? input.band.upper : input.fair < input.band.lower ? input.band.lower : null;
+  const center = clamp(Math.round((input.fair * (BP - skewBp)) / BP), input.band);
   // center × (BP ± 段の幅) は整数。刻み（TICK × BP）で割って切り上げ・切り下げる
   const at = (i: number, sign: 1 | -1) => center * (BP + sign * params.spreadBp * i);
   const merge = (side: Side, prices: Deciyen[]) => {
@@ -90,16 +109,16 @@ export function makerOrders(input: MakerInput, params: MakerParams = MAKER_PARAM
     return out.map((x) => ({ symbol: input.symbol, side, qty: x.qty, limit: x.price }));
   };
   const range = Array.from({ length: params.levels }, (_, i) => i + 1);
-  // 中心が値幅の外なら（#139 の lead の決定）、すべての段を値幅の端の値段に置き、売りと買いの両方を出す。上の外なら上限、
-  // 下の外なら下限で、自分の売りと買いが当たるので、その日に必ず値段がつき、値段は毎日値幅いっぱいずつ目安に近づく
-  // （ストップ高・安が続く動き）
-  const edge = center > input.band.upper ? input.band.upper : center < input.band.lower ? input.band.lower : null;
+  // 端の日（#139 の lead の決定）は、すべての段を値幅の端の値段に置き、目安に向かう側だけを出す。上の外なら上限で
+  // 売りだけ、下の外なら下限で買いだけ。ほかの参加者の注文と当たれば、値段は値幅いっぱいずつ目安に近づく（ストップ高・安が続く動き）
   let asks = merge("sell", range.map((i) => edge ?? clamp(Math.ceil(at(i, 1) / (TICK * BP)) * TICK, input.band)));
   let bids = merge("buy", range.map((i) => edge ?? clamp(Math.floor(at(i, -1) / (TICK * BP)) * TICK, input.band)));
   // 売りは先に持ち株で減らす（売れない売りのために買いを外さないように）
   asks = limitQty(asks, input.held, (o) => o.qty);
-  // 中心が値幅の内側なら、重なった段は外す（自分どうしで約定しないように）
-  if (edge === null) bids = bids.filter((b) => b.limit < (asks[0]?.limit ?? Infinity));
+  // 自分どうしで約定しないように：上の外なら買いを、下の外なら売りを出さない。内側なら、売りの最安値に届く買いを外す
+  if (edge === input.band.upper) bids = [];
+  else if (edge === input.band.lower) asks = [];
+  else bids = bids.filter((b) => b.limit < (asks[0]?.limit ?? Infinity));
   return [...asks, ...limitQty(bids, input.cash, (o) => o.qty * o.limit)];
 }
 
@@ -134,16 +153,25 @@ export interface NoiseParams {
   tilt: number;
   /** 買いの確率の下限（上限は 1 − これ）。乱数で決める部分を残す */
   minBuyChance: number;
+  /**
+   * 値幅の端の日（目安の価格が値幅の外にある銘柄）の買いの確率（#139 の lead の決定、案1）。上の外なら edgeBuyChance、
+   * 下の外なら 1 − edgeBuyChance。マーケットメイカーは端の値段で片側だけを出すので、その逆の側を多く出す。端の日は tilt より優先する
+   */
+  edgeBuyChance: number;
 }
 
-export const NOISE_PARAMS: NoiseParams = { chance: 1, maxQty: 300, marketShare: 0.95, maxOffsetBp: 300, tilt: 1, minBuyChance: 0.1 };
+export const NOISE_PARAMS: NoiseParams = { chance: 1, maxQty: 300, marketShare: 0.95, maxOffsetBp: 300, tilt: 1, minBuyChance: 0.1, edgeBuyChance: 0.9 };
 
 export interface NoiseInput {
   /** 世界のシードと約定日（日ごとに別の乱数の列になる） */
   seed: number;
   tradingDate: string;
   /** 銘柄ごとの前日の価格と値幅（銘柄コードの昇順に並べて使う） */
-  markets: readonly { symbol: string; prevPrice: Deciyen; band: PriceBand }[];
+  /**
+   * 銘柄ごとの前日の価格と値幅。edge は、目安の価格が値幅の上限より上（upper）か下限より下（lower）の日（値幅の端の日）。
+   * ふだんの日は省く
+   */
+  markets: readonly { symbol: string; prevPrice: Deciyen; band: PriceBand; edge?: "upper" | "lower" }[];
   holdings: Readonly<Record<string, number>>;
   cash: Deciyen;
   /** 最初の持ち株（銘柄ごと）と現金。売りと買いの片寄りの基準。省けば片寄らせない。最初の持ち株がない銘柄は、株の減り方を0とみなす */
@@ -151,7 +179,10 @@ export interface NoiseInput {
 }
 
 /** 買いの確率：最初の持ち株・現金からの減り方で片寄らせ、[minBuyChance, 1 − minBuyChance] に収める */
-function buyChance(input: NoiseInput, symbol: string, cash: Deciyen, params: NoiseParams): number {
+function buyChance(input: NoiseInput, symbol: string, cash: Deciyen, params: NoiseParams, edge?: "upper" | "lower"): number {
+  // 値幅の端の日は、マーケットメイカーの逆の側を多く出す（上の外なら買い、下の外なら売り）。持ち株・現金のずれより優先する
+  if (edge === "upper") return params.edgeBuyChance;
+  if (edge === "lower") return 1 - params.edgeBuyChance;
   const b = input.baseline;
   if (!b || b.cash <= 0) return 0.5;
   const base = Object.hasOwn(b.shares, symbol) ? b.shares[symbol]! : 0;
@@ -180,7 +211,7 @@ export function noiseOrders(input: NoiseInput, params: NoiseParams = NOISE_PARAM
   for (const m of markets) {
     const rand = mulberry32(subSeed(input.seed, `noise:${input.tradingDate}:${m.symbol}`));
     if (rand() >= params.chance) continue;
-    const side: Side = rand() < buyChance(input, m.symbol, cash, params) ? "buy" : "sell";
+    const side: Side = rand() < buyChance(input, m.symbol, cash, params, m.edge) ? "buy" : "sell";
     let qty = (1 + Math.floor(rand() * (params.maxQty / LOT))) * LOT;
     const isMarket = rand() < params.marketShare;
     const offsetBp = Math.round((2 * rand() - 1) * params.maxOffsetBp);
