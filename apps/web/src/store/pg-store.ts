@@ -10,7 +10,7 @@ import type { ValueStore } from "../events/replay";
 import { SCHEMA, type LogEvent } from "../events/types";
 import type { HolidayTable } from "../holidays/table";
 import { ADOPT, InMemoryEventStore, READ_MAX } from "./memory-store";
-import type { SqlDb, SqlRunner } from "./sql";
+import { hasNul, type SqlDb, type SqlRunner } from "./sql";
 
 /** advisory lock の番号。この表への追記だけが使う */
 const LOCK_KEY = 25_000_001;
@@ -56,31 +56,34 @@ export interface PgStoreDeps {
   requireAppendOnlyRole?: boolean;
 }
 
+/** 追記だけの表（db/001・002） */
+const APPEND_ONLY_TABLES = ["events", "stored_values"];
+
 /**
  * いまの接続の役割が、追記だけの約束を権限で守られているかを確かめ、問題の一覧を返す（空なら問題なし）。
  * 表の持ち主・スーパーユーザーは、トリガを外せるので、アプリの接続には使わない。
  */
 export async function checkAppendOnlyRole(db: SqlRunner): Promise<string[]> {
-  const { rows } = await db.query<Record<string, boolean>>(
-    `SELECT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser,
-            pg_has_role(current_user, (SELECT tableowner FROM pg_tables WHERE tablename = 'events' AND schemaname = current_schema()), 'USAGE') AS owner,
-            has_table_privilege('events', 'INSERT') AS can_insert,
-            has_table_privilege('events', 'UPDATE') AS can_update,
-            has_table_privilege('events', 'DELETE') AS can_delete,
-            has_table_privilege('events', 'TRUNCATE') AS can_truncate`,
-  );
-  const r = rows[0] ?? {};
   const problems: string[] = [];
-  if (r.superuser) problems.push("the role is a superuser");
-  if (r.owner) problems.push("the role is (or is a member of) the owner of events");
-  if (!r.can_insert) problems.push("the role cannot INSERT into events");
-  for (const [k, op] of [["can_update", "UPDATE"], ["can_delete", "DELETE"], ["can_truncate", "TRUNCATE"]] as const) if (r[k]) problems.push(`the role can ${op} events`);
-  return problems;
+  for (const table of APPEND_ONLY_TABLES) {
+    const { rows } = await db.query<Record<string, boolean>>(
+      `SELECT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser,
+              pg_has_role(current_user, (SELECT tableowner FROM pg_tables WHERE tablename = $1 AND schemaname = current_schema()), 'USAGE') AS owner,
+              has_table_privilege($1, 'INSERT') AS can_insert,
+              has_table_privilege($1, 'UPDATE') AS can_update,
+              has_table_privilege($1, 'DELETE') AS can_delete,
+              has_table_privilege($1, 'TRUNCATE') AS can_truncate`,
+      [table],
+    );
+    const r = rows[0] ?? {};
+    if (r.superuser) problems.push("the role is a superuser");
+    if (r.owner) problems.push(`the role is (or is a member of) the owner of ${table}`);
+    if (!r.can_insert) problems.push(`the role cannot INSERT into ${table}`);
+    for (const [k, op] of [["can_update", "UPDATE"], ["can_delete", "DELETE"], ["can_truncate", "TRUNCATE"]] as const) if (r[k]) problems.push(`the role can ${op} ${table}`);
+  }
+  return [...new Set(problems)];
 }
 
-/** jsonb は U+0000 を持てない（書き込みで失敗する）。書く前に見つけて断る */
-const hasNul = (v: unknown): boolean =>
-  typeof v === "string" ? v.includes("\u0000") : Array.isArray(v) ? v.some(hasNul) : typeof v === "object" && v !== null ? Object.entries(v).some(([k, x]) => hasNul(k) || hasNul(x)) : false;
 const NUL_REASON = "contains U+0000, which the database cannot store";
 
 export class PgEventStore implements EventStore {

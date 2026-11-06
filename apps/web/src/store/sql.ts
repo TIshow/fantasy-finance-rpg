@@ -25,3 +25,7 @@ export async function migrate(db: SqlDb): Promise<void> {
     for (const f of files) await tx.exec(readFileSync(new URL(f, DB_DIR), "utf8"));
   });
 }
+
+/** jsonb は U+0000 を持てない（書き込みで失敗する）。書く前に見つけて断るために使う */
+export const hasNul = (v: unknown): boolean =>
+  typeof v === "string" ? v.includes("\u0000") : Array.isArray(v) ? v.some(hasNul) : typeof v === "object" && v !== null ? Object.entries(v).some(([k, x]) => hasNul(k) || hasNul(x)) : false;

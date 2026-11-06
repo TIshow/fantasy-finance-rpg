@@ -179,7 +179,7 @@ describe("追記だけであること（DB が守る）", () => {
       expect(await checkAppendOnlyRole(db)).toEqual([]);
       // 運営者の手順に入れる確認の SQL（db/ops/check_app_role.sql）も、想定の結果を返す
       const check = (await pg.query(readFileSync(new URL("../../db/ops/check_app_role.sql", import.meta.url), "utf8"))).rows[0];
-      expect(check).toEqual({ who: "ffr_app", superuser: false, write_all_data: false, can_select: true, can_insert: true, can_update: false, can_delete: false, can_truncate: false });
+      expect(check).toEqual({ who: "ffr_app", superuser: false, write_all_data: false, can_select: true, can_insert: true, can_update: false, can_delete: false, can_truncate: false, values_can_select: true, values_can_insert: true, values_can_update: false, values_can_delete: false, values_can_truncate: false });
       expect((await store.read()).length).toBe(5);
       for (const sql of ["UPDATE events SET type = 'x'", "DELETE FROM events", "TRUNCATE events", "DROP TABLE events"]) await expect(pg.exec(sql)).rejects.toThrow(/permission denied|must be owner/);
       const clock = new FakeClock(jst("2026-11-09", 23));
