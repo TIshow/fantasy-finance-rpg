@@ -14,6 +14,7 @@ import { cutoffOf, isBusinessDay, nextBusinessDay, previousBusinessDay } from ".
 import type { Account, Deciyen, Order } from "../ledger/types";
 import type { ValuesPort } from "../store/pg-values";
 import { type SplitInput, adjustCloses } from "./adjust";
+import { discloseDue } from "./world/disclosure";
 
 /** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引き、凍結した写しを渡す */
 export interface CloseInput {
@@ -79,6 +80,11 @@ export interface RunnerDeps {
   waitUntil(at: number): Promise<void>;
   /** 判断の入力に渡す終値の日数（新しい方から） */
   inputDays?: number;
+  /**
+   * 架空の企業の決算を発表するときの乱数の種（上場と同じもの）。渡せば、前の日の残りを補ったあと・判断の前と、
+   * 1日の最後に、時期が来た四半期の決算（company.disclosed）を書く。渡さなければ発表しない（呼ぶ側が discloseDue を呼ぶ）
+   */
+  seed?: number;
 }
 
 const HOUR = 3_600_000;
@@ -94,14 +100,36 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
   const prev = previousBusinessDay(date, day.log.holidays());
   const s = scheduleOf(date);
   const out: StageResult[] = [];
+  const disclose = async () => {
+    if (deps.seed === undefined) return;
+    const written = await day.disclose(deps.seed);
+    if (written.length > 0) out.push({ stage: "disclose", status: "written", detail: written.join(",") });
+  };
   await deps.waitUntil(s.decideAt);
   out.push(...(await day.catchUp(prev)));
+  // 前の日の板寄せをここで補ったなら、その日の引けのあとに来た発表も、判断の前に書く（判断が、締めより前の発表を見るように）
+  await disclose();
   out.push(await day.decide(date, prev));
   await deps.waitUntil(s.openAt);
   out.push(await day.open(date));
   await deps.waitUntil(s.closeAt);
   out.push(...(await day.catchUp(date)));
+  await disclose();
   return out;
+}
+
+/** AIが返した判断の形を確かめ、記録する形にする（post と note を省いたものは、null と空の文字列）。形が違えば例外 */
+function decisionOf(d: unknown): Decision {
+  if (typeof d !== "object" || d === null) throw new TypeError("decision must be an object");
+  const { orders, post, note } = d as Record<string, unknown>;
+  if (!Array.isArray(orders)) throw new TypeError("orders must be an array");
+  if (note !== undefined && typeof note !== "string") throw new TypeError("note must be a string");
+  if (post !== undefined && post !== null) {
+    const { board, text } = (typeof post === "object" ? post : {}) as Record<string, unknown>;
+    if (typeof board !== "string" || typeof text !== "string") throw new TypeError("post must have a board and a text");
+    return { orders: orders as Order[], post: { board, text }, note: note ?? "" };
+  }
+  return { orders: orders as Order[], post: null, note: note ?? "" };
 }
 
 type Payload = Record<string, unknown>;
@@ -149,6 +177,22 @@ class Day {
 
   private append(type: Parameters<EventStore["append"]>[0]["type"], actor: Parameters<EventStore["append"]>[0]["actor"], payload: Payload, refs: number[] = []) {
     return this.deps.store.append({ type, actor, refs, payload }).then((r) => this.sync(r, type));
+  }
+
+  /** 時期が来た決算の発表を書き、写しにも当てる（discloseDue が保管に追記した分を、ここで検査して取り込む） */
+  async disclose(seed: number): Promise<string[]> {
+    const s = this.deps.store;
+    const store: EventStore = {
+      read: (after, limit) => s.read(after, limit),
+      last: () => s.last(),
+      commitSheet: () => Promise.reject(new Error("disclose does not commit sheets")),
+      append: async (draft) => {
+        const r = await s.append(draft);
+        if (r.ok) await this.sync(r, draft.type);
+        return r;
+      },
+    };
+    return discloseDue(store, seed, this.deps.clock);
   }
 
   /** その日に動くAI（登録済みで、開始日が date 以前） */
@@ -263,7 +307,8 @@ class Day {
    * 判断（出力）は、正規化した JSON をログの外に置き、outputHash で引き直せるようにする。run を書いた後に落ちたら、
    * 回し直しでは判断をやり直さず、記録した run の出力と入力から、欠けた投稿・注文票だけを補う。
    * 停止中のAIは、投稿を作らない（投稿の停止）・注文票は保管に渡して拒否（suspended）を残す（注文の停止）。
-   * 判断が例外を投げたAIは、失敗の run（ok: false）を残して次のAIへ進む（エラー文は残さない。EVENT_LOG §1）。
+   * 判断が例外を投げたAIは、失敗の run（ok: false、provider_error）を残して次のAIへ進む（エラー文は残さない。EVENT_LOG §1）。
+   * 出力が記録の形に直せないAI（NFC でない文字・U+0000・小数の株数など）も、失敗の run（invalid_output）を残して次へ進む。
    */
   async decide(date: string, prev: string): Promise<StageResult> {
     const stage = "decide";
@@ -290,16 +335,22 @@ class Day {
       const runs = this.log.events.filter((e) => e.seq > (prevDone?.seq ?? 0) && e.type === "agent.run" && pl(e).agentId === id);
       if (runs.some((r) => pl(r).ok !== true)) continue; // 失敗を記録済み
       if (runs.length === 0 && noPosts && this.suspended(id, "orders")) continue;
+      // 注文票まで済んでいれば、何もしない（締めのあとの回し直しで、間に合わなかったと数えないように。投稿は注文の判断の記録より前に済んでいる）
+      const orderDone = runs.find((r) => pl(r).purpose === "order");
+      if (orderDone && this.log.events.some((e) => (e.type === "order_sheet.committed" || e.type === "order_sheet.rejected") && pl(e).runSeq === orderDone.seq)) continue;
       if (this.deps.clock.now() >= cutoffOf(date)) {
         late.push(id);
         continue;
       }
       let decision: Decision;
       let inputSeqs: number[];
+      /** 記録の形（正規化した JSON）にした出力。記録した run から作り直すときは、その本文 */
+      let output: string;
       if (runs.length > 0) {
         const body = this.deps.values.body(pl(runs[0]!).outputHash as string);
         if (!body) throw new Error(`output of run ${runs[0]!.seq} is not available`);
-        decision = JSON.parse(body.value) as Decision;
+        output = body.value;
+        decision = JSON.parse(output) as Decision;
         inputSeqs = pl(runs[0]!).inputSeqs as number[];
       } else {
         // 口座の根拠：最後の引け後の処理（まだなければ登録）
@@ -319,11 +370,24 @@ class Day {
         inputSeqs = [...new Set([...closes.map((e) => e.seq), ...splits.map((x) => x.seq), ...applied.map((e) => e.seq), basis.seq, ...listedSeqs])];
         const raw = closes.map((e) => ({ seq: e.seq, date: pl(e).date as string, prices: this.deps.values.get(pl(e).valuesHash as string)!.value as CloseInput["prices"] }));
         const input = deepFreeze(structuredClone({ agentId: id, tradingDate: date, at: this.deps.clock.now(), closes: adjustCloses(raw, splits), splits, account: this.ledger.account(id), listed }));
+        let d: Decision;
         try {
-          const d = await agent.decide(input);
-          decision = { orders: d.orders, post: d.post ?? null, note: d.note ?? "" };
+          d = await agent.decide(input);
         } catch {
-          await this.run(agent, "order", date, inputSeqs, input.at, null);
+          await this.run(agent, "order", date, inputSeqs, input.at, null, "provider_error");
+          wrote = true;
+          continue;
+        }
+        try {
+          // 判断の記録を書く前に、出力の形（orders が配列・post が null か掲示板と本文が文字列・note が文字列）を確かめ、
+          // 記録の形（正規化した JSON）に直す。NFC でない文字・U+0000・小数などは、ここで断る。注文の各要素の中身は、
+          // 注文票の確定の検査が拒否の記録にする（形が違っても例外にしない）。投稿の掲示板と本文も、ここを通れば、
+          // あとで本文を置くとき・投稿を記録するときに断られない。
+          // 確定・投稿に使うのは、記録した出力を読み直したもの（回し直しのときと同じものにする）
+          output = canonicalize(decisionOf(d));
+          decision = JSON.parse(output) as Decision;
+        } catch {
+          await this.run(agent, "order", date, inputSeqs, input.at, null, "invalid_output");
           wrote = true;
           continue;
         }
@@ -332,7 +396,7 @@ class Day {
         const recorded = runs.find((r) => pl(r).purpose === purpose);
         if (recorded) return recorded.seq;
         wrote = true;
-        return this.run(agent, purpose, date, inputSeqs, this.deps.clock.now(), canonicalize(decision));
+        return this.run(agent, purpose, date, inputSeqs, this.deps.clock.now(), output);
       };
       if (decision.post && !noPosts) {
         const postRun = await runSeq("post");
@@ -358,10 +422,10 @@ class Day {
   }
 
   /** agent.run を書く。output が null なら失敗の run。リクエストのハッシュは、AIに渡したものの識別（入力の seq と約定日）から作る */
-  private async run(agent: RunnerAgent, purpose: "post" | "order", tradingDate: string, inputSeqs: number[], startedAt: number, output: string | null): Promise<number> {
+  private async run(agent: RunnerAgent, purpose: "post" | "order", tradingDate: string, inputSeqs: number[], startedAt: number, output: string | null, errorCode: "provider_error" | "invalid_output" = "provider_error"): Promise<number> {
     const requestHash = await sha256Hex(new TextEncoder().encode(canonicalize({ model: agent.model, prompt: agent.prompt, purpose, tradingDate, inputSeqs })));
     const base = { agentId: agent.id, purpose, model: agent.model, prompt: agent.prompt, inputSeqs, requestHash, startedAt, finishedAt: this.deps.clock.now() };
-    const payload = output === null ? { ...base, ok: false, errorCode: "provider_error" } : { ...base, outputHash: await this.deps.values.putBody(output), ok: true };
+    const payload = output === null ? { ...base, ok: false, errorCode } : { ...base, outputHash: await this.deps.values.putBody(output), ok: true };
     return (await this.append("agent.run", "system", payload, inputSeqs)).seq;
   }
 
