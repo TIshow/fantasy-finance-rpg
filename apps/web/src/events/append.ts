@@ -20,6 +20,7 @@ const WRITERS: Record<EventType, Writer> = {
   "prices.close": "system",
   "corporate_action.announced": "system",
   "company.listed": "system",
+  "auction.cleared": "system",
   "market.closed": "operator",
   "holidays.adopted": "operator",
   "universe.set": "operator",
@@ -39,8 +40,8 @@ const WRITERS: Record<EventType, Writer> = {
 };
 
 /** 中身で他のイベントを指す項目。すべて refs にも入っていなければならない */
-const SEQ_FIELDS = ["runSeq", "sheetSeq", "openSeq", "closeSeq", "closedSeq", "targetSeq", "correctionSeq", "replyTo"];
-const SEQ_LIST_FIELDS = ["inputSeqs", "announcedSeqs", "citeSeqs"];
+const SEQ_FIELDS = ["runSeq", "sheetSeq", "openSeq", "closeSeq", "closedSeq", "refSeq", "targetSeq", "correctionSeq", "replyTo"];
+const SEQ_LIST_FIELDS = ["inputSeqs", "announcedSeqs", "citeSeqs", "sheetSeqs", "auctionSeqs"];
 
 /** 登録済みのAIについてのイベント（agent.suspended・agent.resumed は全体の "*" も可） */
 const AGENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
@@ -57,7 +58,7 @@ const AGENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
 ]);
 
 /** 営業日を判定するイベント。ほかに営業日を使うのは登録済みのAIのイベントで、登録には一覧が要るので、ここに入れなくてよい */
-const NEEDS_CALENDAR: ReadonlySet<EventType> = new Set<EventType>(["prices.open", "prices.close", "market.closed", "agent.registered", "corporate_action.announced"]);
+const NEEDS_CALENDAR: ReadonlySet<EventType> = new Set<EventType>(["prices.open", "prices.close", "market.closed", "agent.registered", "corporate_action.announced", "auction.cleared"]);
 
 /**
  * 営業日の判定を通した日付の項目（§3.5）。ログが使った一番遅い日付を覚えるのに使う。臨時休場の日は判定を通さないので入れない。
@@ -67,6 +68,7 @@ const NEEDS_CALENDAR: ReadonlySet<EventType> = new Set<EventType>(["prices.open"
 const JUDGED_DATES: Partial<Record<EventType, string[]>> = {
   "prices.open": ["date"],
   "prices.close": ["date"],
+  "auction.cleared": ["date"],
   "agent.registered": ["startDate"],
   "order_sheet.committed": ["tradingDate"],
   "valuation.recorded": ["date"],
@@ -148,7 +150,11 @@ export class EventLog {
   private calendar: { table: HolidayTable; covered: ReadonlySet<string> } | null = null;
   private universe: ReadonlySet<string> = new Set();
   /** 上場した銘柄（company.listed）。指値の値幅の基準の価格と、1件の株数の上限 */
-  private readonly listings = new Map<string, Listing>();
+  private readonly listings = new Map<string, ListingState>();
+  /** 板寄せの結果（キーは「銘柄:日付」） */
+  private readonly auctions = new Map<string, number>();
+  /** 約定日ごとの、確定した注文票の seq（板寄せに渡す全員の注文票） */
+  private readonly sheetsByDate = new Map<string, number[]>();
   /** 記録に出た一番遅い日付。一覧を替えても、ここまでの休場日は変えさせない */
   private latest = "";
 
@@ -263,12 +269,18 @@ export class EventLog {
     if (this.runProblem(d, agentId, "order") || this.inputProblem(p.inputSeqs, tradingDate) || this.inputProblem((run?.payload as Record<string, unknown> | undefined)?.inputSeqs, tradingDate)) return "invalid_sheet";
     const v = validateSheet(
       { agentId, tradingDate, committedAt: d.recordedAt, orders: p.orders as Order[] },
-      { universe: this.universe, alreadyCommitted: this.commits.has(`${agentId}:${tradingDate}`), account: this.ctx.accountOf(agentId), holidays: this.holidays(), accountAsOf: st.asOf, listings: this.listings },
+      { universe: this.universe, alreadyCommitted: this.commits.has(`${agentId}:${tradingDate}`), account: this.ctx.accountOf(agentId), holidays: this.holidays(), accountAsOf: st.asOf, listings: this.listingsFor(tradingDate) },
     );
     if (!v.ok) return v.reason;
     // 前の注文票が約定していない、またはその日以後をもう評価した口座では確定できない（§3.3 の順序）
     if (final && this.notReady(st, tradingDate)) return "account_not_ready";
     return null;
+  }
+
+  /** 確定の検査に渡す上場した銘柄。値幅の基準の価格は、約定日より前の直近の価格 */
+  private listingsFor(tradingDate: unknown): Map<string, Listing> {
+    const date = isValidDate(tradingDate) ? tradingDate : "";
+    return new Map([...this.listings].map(([s, l]) => [s, { sharesOutstanding: l.sharesOutstanding, refPrice: (priceBefore(l, date) ?? l.prices[0]!).price }]));
   }
 
   private notReady(st: AgentState, tradingDate: string): boolean {
@@ -342,11 +354,28 @@ export class EventLog {
         // 架空の企業の上場（MARKET_DESIGN §1・§2）。社名・業種は空でない短い文字列、発行済株式数は上限までの正の整数、最初の価格は呼値に合う値
         if (Object.keys(p).some((k) => !LISTING_FIELDS.includes(k))) return "unknown field in a listing";
         if ((p.symbol as string).startsWith("TST")) return "symbols starting with TST are for tests";
+        // 取引対象に入れる前に上場させる（入れたあとに上場すると、確定済みの注文票と約定の仕方が食い違う）
+        if (this.universe.has(p.symbol as string)) return "list the company before adding it to the universe";
         if (!isShortText(p.name) || !isShortText(p.sector)) return "name and sector are required (up to 100 characters)";
         if (!Number.isSafeInteger(p.sharesOutstanding) || (p.sharesOutstanding as number) <= 0 || (p.sharesOutstanding as number) > MAX_SHARES) return `sharesOutstanding must be a positive integer up to ${MAX_SHARES}`;
         const price = p.price;
         if (!Number.isSafeInteger(price) || (price as number) < TICK || (price as number) > MAX_PRICE || (price as number) % TICK !== 0) return "price must be a positive multiple of the tick";
         return null;
+      }
+      case "auction.cleared": {
+        // 板寄せの結果（MARKET_DESIGN §3）。価格と約定量の中身は台帳が作り直して確かめる（Ledger.computeAuction）
+        const symbol = p.symbol as string;
+        const date = p.date as string;
+        const l = this.listings.get(symbol);
+        if (!l) return "symbol is not listed";
+        if (!this.universe.has(symbol)) return "symbol is not in the universe";
+        if (this.closed.has(date) || !isBusinessDay(date, H)) return "market was closed";
+        if (d.recordedAt < cutoffOf(date)) return "auction recorded before the cutoff";
+        if (l.lastAuction !== null && l.lastAuction >= date) return "a later auction of the symbol is already recorded";
+        if (p.refSeq !== priceBefore(l, date)?.seq) return "refSeq must be the latest price before the date";
+        if (!sameSeqs(p.sheetSeqs, this.sheetsByDate.get(date) ?? [])) return "sheetSeqs must be every committed sheet for the date";
+        const priced = Number.isSafeInteger(p.price) && (p.price as number) > 0 && Number.isSafeInteger(p.volume) && (p.volume as number) > 0;
+        return priced || (p.price === null && p.volume === 0) ? null : "invalid price or volume";
       }
       case "prices.open":
         if (this.closed.has(p.date as string) || !isBusinessDay(p.date as string, H)) return "market was closed";
@@ -358,6 +387,7 @@ export class EventLog {
       case "market.closed": {
         const date = p.date as string;
         if (this.opens.has(date)) return "open prices already recorded";
+        if ([...this.auctions.keys()].some((k) => k.endsWith(`:${date}`))) return "auction already recorded";
         if (this.closes.has(date)) return "close prices already recorded";
         // すでにその日以後を評価・引け後処理したAIがいれば、営業日の並びが変わって口座が進めなくなる
         for (const a of this.agents.values()) if ((a.valuedDate !== null && a.valuedDate >= date) || a.asOf >= date) return "an agent already passed this date";
@@ -413,7 +443,14 @@ export class EventLog {
       case "fills.executed": {
         const pend = st!.pending;
         if (!pend || pend.tradingDate !== p.tradingDate || pend.seq !== p.sheetSeq) return "no committed sheet for this trading date";
-        if (this.closed.has(pend.tradingDate)) return p.openSeq === undefined ? null : "market was closed";
+        if (this.closed.has(pend.tradingDate)) return p.openSeq === undefined && p.auctionSeqs === undefined ? null : "market was closed";
+        // 上場した銘柄の注文は、その銘柄の板寄せの結果で約定する。ほかの銘柄の注文は始値で約定する
+        const orders = (this.events[pend.seq - 1]!.payload as Record<string, unknown>).orders as Order[];
+        const listed = [...new Set(orders.filter((o) => this.listings.has(o.symbol)).map((o) => o.symbol))];
+        const auctionSeqs = listed.map((s) => this.auctions.get(`${s}:${pend.tradingDate}`));
+        if (auctionSeqs.some((s) => s === undefined)) return "the listed symbols of the sheet are not auctioned yet";
+        if (listed.length === 0 ? p.auctionSeqs !== undefined : !sameSeqs(p.auctionSeqs, (auctionSeqs as number[]).sort((a, b) => a - b))) return "auctionSeqs must be the auctions of the listed symbols in the sheet";
+        if (!orders.some((o) => !this.listings.has(o.symbol)) && p.openSeq === undefined) return null;
         const open = this.opens.get(pend.tradingDate);
         return open !== undefined && p.openSeq === open ? null : "openSeq must be prices.open of the trading date";
       }
@@ -473,8 +510,15 @@ export class EventLog {
         break;
       }
       case "company.listed":
-        this.listings.set(p.symbol as string, { sharesOutstanding: p.sharesOutstanding as number, refPrice: p.price as number });
+        this.listings.set(p.symbol as string, { sharesOutstanding: p.sharesOutstanding as number, prices: [{ date: "", price: p.price as number, seq: e.seq }], lastAuction: null });
         break;
+      case "auction.cleared": {
+        const l = this.listings.get(p.symbol as string)!;
+        this.auctions.set(`${String(p.symbol)}:${String(p.date)}`, e.seq);
+        l.lastAuction = p.date as string;
+        if (p.price !== null) l.prices.push({ date: p.date as string, price: p.price as number, seq: e.seq });
+        break;
+      }
       case "universe.set":
         this.universe = new Set(p.symbols as string[]);
         break;
@@ -505,6 +549,7 @@ export class EventLog {
         this.agents.set(agentId, { startDate: p.startDate as string, asOf: previousBusinessDay(p.startDate as string, this.holidays()), valuedDate: null, pending: null, catchUp: null });
         break;
       case "order_sheet.committed":
+        this.sheetsByDate.set(p.tradingDate as string, [...(this.sheetsByDate.get(p.tradingDate as string) ?? []), e.seq]);
         st!.pending = { tradingDate: p.tradingDate as string, seq: e.seq };
         st!.catchUp = null;
         this.commits.add(`${agentId}:${String(p.tradingDate)}`);
@@ -601,6 +646,9 @@ function keysOf(type: EventType, p: Record<string, unknown>): string[] | string 
     case "company.listed":
       if (typeof p.symbol !== "string" || !SYMBOL.test(p.symbol)) return "invalid symbol";
       return [`listed:${p.symbol}`];
+    case "auction.cleared":
+      if (typeof p.symbol !== "string" || !SYMBOL.test(p.symbol)) return "invalid symbol";
+      return k(["date"], () => [`auction:${String(p.symbol)}:${String(p.date)}`]);
     case "agent.registered":
       return k(["agentId"], () => [`agent:${String(id)}`]);
     case "order_sheet.committed":
@@ -632,5 +680,23 @@ function payloadSeqs(p: Record<string, unknown>): unknown[] {
 }
 
 const seqsShapeOk = (runSeq: unknown, inputSeqs: unknown): boolean => Number.isSafeInteger(runSeq) && Array.isArray(inputSeqs) && inputSeqs.every((x) => Number.isSafeInteger(x));
+
+/** 上場した銘柄の状態。prices は最初の価格（date は ""）と、価格のついた板寄せの結果 */
+interface ListingState {
+  sharesOutstanding: number;
+  prices: { date: string; price: number; seq: number }[];
+  /** 最後に板寄せをした日（価格がつかなかった日も含む） */
+  lastAuction: string | null;
+}
+
+/** その日より前の直近の価格（値幅の基準。なければ上場の価格） */
+function priceBefore(l: ListingState, date: string): { price: number; seq: number } | undefined {
+  return l.prices.filter((x) => x.date < date).at(-1);
+}
+
+/** seq の並びが、want と同じ（同じ順） */
+function sameSeqs(v: unknown, want: readonly number[]): boolean {
+  return Array.isArray(v) && v.length === want.length && v.every((s, i) => s === want[i]);
+}
 
 const isTime = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
