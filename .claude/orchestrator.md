@@ -11,7 +11,7 @@ owner がデスクトップアプリで新しいセッションを立て（Workt
 
 始めたら、次を読みます。
 1. `docs/STATUS.md`、`docs/WORKFLOW.md`、`AGENTS.md`、`CLAUDE.md`
-2. 大枠の issue の本文と、すべてのコメント（`lead:`・`orchestrator:`・各役の報告）。**前のセッションの続きなら、ここに書いた進み具合から再開する**（セッションの記憶に頼らない）
+2. 大枠の issue の本文と、すべてのコメント（`lead:`・`orchestrator:`・各役の報告）。コメントは30件を超えると1回では全部返らないので、必ず `gh api --paginate repos/TIshow/fantasy-finance-rpg/issues/<番号>/comments` で読む。**前のセッションの続きなら、ここに書いた進み具合から再開する**（セッションの記憶に頼らない）
 3. 大枠の issue に並んだ、各作業の issue の本文と `lead:` コメント
 4. 開いている PR と、`agent/` と `milestone/` で始まるブランチ（`gh api repos/TIshow/fantasy-finance-rpg/pulls`）
 
@@ -30,7 +30,8 @@ owner がデスクトップアプリで新しいセッションを立て（Workt
 3. **検証：** `src/ledger/`・`src/events/`・`src/store/` を変えた PR は、`verifier` を呼んで確かめさせる。verifier のテストの PR は、その PR のブランチに向けて出させる
 4. **確認：** 自動の検査（`check`・`size`）が通っていること、リポジトリのルートで `scripts/check-boundaries.sh <役> <宛先のブランチ>` が 0 であることを確かめる
 5. **マージ：** 大枠のブランチにマージする
-6. **記録：** 大枠の issue に `orchestrator:` のコメントを書く（何をマージしたか・残ったこと・次にすること）。本文のチェックの一覧も更新する
+6. **lead の答えを確かめる：** 作業の区切りごとに、大枠の issue に新しい `lead:` コメントがないかを確かめる（`--paginate` を付けて、最後のコメントまで読む）。あれば、それに従う
+7. **記録：** 大枠の issue に `orchestrator:` のコメントを書く（何をマージしたか・残ったこと・次にすること）。本文のチェックの一覧も更新する
 
 - 同時に動かす役は4つまで。同じファイルを触る作業は、同時に動かさない
 - 担当外の変更が必要になったら、その役に割り振る。守りの設定（`.claude/`・`.github/`・`scripts/`・`AGENTS.md`・`CLAUDE.md`・`package.json` など）が必要なら、作業を止めて大枠の issue に書く（lead が PR を出し、owner がマージする）
@@ -38,6 +39,7 @@ owner がデスクトップアプリで新しいセッションを立て（Workt
 ## 自分で決めてよいこと・止まること
 
 - **決めてよい：** issue に書いた既定値の範囲の選択、作業の順番、PR の分け方、レビューの指摘の扱い（高・中は直す）
+- **大枠のブランチから main への PR は、lead が「マージしてよい」と `lead:` コメントで書くまで、owner にマージを頼まない**
 - **止まって owner と lead に聞く：** 仕様や `docs/DECISIONS.md` の決定を変えること、費用・権利・安全に関わること、取り消せないこと、issue に書いていない新しい機能。大枠の issue に「判断待ち」として書き、ほかに進められる作業があればそれを進める。なければ止まる
 
 ## 大枠が終わったら
