@@ -1,6 +1,6 @@
 -- ログの外に置く値と本文の表（docs/EVENT_LOG.md §5.2。lead の指示 #25）。何度流しても同じ結果になる（冪等）。
 -- 価格・分割・配当の内容（kind = 'value'）と、投稿の本文・LLM の出力（kind = 'body'）を、ハッシュを鍵にして追記だけで残す。
--- ハッシュは SHA-256(salt ‖ 中身)。ハッシュの照合はアプリが開くときに行う（SQL では SHA-256 の正規化を再現しない）。
+-- ハッシュは SHA-256(salt ‖ 中身)。アプリが開くときに全行を照合する（本文は SQL の制約でも確かめる。値の正規化は SQL で再現しない）。
 -- 更新・削除・TRUNCATE は、events と同じく、表の持ち主でもトリガが断る。ffr_app には SELECT と INSERT だけを許す。
 
 CREATE TABLE IF NOT EXISTS stored_values (
@@ -8,7 +8,9 @@ CREATE TABLE IF NOT EXISTS stored_values (
   kind    text NOT NULL CHECK (kind IN ('value', 'body')),
   salt    text NOT NULL CHECK (salt ~ '^[0-9a-f]{32}$'),
   content jsonb NOT NULL,
-  CHECK (kind = 'value' OR jsonb_typeof(content) = 'string')
+  CHECK (kind = 'value' OR jsonb_typeof(content) = 'string'),
+  -- 本文のハッシュは SQL でも確かめられる（SHA-256(salt ‖ UTF-8)）。不正な行は入る前に断る。値は RFC 8785 の正規化をアプリが照合する
+  CHECK (kind = 'value' OR hash = encode(sha256(decode(salt, 'hex') || convert_to(content #>> '{}', 'UTF8')), 'hex'))
 );
 
 CREATE OR REPLACE FUNCTION stored_values_refuse_change() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $$

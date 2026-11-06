@@ -46,8 +46,11 @@ async function readRows(db: SqlRunner, afterSeq: number, limit: number): Promise
 }
 
 export interface PgStoreDeps {
-  /** ログの外の値（価格など）。作り直しに要るので、追記より前に入れておく */
-  values: ValueStore;
+  /**
+   * ログの外の値（価格など）。作り直しに要るので、追記より前に入れておく。
+   * refresh があれば（PgValueStore）、別の処理の書いたイベントを取り込む前に、同じトランザクションで呼んで、その処理が置いた値を読み足す
+   */
+  values: ValueStore & { refresh?(db?: SqlRunner): Promise<void> };
   holidayTables: ReadonlyMap<string, HolidayTable>;
   /** 時計の権威（recordedAt はここから決める。呼び出し側の値は無視する） */
   clock: Clock;
@@ -163,6 +166,7 @@ export class PgEventStore implements EventStore {
       for (let after = (await mem.last())?.seq ?? 0; ; ) {
         const page = await readRows(tx, after, this.readMax);
         if (page.length === 0) return mem;
+        await this.deps.values.refresh?.(tx);
         await mem[ADOPT](page);
         after = page.at(-1)!.seq;
       }
