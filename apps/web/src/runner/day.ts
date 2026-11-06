@@ -320,6 +320,9 @@ class Day {
       const runs = this.log.events.filter((e) => e.seq > (prevDone?.seq ?? 0) && e.type === "agent.run" && pl(e).agentId === id);
       if (runs.some((r) => pl(r).ok !== true)) continue; // 失敗を記録済み
       if (runs.length === 0 && noPosts && this.suspended(id, "orders")) continue;
+      // 注文票まで済んでいれば、何もしない（締めのあとの回し直しで、間に合わなかったと数えないように。投稿は注文の判断の記録より前に済んでいる）
+      const orderDone = runs.find((r) => pl(r).purpose === "order");
+      if (orderDone && this.log.events.some((e) => (e.type === "order_sheet.committed" || e.type === "order_sheet.rejected") && pl(e).runSeq === orderDone.seq)) continue;
       if (this.deps.clock.now() >= cutoffOf(date)) {
         late.push(id);
         continue;
