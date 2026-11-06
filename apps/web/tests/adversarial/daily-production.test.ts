@@ -74,7 +74,10 @@ const accountsOf = async (events: readonly LogEvent[]) => {
   return Object.fromEntries(ids.map((id) => [id, ledger.account(id)]));
 };
 
-/** 決算の発表（runDaily は発表しないので、引け後に別に呼ぶ。quarterDays を小さくして、5日で何度も発表を起こす） */
+/**
+ * 決算の発表を、引け後に別に呼ぶ。runDaily も発表する（#143。1四半期は板寄せの20日なので、5日では上場の日の分だけ）。
+ * ここでは quarterDays を小さくして、5日で何度も発表を起こす（四半期の呼び名が同じなら二重には書かない）
+ */
 async function disclose(clock: FakeClock, quarterDays: number) {
   const values = await PgValueStore.open(db);
   const store = await PgEventStore.open(db, { values, holidayTables, clock });
@@ -95,7 +98,7 @@ async function runAll(w: ReturnType<typeof world>, o: { quarterDays?: number; tw
 }
 
 describe("本番の準備のまま、架空の6社だけの世界で毎日の実行を回す", () => {
-  it("同じ日を2回回しても記録が増えず、記録だけから作り直した口座が、保管を開き直した口座と一致する", async () => {
+  it("同じ日を2回回しても記録が増えず、台帳を使わずに足し引きした口座が、記録だけから作り直した口座と、最後の評価の記録に一致する", async () => {
     await fresh();
     const w = world();
     const events = await runAll(w, { twice: true });
@@ -146,10 +149,9 @@ describe("本番の準備のまま、架空の6社だけの世界で毎日の実
     }
   }, 120_000);
 
-  // 欠陥（宛先 platform）：scripts/daily-lib.ts の runDaily も productionSetup も discloseDue を呼ばないので、
-  // 毎日の実行のコマンドだけでは、上場の日の発表（上場の前の四半期）も、20営業日ごとの発表も記録されない。
-  // 大枠 #139 の通しの確認（決算の発表が1回以上ある）は、コマンドだけでは満たせない
-  it.fails("毎日の実行のコマンドだけで、上場の日に、6社の上場の前の四半期を発表する", async () => {
+  // 直った（#143）：以前は、runDaily も productionSetup も discloseDue を呼ばず、毎日の実行のコマンドだけでは決算の発表が
+  // 記録されなかった（verifier が #139 で報告）
+  it("毎日の実行のコマンドだけで、上場の日に、6社の上場の前の四半期を発表する", async () => {
     await fresh();
     const w = world();
     await runDaily(DAYS[0]!, opts(w));
@@ -160,6 +162,8 @@ describe("本番の準備のまま、架空の6社だけの世界で毎日の実
     expect(got).toEqual(COMPANIES.map((c) => `${c.symbol}:${periodOf(listedAt, 0)}`).sort());
   }, 60_000);
 
+  // 15:30 より前には発表しない、という判定そのもの（時計を15:30の前後に置いて確かめる）は tests/runner/world/market.test.ts が確かめる。
+  // ここでは、毎日の実行の流れの中で記録された発表の時刻が、その条件に合っていることだけを確かめる
   it("判断の入力には、判断の時点で発表済みの決算が、銘柄ごとに直近4四半期だけ入る。発表は、板寄せの日がたまった日の15:30より後", async () => {
     await fresh();
     const w = world();
@@ -170,7 +174,7 @@ describe("本番の準備のまま、架空の6社だけの世界で毎日の実
     const listedAt = events.find((e) => e.type === "company.listed")!.recordedAt;
     for (const c of COMPANIES) {
       const mine = disclosures.filter((e) => p(e).symbol === c.symbol);
-      expect(mine.length, c.symbol).toBeGreaterThanOrEqual(5);
+      expect(mine.length, c.symbol).toBe(6);
       // index k（k ≥ 1）の発表は、その銘柄の k × quarterDays 日目の板寄せの日の15:30以後に記録される
       const auctions = events.filter((e) => e.type === "auction.cleared" && p(e).symbol === c.symbol).map((e) => p(e).date as string);
       for (const e of mine) {

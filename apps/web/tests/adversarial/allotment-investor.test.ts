@@ -292,11 +292,10 @@ describe("Postgres の保管（PGlite）でも同じ結論になる", () => {
     }, 60_000);
   });
 
-  // 欠陥（宛先 platform）：注文票の中身に U+0000 があると、メモリの保管は「注文票の拒否」（order_sheet.rejected、
-  // 中身は ordersUnreadable）を記録に残すのに、PgEventStore.commitSheet は書く前の hasNul で ok: false を返し、何も残さない。
-  // #110 PR-2d で正規化が U+0000 を断るようになったので、PgEventStore の hasNul の先回りは要らず、メモリの保管に任せれば同じになる。
-  // AI の出力から来る値なので、受け取った注文票の拒否を記録に残す規則（EVENT_LOG §3.2）に沿うのはメモリの保管の側
-  it.fails("注文票の銘柄に U+0000 があるとき、Postgres の保管もメモリの保管と同じく拒否の記録を残す", async () => {
+  // 直った（#148）：以前は、メモリの保管が「注文票の拒否」（order_sheet.rejected、中身は ordersUnreadable）を記録に残すのに、
+  // PgEventStore.commitSheet は書く前の hasNul で ok: false を返し、何も残さなかった。受け取った注文票の拒否を記録に残す規則
+  // （EVENT_LOG §3.2）に合わせ、PgEventStore の hasNul の先回りを外して、メモリの保管と同じ検査に任せた
+  it("注文票の銘柄に U+0000 があるとき、Postgres の保管もメモリの保管と同じく拒否の記録を残す", async () => {
     const sheetOf = async (s: Store, clock: FakeClock) => {
       await setup(s, clock);
       const run = await s.append(sys("agent.run", { agentId: "nz", purpose: "order", inputSeqs: [], ok: true }));
@@ -310,5 +309,8 @@ describe("Postgres の保管（PGlite）でも同じ結論になる", () => {
     const { store, clock } = await freshStore();
     const g = await sheetOf(store as unknown as Store, clock);
     expect(g.ok && g.event.type, g.ok ? "" : g.reason).toBe("order_sheet.rejected");
+    // 2つの保管の拒否の記録は、同じ理由と同じ中身（U+0000 を含む注文は残さず、読めなかった印だけ）
+    if (m.ok && g.ok) expect(g.event.payload).toEqual(m.event.payload);
+    await verifyDatabase(db, table);
   }, 60_000);
 });
