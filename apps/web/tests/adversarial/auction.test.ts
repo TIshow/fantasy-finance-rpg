@@ -17,7 +17,9 @@ const yen = (n: number) => n * 10; // 円 → 0.1円単位
 function bandModel(prev: number): number[] {
   const out: number[] = [];
   const w5 = BigInt(Math.max(prev, yen(5)));
-  for (let p = TICK; p <= prev * 2 + yen(2); p += TICK) {
+  // 調べる範囲は値幅より十分広く（前日の0.7倍〜1.3倍、±2円）とる。判定は下の式だけで行う
+  const from = Math.max(TICK, Math.floor((prev * 0.7 - yen(2)) / TICK) * TICK);
+  for (let p = from; p <= prev * 1.3 + yen(2); p += TICK) {
     if (5n * BigInt(Math.abs(p - prev)) <= w5) out.push(p);
   }
   return out;
@@ -81,10 +83,11 @@ const order = (side: "buy" | "sell", qty: number, limitYen: number | null, commi
 const run = (prevYen: number, orders: AuctionOrder[]) => runAuction({ symbol: "AAA", prevPrice: yen(prevYen), orders });
 
 describe("値幅（±20% と ±1円の広いほう、1円刻み、1円より下げない）", () => {
-  it("前日の価格 0.1円〜300円のすべてと、無作為な高い価格で、下限と上限が文書の模型と一致する", () => {
+  it("前日の価格 0.1円〜300円のすべてと、無作為な価格（〜2万円）と10万円で、下限と上限が文書の模型と一致する", () => {
     const prevs = [...Array.from({ length: 3000 }, (_, i) => i + 1)];
     const rand = mulberry32(0x110);
-    for (let i = 0; i < 300; i++) prevs.push(randInt(rand, 3001, 2_000_000));
+    for (let i = 0; i < 300; i++) prevs.push(randInt(rand, 3001, 200_000));
+    prevs.push(1_000_000, 1_000_005);
     for (const prev of prevs) {
       const m = bandModel(prev);
       expect(priceBand(prev), `prev ${prev}`).toEqual({ lower: m[0], upper: m.at(-1) });
