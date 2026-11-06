@@ -7,7 +7,7 @@ description: 作業のまとめ役。デスクトップアプリの Claude Code 
 
 ## 始め方
 
-owner がデスクトップアプリで新しいセッションを立て（Worktree はオン）、「`.claude/roles/orchestrator.md` と `CLAUDE.md` を読んで、オーケストレーターとして、issue #<大枠の issue の番号> を進めて。」と送ります。
+owner がデスクトップアプリで新しいセッションを立て（Worktree はオン）、「`.claude/orchestrator.md` と `CLAUDE.md` を読んで、オーケストレーターとして、issue #<大枠の issue の番号> を進めて。」と送ります。
 
 始めたら、次を読みます。
 1. `docs/STATUS.md`、`docs/WORKFLOW.md`、`AGENTS.md`、`CLAUDE.md`

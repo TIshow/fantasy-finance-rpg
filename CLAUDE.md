@@ -11,18 +11,18 @@
 ## 進め方（オーケストレーター。D-044）
 
 - **owner と lead：** 大枠（いくつかの issue をまとめた、ひと区切りの目標）を決めて、大枠の issue に書く。大枠が終わったら、報告・コード・仕様を確かめ、owner が main にマージして次の大枠を指示する。**lead はブラウザのチャット**（CTO。Claude Code ではない）
-- **オーケストレーター：** owner がデスクトップアプリで新しいセッションを立て（Worktree オン）、「`.claude/roles/orchestrator.md` と `CLAUDE.md` を読んで、オーケストレーターとして、issue #<大枠の番号> を進めて。」と送る。大枠の中で、各役をサブエージェントとして呼び、code-reviewer のレビュー、verifier の検証、大枠のブランチ（`milestone/...`）へのマージ、次の割り振りまでを行う。進み具合は大枠の issue に書くので、日をまたいでも新しいセッションで続けられる
+- **オーケストレーター：** owner がデスクトップアプリで新しいセッションを立て（Worktree オン）、「`.claude/orchestrator.md` と `CLAUDE.md` を読んで、オーケストレーターとして、issue #<大枠の番号> を進めて。」と送る。大枠の中で、各役をサブエージェントとして呼び、code-reviewer のレビュー、verifier の検証、大枠のブランチ（`milestone/...`）へのマージ、次の割り振りまでを行う。進み具合は大枠の issue に書くので、日をまたいでも新しいセッションで続けられる
 - **役（サブエージェント）：** `.claude/agents/<役>.md` の定義で、オーケストレーターが呼ぶ。役の指示は `.claude/roles/<役>.md`、担当パスの正本は `.claude/roles/paths.json`。サブエージェントには役が付くので、書き込み前のフックが担当外への書き込みを止める
 
 | 役 | 書いてよいパス | モデル |
 | --- | --- | --- |
 | lead（CTO・ブラウザチャット） | `docs/`、`README.md` | ブラウザのチャットで選ぶ |
-| orchestrator | ファイルは書かない（issue のコメントと、大枠のブランチへのマージだけ） | Opus |
 | core | `apps/web/src/{ledger,events,holidays}/`とそのテスト、契約`apps/web/src/contracts/`とそのテスト、固定データ`apps/web/tests/fixtures/` | Opus |
 | platform | `apps/web/src/{store,ingest,runner,llm}/`とそのテスト、`apps/web/db/`、`apps/web/scripts/` | Opus |
 | web | `apps/web/src/{app,components,view}/`とそのテスト | Sonnet |
 | verifier | `apps/web/tests/adversarial/` | Opus |
 
+- オーケストレーター（モデルは Opus）は、ファイルを書かない。書くのは issue のコメントと、大枠のブランチへのマージだけ。担当のパスを持たないので、上の表と `.claude/roles/` には入れず、手順は `.claude/orchestrator.md` に置く
 - 担当外のパスは読むだけ。直したい点と判断待ちは、直さずにissueのコメントに書く（宛先の役・内容・根拠）。取り消せないもの・費用・権利・安全に関わる判断は止まってownerに聞く（`docs/WORKFLOW.md` §5）。`docs/STATUS.md`はleadだけが更新する（leadが自分のブランチからPRで出し、ownerがマージする）
 - どの役も、`.claude/`・`.github/`・`scripts/`・`AGENTS.md`・`CLAUDE.md`・`.tool-versions`・`apps/web/{package.json,package-lock.json,next.config.ts,tsconfig.json,vitest.config.ts,postcss.config.mjs}`・`apps/web/public/`・`apps/web/scripts/check-purity.ts`・`apps/web/tests/scripts/`を変えない（ownerだけ）
 - 役は、新しいWorktreeでは先に`cd apps/web && npm ci`。完了前に、リポジトリのルートで`git fetch origin && scripts/check-boundaries.sh <役名> <宛先のブランチ>`を実行し、0で終わらせる
