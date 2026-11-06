@@ -59,7 +59,7 @@ export function BoardView({ board }: { board: Pick<Board, "posts" | "counts"> })
           </button>
         ))}
       </div>
-      {shown.length === 0 ? <p className="text-sm text-sub">この種類の投稿はありません</p> : <ul className="m-0 flex list-none flex-col gap-3 p-0">{shown.map((p) => <PostCard key={p.seq} p={p} flat={filter !== "all"} />)}</ul>}
+      {shown.length === 0 ? <p className="text-sm text-sub">{board.posts.length === 0 ? "まだ投稿がありません" : "この種類の投稿はありません"}</p> : <ul className="m-0 flex list-none flex-col gap-3 p-0">{shown.map((p) => <PostCard key={p.seq} p={p} flat={filter !== "all"} />)}</ul>}
     </section>
   );
 }

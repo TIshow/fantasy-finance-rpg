@@ -1,6 +1,6 @@
 // イベントの列と外の値（投稿の本文）から、画面に出す形を作る純関数。
 // 台帳の記録（約定・評価）をそのまま写す。残高・損益・順位を台帳の外の規則で計算し直さない（順位は記録された評価額の並べ替えだけ）。
-import { readBody } from "./body";
+import { intentOf, readText, stanceOf } from "./body";
 import type { LogEvent } from "../events/types";
 import { INITIAL_CASH, type Deciyen, type Fill, type ParticipantKind } from "../ledger/types";
 import { buildMarket } from "./market";
@@ -49,8 +49,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
       case "post.published":
         {
           const w = withdrawn.get(e.seq) ?? null;
-          const b = readBody(body(p.bodyHash));
-          timeline.push({ ...base(p.agentId), kind: "post", symbol: p.board, text: w ? null : (b?.text ?? null), intent: w ? null : (b?.intent ?? null), stance: w ? null : (b?.stance ?? null), withdrawn: w, citeSeqs: p.citeSeqs ?? [], replyTo: p.replyTo ?? null, runSeq: p.runSeq });
+          timeline.push({ ...base(p.agentId), kind: "post", symbol: p.board, text: w ? null : readText(body(p.bodyHash)), intent: w ? null : intentOf(p.intent), stance: w ? null : stanceOf(p.stance), withdrawn: w, citeSeqs: p.citeSeqs ?? [], replyTo: p.replyTo ?? null, runSeq: p.runSeq });
         }
         break;
       case "order_sheet.committed":

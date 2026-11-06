@@ -1,5 +1,5 @@
 // 銘柄の掲示板（/symbols/[symbol]）に出す形。buildView の出力を並べ替えて整形するだけ（取引の履歴は出さない。AIページにある）。
-// 種類（intent）と見立て（stance）は投稿の本文（ログの外の値）から。ない投稿は「未分類」・見立てなし。
+// 種類（intent）と見立て（stance）は post.published の記録の項目から（#107）。ない投稿は「未分類」・見立てなし。
 import { characterOf } from "./characters";
 import { fillKey } from "./agent-page";
 import type { Intent, Stance } from "./body";
@@ -66,7 +66,8 @@ export type PostFilter = Intent | "none" | "all";
 export const filterPosts = (posts: readonly BoardPost[], filter: PostFilter) => posts.filter((p) => filter === "all" || (p.intent ?? "none") === filter);
 
 export function buildBoard(view: View, symbol: string): Board | null {
-  if (!view.threads.some((t) => t.symbol === symbol)) return null;
+  // 投稿・約定のある銘柄、または上場した銘柄（まだ投稿がなくても、銘柄のページは作る）
+  if (!view.threads.some((t) => t.symbol === symbol) && !view.market.companies.some((c) => c.listing.symbol === symbol)) return null;
   const evidence = new Map(view.evidence.map((e) => [e.seq, e]));
   const posts = view.timeline.filter((t): t is TimelineItem & { kind: "post" } => t.kind === "post" && t.symbol === symbol);
   const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.symbol === symbol && t.qty > 0);

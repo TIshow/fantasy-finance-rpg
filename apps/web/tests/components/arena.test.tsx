@@ -177,13 +177,13 @@ describe("掲示板の画面", async () => {
   const mk = (type: string, seq: number, payload: object, at = 0) => ({ seq, schema: 1, type, recordedAt: at, actor: "system", keys: [], refs: [], payload, prevHash: "", hash: "" }) as never;
   const events = [
     mk("agent.registered", 1, { agentId: "ai-ma5", displayName: "あ", startDate: "2026-11-09", initialCash: 1000 }),
-    mk("post.published", 2, { agentId: "ai-ma5", board: "X1", bodyHash: "a", citeSeqs: [], runSeq: 1 }),
-    mk("post.published", 3, { agentId: "ai-ma5", board: "X1", bodyHash: "b", citeSeqs: [], runSeq: 1, replyTo: 2 }),
+    mk("post.published", 2, { agentId: "ai-ma5", board: "X1", bodyHash: "a", citeSeqs: [], runSeq: 1, intent: "strategy", stance: "bull" }),
+    mk("post.published", 3, { agentId: "ai-ma5", board: "X1", bodyHash: "b", citeSeqs: [], runSeq: 1, replyTo: 2, intent: "news", stance: "bear" }),
     mk("content.withdrawn", 4, { targetSeq: 3, reason: "誤り", textRemoved: false }),
     mk("order_sheet.committed", 5, { agentId: "ai-ma5", tradingDate: "2026-11-10", runSeq: 1, orders: [{ symbol: "X1", side: "buy", qty: 100 }] }),
     mk("fills.executed", 6, { agentId: "ai-ma5", sheetSeq: 5, tradingDate: "2026-11-10", fills: [{ symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }] }),
   ];
-  const view = buildView(events, (h) => (h === "a" ? { text: "戦略の本文", intent: "strategy", stance: "bull" } : "取り消された本文"));
+  const view = buildView(events, (h) => (h === "a" ? "戦略の本文" : "取り消された本文"));
   const board = buildBoard(view, "X1")!;
   const html = renderToStaticMarkup(<BoardView board={board} />);
 
@@ -199,6 +199,8 @@ describe("掲示板の画面", async () => {
     expect(html).toContain("戦略の本文");
     expect(html).toContain("非表示（誤り）");
     expect(html).not.toContain("取り消された本文");
+    expect(html).not.toContain("▼ 弱気"); // 非表示の投稿の見立ては出さない
+    expect(html).toContain("未分類 1");
     expect(html).toContain('href="#post-2"');
   });
 
@@ -216,5 +218,70 @@ describe("上部の帯", () => {
     const h = renderToStaticMarkup(<Shell>{null}</Shell>);
     expect(h).toContain(DISCLAIMER);
     expect(h).toContain('role="note"');
+  });
+});
+
+describe("銘柄のページ（市場の記録）", async () => {
+  const { PriceChartView } = await import("../../src/components/PriceChartView");
+  const { SymbolPageView, MAX_DAYS } = await import("../../src/components/SymbolPageView");
+  const { priceChart } = await import("../../src/view/market-chart");
+  const { buildMarket } = await import("../../src/view/market");
+  const { buildView } = await import("../../src/view/build");
+  const { formatYenMark } = await import("../../src/view/format");
+  const { default: SymbolPage, generateStaticParams } = await import("../../src/app/symbols/[symbol]/page");
+  const mk = (type: string, seq: number, payload: object, at = 0) => ({ seq, schema: 1, type, recordedAt: at, actor: "system", keys: [], refs: [], payload, prevHash: "", hash: "" }) as never;
+  const listed = (seq: number, symbol: string, name: string) => mk("company.listed", seq, { symbol, name, sector: "電機", sharesOutstanding: 500_000, price: 10_000 }, Date.parse("2026-11-09T18:00:00+09:00"));
+  const cleared = (seq: number, date: string, price: number | null, volume: number) => mk("auction.cleared", seq, { symbol: "NEO1", date, price, volume, refSeq: 1, sheetSeqs: [] });
+  const disclosed = (seq: number, period: string, revenue: number) => mk("company.disclosed", seq, { symbol: "NEO1", period, revenue, netIncome: 1, eps: 1, dividendPerShare: 0 }, Date.parse("2026-11-12T15:30:00+09:00"));
+  const render = (events: unknown[], symbol: string) => {
+    const node = SymbolPageView({ view: buildView(events as never, () => undefined), symbol });
+    return node === null ? null : renderToStaticMarkup(node);
+  };
+
+  const market = buildMarket([listed(1, "NEO1", "ネオ電機"), cleared(2, "2026-11-10", 10_100, 200), cleared(3, "2026-11-11", null, 0)]);
+  const c = market.companies[0]!;
+  const html = renderToStaticMarkup(<PriceChartView chart={priceChart(c.days, c.listing.listedPrice, formatYenMark)!} days={c.days} />);
+
+  it("値段の推移のグラフには、文での説明と表がつき、値つかずの日は印と言葉で分かる", () => {
+    expect(html).toContain("2日のうち1日は値つかず");
+    expect(html).toContain("▽ 値つかず");
+    expect(html).toContain("評価は前の価格 ¥1,010");
+    expect(html).toContain("ついた価格の高値 ¥1,010");
+    expect(html).toContain("200株");
+    const table = html.slice(html.indexOf("<table"));
+    expect(table.indexOf("11/11")).toBeLessThan(table.indexOf("11/10")); // 表は最新が上
+    expect(html).not.toMatch(/<(form|input|textarea|select|button)\b/i);
+    expect(renderToStaticMarkup(<PriceChartView chart={priceChart([c.days[1]!], 10_000, formatYenMark)!} days={[c.days[1]!]} />)).toContain("ついた価格はありません（すべて値つかず）");
+  });
+
+  it("上場した銘柄は、投稿・約定がなくてもページがあり、社名・グラフ・決算（最新が上）が出る", () => {
+    const page = render([listed(1, "NEO1", "ネオ電機"), cleared(2, "2026-11-10", 10_100, 200), disclosed(3, "2026-Q3", 1_000_000), disclosed(4, "2026-Q4", 2_000_000)], "NEO1")!;
+    for (const s of ["ネオ電機", "PRICE ·", "EARNINGS ·", "まだ投稿がありません", "最初の価格 ¥1,000"]) expect(page).toContain(s);
+    expect(page.indexOf("2026年 第4四半期")).toBeLessThan(page.indexOf("2026年 第3四半期"));
+    expect(page).not.toMatch(/<(form|input|textarea|select)\b/i);
+  });
+
+  it("決算・板寄せがまだない銘柄は、その旨を出す。上場も投稿もない銘柄は null（404）", () => {
+    const page = render([listed(1, "NEO1", "ネオ電機")], "NEO1")!;
+    expect(page).toContain("まだ板寄せがありません");
+    expect(page).toContain("まだ決算の発表がありません");
+    expect(render([listed(1, "NEO1", "ネオ電機")], "NOPE")).toBeNull();
+  });
+
+  it("板寄せの日数が多いときは、直近だけを表示し、その旨を出す", () => {
+    const base = Date.parse("2026-01-01T00:00:00Z");
+    const events = [listed(1, "NEO1", "ネオ電機"), ...Array.from({ length: MAX_DAYS + 5 }, (_, i) => cleared(i + 2, new Date(base + i * 86_400_000).toISOString().slice(0, 10), 10_000 + i, 1))];
+    const page = render(events, "NEO1")!;
+    expect(page).toContain(`直近の${MAX_DAYS}日だけを表示しています（板寄せは全部で${MAX_DAYS + 5}日）`);
+    expect(page.match(/<tr /g)!.length).toBeLessThanOrEqual(MAX_DAYS + 5); // 表の行は上限まで（見出しの行を含む）
+  });
+
+  it("市場の記録がない銘柄（今の固定データ）は『まだありません』と出し、静的なページの一覧は並び順が決まっている", async () => {
+    const page = renderToStaticMarkup(await SymbolPage({ params: Promise.resolve({ symbol: "TSTA" }) }));
+    expect(page).toContain("市場の記録（上場・板寄せ・決算）は、まだありません");
+    expect(page).not.toContain("PRICE ·");
+    const ids = (await generateStaticParams()).map((p) => p.symbol);
+    expect(ids).toEqual([...ids].sort());
+    expect(ids).toContain("TSTB");
   });
 });
