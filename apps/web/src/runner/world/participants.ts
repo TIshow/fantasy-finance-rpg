@@ -82,7 +82,7 @@ export async function makerAgent(company: Company): Promise<RunnerAgent> {
   const id = makerId(company.symbol);
   const text =
     "Quote buy and sell limits around the fair price from disclosed results; lean against the inventory. " +
-    "When the center is outside the daily price band, quote only the side toward the fair price at the band edge (sell at the upper limit, buy at the lower limit). " +
+    "When the fair price is outside the daily price band, quote only the side toward the fair price at the band edge (sell at the upper limit, buy at the lower limit); otherwise keep the center inside the band. " +
     "Never quote a buy that can trade against its own sell.";
   return {
     id,
@@ -110,8 +110,7 @@ export async function noiseAgent(seed: number, companies: readonly Company[] = C
     decide(input: DecisionInput) {
       const markets = input.listed.map((x) => {
         const band = priceBand(refPrice(x));
-        // 値幅の端の日：マーケットメイカーと同じ決め方の目安の価格（発表済みの決算から）が、値幅の外にある銘柄。
-        // マーケットメイカーの持ち株によるずれ（中心）は、ばらばらの参加者には見えないので入れない
+        // 値幅の端の日：目安の価格（発表済みの決算から）が、値幅の外にある銘柄。マーケットメイカーも同じ決め方をする
         const company = companies.find((c) => c.symbol === x.symbol);
         const fair = company ? fairOf(company, x) : null;
         const edge = fair === null ? undefined : fair > band.upper ? ("upper" as const) : fair < band.lower ? ("lower" as const) : undefined;

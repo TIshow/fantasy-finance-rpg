@@ -57,7 +57,7 @@ describe("マーケットメイカーの注文", () => {
     expect(buys(maker({ ...base, held: 0, target: 100_000 }))[0]!.limit).toBe(10190); // 中心 10300 の 1% 下を切り下げ
   });
 
-  it("値はすべて1円の刻みで、値幅の内側。買いの最高値は売りの最安値より必ず低い。中心が値幅の外なら、端の値段で片側だけ（自己約定しない）", () => {
+  it("値はすべて1円の刻みで、値幅の内側。買いの最高値は売りの最安値より必ず低い。目安が値幅の外なら、端の値段で片側だけ（自己約定しない）", () => {
     for (const fair of [5000, 7990, 8000, 9000, 10000, 11900, 12000, 15000]) {
       for (const held of [0, 300, 1000, 5000]) {
         const os = maker({ ...base, fair, held });
@@ -68,15 +68,13 @@ describe("マーケットメイカーの注文", () => {
           expect(o.qty % 100).toBe(0);
           expect(o.qty).toBeGreaterThan(0);
         }
-        // どの場合も、自分の買いが自分の売りに届かない。中心（持ち株でずらしたあと。makerOrders と同じ計算）が値幅の外なら、
-        // 目安に向かう側だけを端の値段に出す（上の外なら上限で売りだけ、下の外なら下限で買いだけ）
-        const skew = Math.max(-LOGIC_MAKER.maxSkewBp, Math.min(LOGIC_MAKER.maxSkewBp, Math.trunc((held - base.target) / 100) * LOGIC_MAKER.skewPerLotBp));
-        const center = Math.round((fair * (10_000 - skew)) / 10_000);
+        // どの場合も、自分の買いが自分の売りに届かない。目安の価格が値幅の外（端の日）なら、目安に向かう側だけを端の値段に出す
+        // （上の外なら上限で売りだけ、下の外なら下限で買いだけ）。端の日でなければ、売りと買いの両方を出す（売る株がなければ買いだけ）
         const hi = Math.max(...buys(os).map((o) => o.limit!));
         const lo = Math.min(...sells(os).map((o) => o.limit!));
         if (buys(os).length > 0 && sells(os).length > 0) expect(hi, `fair ${fair} held ${held}`).toBeLessThan(lo);
-        if (center > band.upper) expect(os, `fair ${fair} held ${held}`).toEqual(held > 0 ? [{ symbol: "VRN1", side: "sell", qty: 300, limit: band.upper }] : []);
-        else if (center < band.lower) expect(os, `fair ${fair} held ${held}`).toEqual([{ symbol: "VRN1", side: "buy", qty: 300, limit: band.lower }]);
+        if (fair > band.upper) expect(os, `fair ${fair} held ${held}`).toEqual(held > 0 ? [{ symbol: "VRN1", side: "sell", qty: 300, limit: band.upper }] : []);
+        else if (fair < band.lower) expect(os, `fair ${fair} held ${held}`).toEqual([{ symbol: "VRN1", side: "buy", qty: 300, limit: band.lower }]);
         else expect([buys(os).length > 0, sells(os).length > 0 || held === 0], `fair ${fair} held ${held}`).toEqual([true, true]);
       }
     }
@@ -92,6 +90,22 @@ describe("マーケットメイカーの注文", () => {
     expect(os.map((o) => o.limit)).toEqual([25250, 25500, 25750, 24750, 24500, 24250]);
     expect(() => maker({ ...base, fair: Number.NaN })).toThrow();
     expect(() => maker({ ...base, band: { lower: 12000, upper: 8000 } })).toThrow("band");
+  });
+
+  it("目安の価格が値幅の内側なら、持ち株でずらした中心が値幅の外に出ても、中心を値幅の内側に収めて売りと買いの両方を出す（端の日ではない）", () => {
+    // 目安 11900（上限 12000 の内側）。持ち株が目標より 1,500株少ない → 中心は 3% 上の 12257（上限の外）
+    const up = maker({ ...base, fair: 11900, held: 0, target: 1500, cash: 1e12 }, { ...LOGIC_MAKER, qtyPerLevel: 100 });
+    expect(sells(up)).toEqual([]); // 売る株がない
+    expect(buys(up).length).toBeGreaterThan(0);
+    const up2 = maker({ ...base, fair: 11900, held: 300, target: 1800 });
+    expect(sells(up2).map((o) => o.limit)).toEqual([12000]);
+    expect(buys(up2).length).toBeGreaterThan(0);
+    expect(Math.max(...buys(up2).map((o) => o.limit!))).toBeLessThan(12000);
+    // 目安 8100（下限 8000 の内側）。持ち株が目標より多い → 中心は 3% 下の 7857（下限の外）
+    const down = maker({ ...base, fair: 8100, held: 5000, target: 1000 });
+    expect(buys(down).map((o) => o.limit)).toEqual([8000]);
+    expect(sells(down).length).toBeGreaterThan(0);
+    expect(Math.min(...sells(down).map((o) => o.limit!))).toBeGreaterThan(8000);
   });
 
   it("目安の価格が値幅より上なら上限の値段で売りだけ、下なら下限の値段で買いだけ（目安に向かう側だけ。自己約定しない。押しつけられた段はまとめる）", () => {
@@ -110,6 +124,31 @@ describe("マーケットメイカーの注文", () => {
     const poor = maker({ ...base, cash: 9900 * 100 + 9800 * 100 + 5 });
     expect(buys(poor).map((o) => [o.limit, o.qty])).toEqual([[9900, 100], [9800, 100]]);
     expect(buys(maker({ ...base, cash: 0 }))).toEqual([]);
+  });
+});
+
+describe("ふだんの日の注文は、#139 の端の日の変更の前と同じ（変更の前のコード milestone/139-market-daily 7e297e4 の出力で確かめた値）", () => {
+  const b = { lower: 8000, upper: 12000 };
+  it("マーケットメイカー（既定の数字）", () => {
+    const m = (fair: number, held: number) => makerOrders({ symbol: "VRN1", fair, band: b, held, target: 5000, cash: 500_000_000 });
+    const o = (side: "buy" | "sell", limit: number) => ({ symbol: "VRN1", side, qty: 300, limit });
+    expect(m(10005, 5200)).toEqual([o("sell", 10020), o("sell", 10070), o("sell", 10120), o("buy", 9910), o("buy", 9860), o("buy", 9810)]);
+    expect(m(9000, 4800)).toEqual([o("sell", 9090), o("sell", 9130), o("sell", 9180), o("buy", 8990), o("buy", 8940), o("buy", 8900)]);
+    expect(m(11800, 5000)).toEqual([o("sell", 11860), o("sell", 11920), o("sell", 11980), o("buy", 11740), o("buy", 11680), o("buy", 11620)]);
+  });
+  it("ばらばらの参加者（既定の数字、端の日なし）", () => {
+    const markets = ["VRN1", "ORS1", "MRH1"].map((symbol) => ({ symbol, prevPrice: 10000, band: b }));
+    const baseline = { shares: { VRN1: 1000, ORS1: 1000, MRH1: 1000 }, cash: 300_000_000 };
+    expect(noiseOrders({ seed: 20261106, tradingDate: "2026-11-09", markets, holdings: { VRN1: 1000, ORS1: 800, MRH1: 1300 }, cash: 290_000_000, baseline })).toEqual([
+      { symbol: "MRH1", side: "sell", qty: 200, limit: null },
+      { symbol: "ORS1", side: "buy", qty: 100, limit: null },
+      { symbol: "VRN1", side: "sell", qty: 200, limit: null },
+    ]);
+    expect(noiseOrders({ seed: 7, tradingDate: "2026-12-01", markets, holdings: { VRN1: 500, ORS1: 1000, MRH1: 1000 }, cash: 310_000_000, baseline })).toEqual([
+      { symbol: "MRH1", side: "buy", qty: 100, limit: null },
+      { symbol: "ORS1", side: "buy", qty: 300, limit: null },
+      { symbol: "VRN1", side: "sell", qty: 300, limit: null },
+    ]);
   });
 });
 
@@ -214,11 +253,12 @@ describe("ばらばらに売買する参加者の注文", () => {
       }
     });
 
-    it("ふだんの日（edge なし）の注文は変わらない。端の日の銘柄があっても、ほかの銘柄の注文は変わらない", () => {
+    it("端の日の銘柄より銘柄コードの順で前の銘柄の注文は、変わらない（現金は銘柄コードの順に使うので、後の銘柄は変わりうる）", () => {
       for (let seed = 0; seed < 20; seed++) {
         const normal = noise({ ...input, seed, baseline });
-        const oneEdge = noise({ ...input, seed, baseline, markets: markets.map((m, i) => (i === 0 ? { ...m, edge: "upper" as const } : m)) });
-        expect(oneEdge.filter((o) => o.symbol !== markets[0]!.symbol)).toEqual(normal.filter((o) => o.symbol !== markets[0]!.symbol));
+        // VRN1 は銘柄コードの順で最後
+        const oneEdge = noise({ ...input, seed, baseline, markets: markets.map((m) => (m.symbol === "VRN1" ? { ...m, edge: "upper" as const } : m)) });
+        expect(oneEdge.filter((o) => o.symbol !== "VRN1")).toEqual(normal.filter((o) => o.symbol !== "VRN1"));
       }
     });
   });

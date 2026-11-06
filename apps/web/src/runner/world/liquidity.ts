@@ -68,8 +68,8 @@ export interface MakerInput {
  * マーケットメイカーの注文。中心は目安の価格で、持ち株が目標より多ければ下げ（売りやすく）、少なければ上げる。
  * 中心から spreadBp ずつ離して、買いと売りの指値を levels 段ずつ出す。買いは刻みに切り下げ、売りは切り上げ、値幅の内側に収める。
  * 値幅に押しつけられて同じ値段に重なった段はまとめる。中心が値幅の内側で、買いと売りが同じ値段に重なったら、買いを外す
- * （自分どうしで約定しないように）。中心が値幅の外なら、目安に向かう側だけを、値幅の端の値段に出す（上の外なら上限で売りだけ、
- * 下の外なら下限で買いだけ）。どの場合も、自分の買いが自分の売りに届く値段では出さない（自己約定はしない。#139 の lead の決定）。
+ * （自分どうしで約定しないように）。目安の価格が値幅の外の日（端の日）は、目安に向かう側だけを、値幅の端の値段に出す（上の外なら
+ * 上限で売りだけ、下の外なら下限で買いだけ）。端の日でなければ、持ち株でずらした中心を値幅の内側に収める。どの場合も、自分の買いが自分の売りに届く値段では出さない（自己約定はしない。#139 の lead の決定）。
  * 売りは持っている株数まで（重なりを確かめる前に減らす）。買いは「指値 × 株数」の合計が現金を超えない分まで、目安に近い段から（足りない段は飛ばし、安い段を出す）
  */
 export function makerOrders(input: MakerInput, params: MakerParams = MAKER_PARAMS): LiquidityOrder[] {
@@ -78,7 +78,10 @@ export function makerOrders(input: MakerInput, params: MakerParams = MAKER_PARAM
   checkLots("qtyPerLevel", params.qtyPerLevel);
   const lots = Math.trunc((input.held - input.target) / LOT);
   const skewBp = Math.max(-params.maxSkewBp, Math.min(params.maxSkewBp, lots * params.skewPerLotBp));
-  const center = Math.round((input.fair * (BP - skewBp)) / BP);
+  // 値幅の端の日かどうかは、目安の価格で決める（ばらばらの参加者と同じ決め方。記録された決算だけから説明できるように）。
+  // 端の日でなければ、持ち株でずらした中心を値幅の内側に収める（中心だけが外に出ても、売りと買いの両方を出す）
+  const edge = input.fair > input.band.upper ? input.band.upper : input.fair < input.band.lower ? input.band.lower : null;
+  const center = clamp(Math.round((input.fair * (BP - skewBp)) / BP), input.band);
   // center × (BP ± 段の幅) は整数。刻み（TICK × BP）で割って切り上げ・切り下げる
   const at = (i: number, sign: 1 | -1) => center * (BP + sign * params.spreadBp * i);
   const merge = (side: Side, prices: Deciyen[]) => {
@@ -91,9 +94,8 @@ export function makerOrders(input: MakerInput, params: MakerParams = MAKER_PARAM
     return out.map((x) => ({ symbol: input.symbol, side, qty: x.qty, limit: x.price }));
   };
   const range = Array.from({ length: params.levels }, (_, i) => i + 1);
-  // 中心が値幅の外なら（#139 の lead の決定）、すべての段を値幅の端の値段に置き、目安に向かう側だけを出す。上の外なら上限で
+  // 端の日（#139 の lead の決定）は、すべての段を値幅の端の値段に置き、目安に向かう側だけを出す。上の外なら上限で
   // 売りだけ、下の外なら下限で買いだけ。ほかの参加者の注文と当たれば、値段は値幅いっぱいずつ目安に近づく（ストップ高・安が続く動き）
-  const edge = center > input.band.upper ? input.band.upper : center < input.band.lower ? input.band.lower : null;
   let asks = merge("sell", range.map((i) => edge ?? clamp(Math.ceil(at(i, 1) / (TICK * BP)) * TICK, input.band)));
   let bids = merge("buy", range.map((i) => edge ?? clamp(Math.floor(at(i, -1) / (TICK * BP)) * TICK, input.band)));
   // 売りは先に持ち株で減らす（売れない売りのために買いを外さないように）
