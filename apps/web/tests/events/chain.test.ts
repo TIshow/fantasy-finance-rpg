@@ -60,6 +60,19 @@ describe("RFC 8785 の正規化", () => {
     expect(() => canonicalize("\ud800")).toThrow("lone surrogate");
     expect(() => canonicalize({ "\udc00": 1 })).toThrow("lone surrogate");
   });
+
+  it("文字 U+0000 は、値・キー・本文のどこにあっても例外（Postgres の text に保存できない。#110 PR-2d）", async () => {
+    const nul = String.fromCharCode(0);
+    expect(() => canonicalize(nul)).toThrow("NUL character at $");
+    expect(() => canonicalize({ memo: `a${nul}b` })).toThrow("NUL character at $.memo");
+    expect(() => canonicalize([["x", `${nul}`]])).toThrow("NUL character at $[0][1]");
+    expect(() => canonicalize({ [`k${nul}`]: 1 })).toThrow("NUL character at $ key");
+    await expect(bodyHash(new Uint8Array(16), `上がる${nul}`)).rejects.toThrow("NUL character at body");
+    await expect(bodyHash(new Uint8Array(16), { value: { text: nul } })).rejects.toThrow("NUL character at $.text");
+    // U+0000 でない制御文字（U+0001）や、「\u0000」という6文字の文字列は通す
+    expect(canonicalize(String.fromCharCode(1))).toBe('"\\u0001"');
+    expect(canonicalize("\\u0000")).toBe('"\\\\u0000"');
+  });
 });
 
 describe("ハッシュ", () => {
