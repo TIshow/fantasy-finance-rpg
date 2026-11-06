@@ -31,6 +31,8 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
     if (e.type === "prices.close" || e.type === "auction.cleared") closeDate.set(e.seq, (e.payload as P).date);
     else if (e.type === "company.listed") closeDate.set(e.seq, formatJst(e.recordedAt).slice(0, 10));
   }
+  // 参加者の種類は、記録を読む順序に依らないよう、先に全部の登録から決める
+  for (const e of events) if (e.type === "agent.registered") kinds.set((e.payload as P).agentId, (e.payload as P).kind ?? "investor");
   const nameOf = (id: string) => names.get(id) ?? id;
   // 順位・カード・AIのページに出るのは、種類が AI投資家（種類のない登録も）の参加者だけ。ほかの参加者は売買の記録（タイムライン）にだけ出る
   const isInvestor = (id: string) => (kinds.get(id) ?? "investor") === "investor";

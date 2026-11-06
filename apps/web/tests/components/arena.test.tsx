@@ -35,7 +35,7 @@ describe("トップ（アリーナ）の画面", async () => {
   const view = await getView();
   const arena = buildArena(view);
 
-  it("上にピンクの帯で模擬売買の注意書き。カードはAIの数だけと、伏せカード", () => {
+  it("上にピンクの帯で架空の市場の注意書き。カードはAIの数だけと、伏せカード", () => {
     expect(html.indexOf(DISCLAIMER)).toBeGreaterThanOrEqual(0);
     expect(html.indexOf(DISCLAIMER)).toBeLessThan(html.indexOf("参戦中のAI"));
     expect(html).toContain("bg-neon-pink");

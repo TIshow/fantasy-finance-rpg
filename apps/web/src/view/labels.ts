@@ -17,7 +17,7 @@ export const REASON: Record<FillReason | RejectReason, string> = {
   invalid_order: "注文の不備",
   unknown_symbol: "対象外の銘柄だった",
   invalid_qty: "数量の不備",
-  invalid_price: "指値が呼値・値幅に合わなかった",
+  invalid_price: "指値が値段の刻みや上下の限度に合わなかった（基準の値段がない銘柄を含む）",
   suspended: "停止中だった",
 };
 export const STATUS = { filled: "約定", reduced: "一部のみ約定", expired: "失効" } as const;

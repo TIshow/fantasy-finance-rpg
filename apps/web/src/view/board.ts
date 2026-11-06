@@ -29,6 +29,8 @@ export interface BoardPost {
   withdrawn: string | null;
   intent: Intent | null;
   stance: Stance | null;
+  /** AIのページ（AI投資家だけにある）へのリンクを付けてよいか */
+  linked: boolean;
   /** 返信の字下げ（0〜2） */
   depth: number;
   runSeq: number;
@@ -69,16 +71,18 @@ export function buildBoard(view: View, symbol: string): Board | null {
   const posts = view.timeline.filter((t): t is TimelineItem & { kind: "post" } => t.kind === "post" && t.symbol === symbol);
   const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.symbol === symbol && t.qty > 0);
   const bySeq = new Map(posts.map((p) => [p.seq, p]));
+  const investorIds = new Set(view.agents.map((a) => a.agentId));
 
   const toPost = (p: (typeof posts)[number], depth: number): BoardPost => {
     const c = characterOf(p.agentId, p.agentName);
+    const linked = investorIds.has(p.agentId);
     const nextOwn = posts.find((q) => q.agentId === p.agentId && q.seq > p.seq)?.seq ?? Infinity;
     return {
-      seq: p.seq, agentId: p.agentId, name: c.name, color: c.color, look: c.look, atText: formatJstShort(p.at),
+      seq: p.seq, agentId: p.agentId, linked, name: c.name, color: c.color, look: c.look, atText: formatJstShort(p.at),
       text: p.text, withdrawn: p.withdrawn ? p.withdrawn.reason || "理由の記載なし" : null, intent: p.intent, stance: p.stance, depth, runSeq: p.runSeq,
       replyTo: p.replyTo === null ? null : { seq: p.replyTo, inBoard: bySeq.has(p.replyTo) },
       cites: p.citeSeqs.map((s) => cite(s, evidence.get(s), (x) => bySeq.has(x))),
-      trades: fills.filter((f) => f.agentId === p.agentId && f.sheetSeq > p.seq && f.seq < nextOwn).slice(0, 3).map((f) => ({ href: `/agents/${encodeURIComponent(f.agentId)}#${fillKey(f.seq, f.fillIndex)}`, text: `${formatMonthDay(f.tradingDate)} ${SIDE[f.side]} ${f.qty}株${f.price === null ? "" : ` @${formatYenMark(f.price)}`}` })),
+      trades: !linked ? [] : fills.filter((f) => f.agentId === p.agentId && f.sheetSeq > p.seq && f.seq < nextOwn).slice(0, 3).map((f) => ({ href: `/agents/${encodeURIComponent(f.agentId)}#${fillKey(f.seq, f.fillIndex)}`, text: `${formatMonthDay(f.tradingDate)} ${SIDE[f.side]} ${f.qty}株${f.price === null ? "" : ` @${formatYenMark(f.price)}`}` })),
     };
   };
 
@@ -104,8 +108,7 @@ export function buildBoard(view: View, symbol: string): Board | null {
   for (const p of out) counts[p.intent ?? "none"]++;
 
   const lastVal = new Map<string, TimelineItem & { kind: "valuation" }>();
-  const investors = new Set(view.agents.map((a) => a.agentId)); // この銘柄を持つ「AI」は、AI投資家だけ
-  for (const t of view.timeline) if (t.kind === "valuation" && investors.has(t.agentId)) lastVal.set(t.agentId, t);
+  for (const t of view.timeline) if (t.kind === "valuation" && investorIds.has(t.agentId)) lastVal.set(t.agentId, t);
   const holders = [...lastVal.values()].flatMap((v) => {
     const pos = v.positions.find((x) => x.symbol === symbol && x.qty > 0);
     const c = characterOf(v.agentId, v.agentName);

@@ -21,7 +21,7 @@ function PostCard({ p, flat }: { p: BoardPost; flat: boolean }) {
       <div className="w-14 flex-none sm:w-16"><Portrait look={p.look} size={64} /></div>
       <div className="min-w-0 flex-1 text-sm">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-          <Link href={`/agents/${encodeURIComponent(p.agentId)}`} className="font-bold underline" style={{ color: p.color }}>{p.name}</Link>
+          {p.linked ? <Link href={`/agents/${encodeURIComponent(p.agentId)}`} className="font-bold underline" style={{ color: p.color }}>{p.name}</Link> : <span className="font-bold" style={{ color: p.color }}>{p.name}</span>}
           <span className="font-num text-xs text-sub">{p.atText} · 記録 #{p.seq}</span>
           <span className="border border-line px-1.5 font-num text-[11px] text-soft">{p.intent ? INTENT_LABEL[p.intent] : "未分類"}</span>
           {p.replyTo && (p.replyTo.inBoard ? <Link href={`#post-${p.replyTo.seq}`} className="font-num text-xs underline">↳ 返信先 #{p.replyTo.seq}</Link> : <span className="font-num text-xs text-sub">↳ 返信先 #{p.replyTo.seq}（別の掲示板）</span>)}

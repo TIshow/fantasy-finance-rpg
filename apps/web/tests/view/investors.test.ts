@@ -13,7 +13,7 @@ const T = (date: string, hh: number) => Date.parse(`${date}T${String(hh).padStar
 
 describe("約定・拒否の理由の表示", () => {
   it("新しい4つの理由は、ふつうの言葉で表示する", () => {
-    expect([REASON.no_price, REASON.outmatched, REASON.limit_not_reached, REASON.invalid_price]).toEqual(["その日は値段がつかなかった", "ほかの注文が優先された", "指値に届かなかった", "指値が呼値・値幅に合わなかった"]);
+    expect([REASON.no_price, REASON.outmatched, REASON.limit_not_reached, REASON.invalid_price]).toEqual(["その日は値段がつかなかった", "ほかの注文が優先された", "指値に届かなかった", "指値が値段の刻みや上下の限度に合わなかった（基準の値段がない銘柄を含む）"]);
   });
 
   it("理由の型にあるすべてが、空でない表示を持つ（足したのに表示を付け忘れない）", () => {
@@ -45,7 +45,7 @@ describe("順位とカードはAI投資家だけ", () => {
     const arena = buildArena(view);
     expect(arena.cards.map((c) => c.agentId)).toEqual(["ai-a", "ai-b"]);
     expect(arena.feed.some((f) => f.text.includes("mm-1") || f.text.includes("noise-1"))).toBe(false);
-    expect(arena.feed.find((f) => f.kind === "rank")!.text).toContain("が首位"); // 首位はAI投資家から
+    expect(arena.feed.find((f) => f.kind === "rank")!.text).toBe("ミア・ファイヴが首位に立つ（総資産 ¥120）"); // ai-a のキャラの名前。首位は AI投資家から（マーケットメイカーの9,000は入らない）
     expect(view.timeline.some((t) => t.kind === "fill" && t.agentId === "mm-1")).toBe(true);
     expect(view.timeline.some((t) => t.kind === "valuation" && t.agentId === "noise-1")).toBe(true);
   });
@@ -56,5 +56,41 @@ describe("順位とカードはAI投資家だけ", () => {
     expect(buildAgentPage(view, new Map(), "noise-1")).toBeNull();
     const v = buildView([...events, ev("company.listed", { symbol: "NEO1", name: "あ", sector: "電機", sharesOutstanding: 1, price: 10 }, 0)], () => undefined);
     expect(buildBoard(v, "NEO1")!.holders.map((h) => h.agentId)).toEqual(["ai-a", "ai-b"]);
+  });
+});
+
+describe("絞り込みの細かい場合", () => {
+  const reg = (id: string, kind?: string) => ev("agent.registered", { agentId: id, displayName: id, startDate: "2026-11-09", initialCash: 1000, ...(kind ? { kind } : {}) }, 0);
+  const val = (id: string, date: string, total: number) => ev("valuation.recorded", { agentId: id, date, cash: total, positions: [], total }, T(date, 16));
+  const post = (id: string, board: string) => ev("post.published", { agentId: id, board, bodyHash: "h", citeSeqs: [], runSeq: 1 }, T("2026-11-10", 10));
+
+  it("マーケットメイカーにだけその日の評価がなくても、AI投資家の順位と首位は出る（評価がそろった日は AI投資家で判定）", () => {
+    n = 0;
+    const v = buildView([reg("ai-a"), reg("ai-b"), reg("mm-1", "market_maker"), val("ai-a", "2026-11-10", 1_200), val("ai-b", "2026-11-10", 1_100), val("mm-1", "2026-11-09", 500)], () => undefined);
+    const arena = buildArena(v);
+    expect(arena.cards.map((c) => [c.agentId, c.rank])).toEqual([["ai-a", 1], ["ai-b", 2]]);
+    expect(arena.feed.some((f) => f.kind === "rank")).toBe(true);
+  });
+
+  it("登録のない AI（評価だけある）は、AI投資家として順位に入る", () => {
+    n = 0;
+    const v = buildView([reg("ai-a"), val("ai-a", "2026-11-10", 1_000), val("ghost", "2026-11-10", 1_500)], () => undefined);
+    expect(v.agents.map((a) => [a.agentId, a.days[0]!.rank])).toEqual([["ai-a", 2], ["ghost", 1]]);
+  });
+
+  it("登録の記録が評価より後ろにあっても、種類は先に決まる（読む順序に依らない）", () => {
+    n = 0;
+    const events = [val("mm-1", "2026-11-10", 9_000), val("ai-a", "2026-11-10", 1_200), reg("ai-a"), reg("mm-1", "market_maker")];
+    const v = buildView(events, () => undefined);
+    expect(v.agents.map((a) => [a.agentId, a.days[0]!.rank])).toEqual([["ai-a", 1]]);
+  });
+
+  it("マーケットメイカーの投稿が掲示板に出ても、AIのページ（ない）へのリンクは付けず、このあとの売買も出さない", () => {
+    n = 0;
+    const events = [reg("ai-a"), reg("mm-1", "market_maker"), post("ai-a", "NEO1"), post("mm-1", "NEO1"), ev("fills.executed", { agentId: "mm-1", sheetSeq: 99, tradingDate: "2026-11-11", fills: [{ symbol: "NEO1", side: "sell", requestedQty: 100, qty: 100, price: 100, amount: 1, status: "filled" }] }, T("2026-11-11", 9))];
+    const b = buildBoard(buildView(events, () => "本文"), "NEO1")!;
+    const by = Object.fromEntries(b.posts.map((p) => [p.agentId, p]));
+    expect([by["ai-a"]!.linked, by["mm-1"]!.linked]).toEqual([true, false]);
+    expect(by["mm-1"]!.trades).toEqual([]);
   });
 });
