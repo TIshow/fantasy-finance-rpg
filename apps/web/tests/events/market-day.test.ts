@@ -50,8 +50,8 @@ async function setup() {
   const listed = await w.add(sys("company.listed", jst("2026-11-09", 18), { symbol: "NEO1", name: "ネオ電機", sector: "電機", sharesOutstanding: 500_000, price: 10_000 }));
   await w.add(op("agent.registered", jst("2026-11-09", 19), { agentId: "mm", startDate: T, initialCash: MM_CASH }));
   await w.add(op("agent.registered", jst("2026-11-09", 19), { agentId: "alpha", startDate: T, initialCash: INITIAL_CASH }));
-  await w.add(sys("shares.allotted", jst("2026-11-09", 19, 30), { agentId: "mm", symbol: "NEO1", qty: 5_000 }));
-  await w.add(op("universe.set", jst("2026-11-09", 19, 40), { symbols: ["NEO1"] }));
+  await w.add(op("universe.set", jst("2026-11-09", 19, 30), { symbols: ["NEO1"] }));
+  await w.add(sys("shares.allotted", jst("2026-11-09", 19, 40), { agentId: "mm", symbol: "NEO1", qty: 5_000 }));
   return { w, listed };
 }
 
@@ -72,12 +72,20 @@ describe("最初の配分と最初の現金（#110 PR-2c）", () => {
     expect(await w.rule(sys("shares.allotted", at, { agentId: "alpha", symbol: "OLD1", qty: 100 }))).toBe("symbol is not listed");
     expect(await w.rule(sys("shares.allotted", at, { agentId: "alpha", symbol: "NEO1", qty: 495_001 }))).toBe("allotments exceed sharesOutstanding");
     expect(await w.rule(sys("shares.allotted", at, { agentId: "alpha", symbol: "NEO1", qty: 0 }))).toBe("qty must be a positive integer");
+    expect(await w.rule(sys("shares.allotted", at, { agentId: "alpha", symbol: "NEO1", qty: 100, memo: "x" }))).toBe("unknown field in an allotment");
+    // 取引対象にない銘柄や、最初の評価の日（11/10）の締めより後に上場した銘柄は、その日に板寄せができないので配らない
+    await w.add(sys("company.listed", at, { symbol: "NEO2", name: "ネオ銀行", sector: "銀行", sharesOutstanding: 500_000, price: 5_000 }));
+    expect(await w.rule(sys("shares.allotted", at, { agentId: "alpha", symbol: "NEO2", qty: 100 }))).toBe("symbol is not in the universe");
     // 注文票を確定したあとの参加者には配らない。板寄せのあとの銘柄も
     await w.commit("alpha", [], jst("2026-11-09", 21));
     expect(await w.rule(sys("shares.allotted", jst("2026-11-09", 22), { agentId: "alpha", symbol: "NEO1", qty: 100 }))).toBe("the agent already started trading");
     await w.add(op("agent.registered", jst("2026-11-09", 22), { agentId: "late", startDate: T, initialCash: INITIAL_CASH }));
     await w.add(sys("auction.cleared", cutoffOf(T) + 60_000, { symbol: "NEO1", date: T, refSeq: listed, sheetSeqs: [w.log.events.find((e) => e.type === "order_sheet.committed")!.seq], price: null, volume: 0 }, [listed, w.log.events.find((e) => e.type === "order_sheet.committed")!.seq]));
     expect(await w.rule(sys("shares.allotted", cutoffOf(T) + 120_000, { agentId: "late", symbol: "NEO1", qty: 100 }))).toBe("the symbol is already auctioned");
+    const after = cutoffOf(T) + 180_000;
+    await w.add(sys("company.listed", after, { symbol: "NEO3", name: "ネオ商事", sector: "商社", sharesOutstanding: 500_000, price: 5_000 }));
+    await w.add(op("universe.set", after, { symbols: ["NEO1", "NEO3"] }));
+    expect(await w.rule(sys("shares.allotted", after, { agentId: "late", symbol: "NEO3", qty: 100 }))).toBe("the symbol cannot be auctioned on the first valuation date");
   });
 });
 

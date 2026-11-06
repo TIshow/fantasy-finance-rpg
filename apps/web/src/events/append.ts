@@ -83,6 +83,7 @@ const ORDER_REASONS: ReadonlySet<RejectReason> = new Set<RejectReason>(["invalid
 
 /** company.disclosed の項目と、四半期の書き方（例：2026-Q4） */
 const DISCLOSED_FIELDS = ["symbol", "period", "revenue", "netIncome", "eps", "dividendPerShare"];
+const ALLOTTED_FIELDS = ["agentId", "symbol", "qty"];
 const PERIOD = /^\d{4}-Q[1-4]$/;
 
 /** company.listed の項目 */
@@ -393,10 +394,16 @@ export class EventLog {
         // 上場の日の最初の配分（#110）。まだ何もしていない参加者に、最初の板寄せより前に、発行済株式数の内で配る
         const l = this.listings.get(p.symbol as string);
         if (!l) return "symbol is not listed";
+        if (Object.keys(p).some((k) => !ALLOTTED_FIELDS.includes(k))) return "unknown field in an allotment";
         if (l.lastAuction !== null) return "the symbol is already auctioned";
+        // 最初の評価の日に板寄せができる銘柄だけ（できないと、評価が書けず先へ進めない）
+        if (!this.universe.has(p.symbol as string)) return "symbol is not in the universe";
+        if (cutoffOf(nextBusinessDay(st!.asOf, H)) <= l.listedAt) return "the symbol cannot be auctioned on the first valuation date";
         if (st!.pending || st!.valuedDate !== null || [...this.commits].some((c) => c.startsWith(`${agentId}:`))) return "the agent already started trading";
         if (!Number.isSafeInteger(p.qty) || (p.qty as number) <= 0) return "qty must be a positive integer";
         if (l.allotted + (p.qty as number) > l.sharesOutstanding) return "allotments exceed sharesOutstanding";
+        // 取得原価（上場の価格 × 株数）が、正しく扱える整数の範囲に収まること
+        if (!Number.isSafeInteger(l.prices[0]!.price * (l.allotted + (p.qty as number)))) return "allotments are too large";
         return null;
       }
       case "company.disclosed": {
@@ -651,7 +658,8 @@ export class EventLog {
       const ip = e.payload as Record<string, unknown>;
       if (e.type === "source.captured" && !((ip.publishedAt as number) < cutoffOf(tradingDate))) return "input published after the cutoff";
       if ((e.type === "prices.open" || e.type === "prices.close" || e.type === "valuation.recorded" || e.type === "auction.cleared") && !((ip.date as string) < tradingDate)) return "price input not before the trading date";
-      // 決算の発表は、記録した時刻が締めより前のものだけ（source.captured の公開時刻と同じ決まり）
+      // 決算の発表は、記録した時刻が締めより前のものだけ（source.captured の公開時刻と同じ決まり）。
+      // 注文票は締めより前に確定し、記録の時刻は戻らないので、今の流れでは起きない。守りのための確かめ
       if (e.type === "company.disclosed" && !(e.recordedAt < cutoffOf(tradingDate))) return "input disclosed after the cutoff";
     }
     return null;
