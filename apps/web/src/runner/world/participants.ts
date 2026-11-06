@@ -102,7 +102,8 @@ export async function noiseAgent(seed: number): Promise<RunnerAgent> {
     decide(input: DecisionInput) {
       const markets = input.listed.map((x) => ({ symbol: x.symbol, prevPrice: refPrice(x), band: priceBand(refPrice(x)) }));
       const holdings = Object.fromEntries(Object.entries(input.account.holdings).map(([s, h]) => [s, h.qty]));
-      const orders = noiseOrders({ seed, tradingDate: input.tradingDate, markets, holdings, cash: input.account.cash });
+      const baseline = { sharesPerSymbol: ALLOTMENT.noise.sharesPerCompany, cash: ALLOTMENT.noise.cash };
+      const orders = noiseOrders({ seed, tradingDate: input.tradingDate, markets, holdings, cash: input.account.cash, baseline });
       return { orders: orders.map(toOrder), post: null, note: `random orders with seed ${seed}` };
     },
   };
