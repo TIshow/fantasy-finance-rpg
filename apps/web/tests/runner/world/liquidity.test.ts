@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type LiquidityOrder, MAKER_PARAMS, NOISE_PARAMS, makerOrders, noiseOrders } from "../../../src/runner/world/liquidity";
+import { type LiquidityOrder, MAKER_PARAMS, NOISE_PARAMS, dayFair, makerOrders, noiseOrders } from "../../../src/runner/world/liquidity";
 
 // 価格は0.1円単位（1000円 = 10000）
 const band = { lower: 8000, upper: 12000 };
@@ -277,5 +277,38 @@ describe("ばらばらに売買する参加者の注文", () => {
     expect(() => noise({ ...input, markets: [...markets, markets[0]!] })).toThrow("duplicate");
     expect(() => noise({ ...input, markets: [{ ...markets[0]!, band: { lower: 8005, upper: 12000 } }] })).toThrow("band");
     expect(() => noiseOrders(input, { chance: 1, maxQty: 250, marketShare: 0, maxOffsetBp: 0, tilt: 0, minBuyChance: 0, edgeBuyChance: 0.5 })).toThrow("maxQty");
+  });
+});
+
+describe("dayFair（前の営業日に値段がつかなかった銘柄では、目安の価格を値幅の中まで寄せる。#139 の lead の決定）", () => {
+  it("前の営業日に値段がつかず、目安が値幅の外なら、いちばん近い値幅の端まで寄せ、寄せる前の価格を返す", () => {
+    expect(dayFair(3000, band, true)).toEqual({ fair: 8000, pulledFrom: 3000 });
+    expect(dayFair(30000, band, true)).toEqual({ fair: 12000, pulledFrom: 30000 });
+  });
+
+  it("前の営業日に値段がついていれば、目安が値幅の外でも寄せない（業績から出した価格のまま）", () => {
+    expect(dayFair(3000, band, false)).toEqual({ fair: 3000, pulledFrom: null });
+    expect(dayFair(30000, band, false)).toEqual({ fair: 30000, pulledFrom: null });
+  });
+
+  it("目安が値幅の中（端を含む）なら、前の営業日に値段がつかなくても寄せない", () => {
+    for (const fair of [8000, 10005, 12000]) expect(dayFair(fair, band, true)).toEqual({ fair, pulledFrom: null });
+  });
+
+  it("寄せた価格は値幅の中で、値幅の端の日にならないので、マーケットメイカーは売りと買いの両方を出し、自分どうしで約定しない", () => {
+    for (const [base, held] of [[3000, 5000], [3000, 6500], [30000, 5000], [30000, 3500]] as const) {
+      const { fair } = dayFair(base, band, true);
+      expect(fair).toBeGreaterThanOrEqual(band.lower);
+      expect(fair).toBeLessThanOrEqual(band.upper);
+      const os = makerOrders({ symbol: "VRN1", fair, band, held, target: 5000, cash: 500_000_000 });
+      expect(buys(os).length).toBeGreaterThan(0);
+      expect(sells(os).length).toBeGreaterThan(0);
+      expect(Math.max(...buys(os).map((o) => o.limit!))).toBeLessThan(Math.min(...sells(os).map((o) => o.limit!)));
+    }
+  });
+
+  it("入力の検査（値幅が刻みに合わない・目安が負）", () => {
+    expect(() => dayFair(3000, { lower: 8005, upper: 12000 }, true)).toThrow("band");
+    expect(() => dayFair(-1, band, true)).toThrow("fair");
   });
 });

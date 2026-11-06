@@ -35,6 +35,21 @@ const checkLots = (name: string, v: number) => {
   if (!Number.isSafeInteger(v) || v <= 0 || v % LOT !== 0) throw new Error(`${name} must be a positive multiple of ${LOT}`);
 };
 
+/**
+ * その日に使う目安の価格（#139 の lead の決定）。前の営業日に値段がつかなかった銘柄では、業績から出した目安の価格を、その日の
+ * 値幅の中に収まるところまで（いちばん近い値幅の端まで）寄せる。寄せたあとの価格は値幅の端と同じなので、値幅の端の日にはならず、
+ * マーケットメイカーは売りと買いの両方を出す。前の営業日に値段がついていれば、業績から出した価格をそのまま使う。
+ * 「前の営業日に値段がつかなかった」は、記録された板寄せの結果だけから決めて渡す（先読みしないように）。
+ * pulledFrom は、寄せたときだけ寄せる前の価格（記録に残す）。寄せなければ null
+ */
+export function dayFair(fair: Deciyen, band: PriceBand, prevUnpriced: boolean): { fair: Deciyen; pulledFrom: Deciyen | null } {
+  checkBand(band);
+  checkCount("fair", fair);
+  if (!prevUnpriced) return { fair, pulledFrom: null };
+  const pulled = clamp(fair, band);
+  return pulled === fair ? { fair, pulledFrom: null } : { fair: pulled, pulledFrom: fair };
+}
+
 export interface MakerParams {
   /** 目安の価格から、1段ごとに離す幅（基点。100 = 1%） */
   spreadBp: number;
