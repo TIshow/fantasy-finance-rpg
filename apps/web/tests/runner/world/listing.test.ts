@@ -30,7 +30,7 @@ function newStore(clock = new FakeClock(0)) {
 }
 
 describe("listCompanies（上場の記録）", () => {
-  it("上場の記録を書いてから取引対象に加える。取引対象のほかの銘柄は残し、呼び直しても二重にならない", async () => {
+  it("上場の記録を書いてから、取引対象を上場した銘柄だけにする（上場していない銘柄は外す）。呼び直しても二重にならない", async () => {
     const { store } = newStore();
     await store.append({ type: "holidays.adopted", actor: "operator:owner", refs: [], payload: { holidaysSha256: FIXTURE_HOLIDAYS.contentSha256 } });
     await store.append({ type: "universe.set", actor: "operator:owner", refs: [], payload: { symbols: ["TSTA"] } });
@@ -38,7 +38,7 @@ describe("listCompanies（上場の記録）", () => {
     const events = await store.read();
     expect(events.slice(2).map((e) => e.type)).toEqual(["company.listed", "company.listed", "universe.set"]);
     expect(p(events[2]!)).toEqual({ symbol: "VRN1", name: "ヴェルナ電機", sector: "電機", sharesOutstanding: VRN1.sharesOutstanding, price: listingPrice(SEED, VRN1) });
-    expect(p(events[4]!).symbols).toEqual(["ORS1", "TSTA", "VRN1"]);
+    expect(p(events[4]!).symbols).toEqual(["ORS1", "VRN1"]);
     expect(await listCompanies(store, SEED, [VRN1, ORS1])).toEqual({ listed: [], universeSet: false });
     expect((await store.read()).length).toBe(5);
   });
@@ -114,6 +114,8 @@ async function world(opts: { held?: (o: PriceObservation) => boolean; crashOnce?
   await store.append({ type: "universe.set", actor: "operator:owner", refs: [], payload: { symbols: [...scenario.symbols] } });
   clock.set(cutoffOf(PRIOR_DAY) + 3_600_000);
   await listCompanies(store, SEED, [VRN1, ORS1]);
+  // 上場していない銘柄の始値で約定する流れも確かめるため、TST の銘柄を取引対象に戻す
+  await store.append({ type: "universe.set", actor: "operator:owner", refs: [], payload: { symbols: [...scenario.symbols, "ORS1", "VRN1"].sort() } });
   await runDay(PRIOR_DAY, deps);
   await waitUntil(scheduleOf(PRIOR_DAY).closeAt + 3 * 3_600_000);
   await store.append({ type: "agent.registered", actor: "operator:owner", refs: [], payload: { agentId: "ai-a", displayName: "ai-a", startDate: TRADING_DAYS[0], initialCash: INITIAL_CASH } });
@@ -194,5 +196,26 @@ describe("runDay（上場した銘柄の、途中で止まったときの続き�
     const events = await w.all();
     expect(events.filter((e) => e.type === "auction.cleared").map((e) => p(e).symbol)).toEqual(["ORS1", "VRN1"]);
     expect(events.filter((e) => e.type === "fills.executed").map((e) => p(e).tradingDate)).toEqual([d0]);
+  });
+});
+
+describe("listCompanies（書く前の確かめ）", async () => {
+  const w = await world();
+  const d = TRADING_DAYS[0]!;
+  // 初日の約定のあと、引けの前で止める
+  const stop = { ...w.deps, waitUntil: async (at: number) => (at === scheduleOf(d).closeAt ? Promise.reject(new Error("stop")) : w.deps.waitUntil(at)) };
+  await expect(runDay(d, stop)).rejects.toThrow("stop");
+  const before = (await w.store.last())!.seq;
+
+  it("注文票を確定したAIの、その日の引け後の処理がまだなら、上場させずに断る", async () => {
+    await expect(listCompanies(w.store, SEED, [MRH1])).rejects.toThrow("company.listed: a trading day is in progress");
+    expect((await w.store.last())!.seq).toBe(before);
+  });
+
+  it("外す銘柄（TSTA）を約定で手に入れたAIがいれば、上場の記録も書かずに断る", async () => {
+    await runDay(d, w.deps);
+    const seq = (await w.store.last())!.seq;
+    await expect(listCompanies(w.store, SEED, [MRH1])).rejects.toThrow("universe.set: TSTA may be held");
+    expect((await w.store.last())!.seq).toBe(seq);
   });
 });

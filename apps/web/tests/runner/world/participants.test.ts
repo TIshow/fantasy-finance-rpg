@@ -26,7 +26,7 @@ const p = (e: LogEvent) => e.payload as Record<string, unknown>;
 const holidayTables = new Map([[FIXTURE_HOLIDAYS.contentSha256, FIXTURE_HOLIDAYS]]);
 const IDS = [makerId("VRN1"), makerId("ORS1"), NOISE_ID];
 
-/** TST の銘柄と、PRIOR_DAY の締めのあとに上場した VRN1・ORS1。売買役は同じときに登録し、株を配る */
+/** PRIOR_DAY の締めのあとに上場した VRN1・ORS1（取引対象はこの2銘柄だけになる）。売買役は同じときに登録し、株を配る */
 async function world(inputDays?: number) {
   const scenario = buildScenario(7);
   const clock = new FakeClock(0);

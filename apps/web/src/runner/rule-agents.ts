@@ -1,23 +1,26 @@
-// 規則で動く仮のAI 3体（#27 PR-2）。LLM は呼ばず、runner が渡した入力（記録済みの終値と口座）だけで判断する。
+// 規則で動く仮のAI 3体（#27 PR-2）。LLM は呼ばず、runner が渡した入力（記録済みの終値・板寄せの価格と口座）だけで判断する。
 // 先読みの防止は runner が入力を固定することで守る（ここは渡されたものしか見ない）。値は 0.1円単位の整数のまま扱う。
 import { canonicalize } from "../events/canonical";
 import { sha256Hex } from "../events/hash";
 import { LOT, type Deciyen, type Order } from "../ledger/types";
 import type { Decision, DecisionInput, RunnerAgent } from "./day";
 
-/** 銘柄の終値の並び（古い順。値がない日は null のまま残し、日を詰めない） */
+/** 銘柄の価格の並び（古い順。上場した銘柄は板寄せの価格、ほかは終値。値がない日は null のまま残し、日を詰めない） */
 type Rule = (input: DecisionInput, series: (symbol: string) => (Deciyen | null)[]) => { orders: Order[]; reason: string };
 
 /**
- * 銘柄の一覧：最新の終値に載っている銘柄（その日の取引対象。昇順）。古い終値にしかない銘柄は、取引対象から外れた
- * かもしれないので選ばない（買うと注文票ごと unknown_symbol で拒否される）。売りは持っている銘柄だけ
+ * 銘柄の一覧：最新の終値に載っている銘柄と、取引対象のうち上場した銘柄（その日の取引対象。昇順）。古い終値にしかない銘柄は、
+ * 取引対象から外れたかもしれないので選ばない（買うと注文票ごと unknown_symbol で拒否される）。売りは持っている銘柄だけ
  */
-const symbolsOf = (input: DecisionInput) => Object.keys(input.closes.at(-1)?.prices ?? {}).sort();
+const symbolsOf = (input: DecisionInput) => [...new Set([...Object.keys(input.closes.at(-1)?.prices ?? {}), ...input.listed.map((x) => x.symbol)])].sort();
 const isPrice = (v: Deciyen | null | undefined): v is Deciyen => typeof v === "number";
 const held = (input: DecisionInput, symbol: string) => input.account.holdings[symbol]?.qty ?? 0;
 const sellAll = (input: DecisionInput, symbol: string): Order => ({ symbol, side: "sell", qty: held(input, symbol) });
 
-/** 買える分だけ（直近の終値で見積もる。約定は始値なので、足りなければ保管と台帳が断る） */
+/**
+ * 買える分だけ（直近の価格で見積もる。約定は始値か板寄せの価格なので、足りなければ保管と台帳が断る。
+ * 上場した銘柄の成行の買いは、板寄せの前に値幅の上限で現金を確かめ、足りない分を減らす）
+ */
 function buys(input: DecisionInput, wanted: { symbol: string; price: Deciyen }[]): Order[] {
   let cash = input.account.cash;
   const out: Order[] = [];
@@ -59,11 +62,14 @@ const reversal: Rule = (input, series) => {
   return { orders: [...sells, ...buys(input, wanted)], reason: "2% reversal" };
 };
 
-/** 持ち続ける：何も持っていなければ、全銘柄を1単元ずつ買い、あとは売買しない（比べるための基準） */
+/**
+ * 持ち続ける：何も持っていなければ、全銘柄を1単元ずつ買い、あとは売買しない（比べるための基準）。
+ * 上場した銘柄は、板寄せの価格がまだなくても、値幅の基準の価格（まだなければ上場の価格）で見積もって買う
+ */
 const buyAndHold: Rule = (input, series) => {
   if (Object.values(input.account.holdings).some((h) => h.qty > 0)) return { orders: [], reason: "hold" };
   const wanted = symbolsOf(input).flatMap((s) => {
-    const last = series(s).at(-1);
+    const last = input.listed.find((x) => x.symbol === s)?.refPrice.price ?? series(s).at(-1);
     return isPrice(last) ? [{ symbol: s, price: last }] : [];
   });
   return { orders: buys(input, wanted), reason: "buy and hold" };
@@ -94,7 +100,10 @@ export async function ruleAgent(id: string, kind: keyof typeof RULES): Promise<R
     model: { provider: "rule", modelId: kind, settings: {} },
     prompt: { id: `rule-${kind}`, version: "1", hash },
     decide(input) {
-      const series = (symbol: string) => input.closes.map((c) => c.prices[symbol] ?? null);
+      const series = (symbol: string) => {
+        const listed = input.listed.find((x) => x.symbol === symbol);
+        return listed ? listed.auctions.map((a) => a.price) : input.closes.map((c) => c.prices[symbol] ?? null);
+      };
       const { orders, reason } = rule(input, series);
       return toDecision(id, input, orders, reason);
     },
