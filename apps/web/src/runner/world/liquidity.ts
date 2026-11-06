@@ -69,7 +69,7 @@ export interface MakerInput {
  * 中心から spreadBp ずつ離して、買いと売りの指値を levels 段ずつ出す。買いは刻みに切り下げ、売りは切り上げ、値幅の内側に収める。
  * 値幅に押しつけられて同じ値段に重なった段はまとめる。買いと売りが同じ値段に重なったら、目安の価格の側の注文だけを残す
  * （自分どうしで約定しないように。目安が値幅より上なら買い、下なら売り）。
- * 売りは持っている株数まで。買いは「指値 × 株数」の合計が現金を超えない分まで、目安に近い段から（足りない段は飛ばし、安い段を出す）
+ * 売りは持っている株数まで（重なりを確かめる前に減らす）。買いは「指値 × 株数」の合計が現金を超えない分まで、目安に近い段から（足りない段は飛ばし、安い段を出す）
  */
 export function makerOrders(input: MakerInput, params: MakerParams = MAKER_PARAMS): LiquidityOrder[] {
   checkBand(input.band);
@@ -92,10 +92,12 @@ export function makerOrders(input: MakerInput, params: MakerParams = MAKER_PARAM
   const range = Array.from({ length: params.levels }, (_, i) => i + 1);
   let asks = merge("sell", range.map((i) => clamp(Math.ceil(at(i, 1) / (TICK * BP)) * TICK, input.band)));
   let bids = merge("buy", range.map((i) => clamp(Math.floor(at(i, -1) / (TICK * BP)) * TICK, input.band)));
+  // 売りは先に持ち株で減らす（売れない売りのために買いを外さないように）
+  asks = limitQty(asks, input.held, (o) => o.qty);
   // 重なったら、中心が値幅の上にあれば（安すぎる）買いを残し、それ以外は売りを残す
   if (center > input.band.upper) asks = asks.filter((a) => a.limit > (bids[0]?.limit ?? -Infinity));
   else bids = bids.filter((b) => b.limit < (asks[0]?.limit ?? Infinity));
-  return [...limitQty(asks, input.held, (o) => o.qty), ...limitQty(bids, input.cash, (o) => o.qty * o.limit)];
+  return [...asks, ...limitQty(bids, input.cash, (o) => o.qty * o.limit)];
 }
 
 /** 前から順に、合計が budget を超えない分まで残す。超える注文は100株単位で減らし、0株なら落とす */

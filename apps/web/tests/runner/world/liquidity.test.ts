@@ -72,6 +72,8 @@ describe("マーケットメイカーの注文", () => {
   it("売りは持っている株数まで、買いは指値 × 株数の合計が現金を超えない分まで", () => {
     expect(sells(maker({ ...base, held: 200, target: 200 })).map((o) => o.qty)).toEqual([100, 100]);
     expect(sells(maker({ ...base, held: 0, target: 0 }))).toEqual([]);
+    // 目安が値幅の下限より下でも、売る株がなければ買いを外さない（値幅の下限で買う）
+    expect(maker({ ...base, fair: 5000, held: 0, target: 0 })).toEqual([{ symbol: "VRN1", side: "buy", qty: 300, limit: 8000 }]);
     const poor = maker({ ...base, cash: 9900 * 100 + 9800 * 100 + 5 });
     expect(buys(poor).map((o) => [o.limit, o.qty])).toEqual([[9900, 100], [9800, 100]]);
     expect(buys(maker({ ...base, cash: 0 }))).toEqual([]);

@@ -27,7 +27,7 @@ const holidayTables = new Map([[FIXTURE_HOLIDAYS.contentSha256, FIXTURE_HOLIDAYS
 const IDS = [makerId("VRN1"), makerId("ORS1"), NOISE_ID];
 
 /** TST の銘柄と、PRIOR_DAY の締めのあとに上場した VRN1・ORS1。売買役は同じときに登録し、株を配る */
-async function world() {
+async function world(inputDays?: number) {
   const scenario = buildScenario(7);
   const clock = new FakeClock(0);
   const rand = mulberry32(5);
@@ -43,7 +43,7 @@ async function world() {
     }
     if (at > clock.now()) clock.set(at);
   };
-  const deps = { store, market, values, holidayTables, agents: await liquidityAgents(SEED, [VRN1, ORS1]), clock, waitUntil };
+  const deps = { store, market, values, holidayTables, agents: await liquidityAgents(SEED, [VRN1, ORS1]), clock, waitUntil, inputDays };
   await store.append({ type: "holidays.adopted", actor: "operator:owner", refs: [], payload: { holidaysSha256: FIXTURE_HOLIDAYS.contentSha256 } });
   await store.append({ type: "universe.set", actor: "operator:owner", refs: [], payload: { symbols: [...scenario.symbols] } });
   clock.set(cutoffOf(PRIOR_DAY) + 3_600_000);
@@ -81,6 +81,29 @@ describe("setUpParticipants（売買役の登録と最初の配分）", async ()
     await setUpParticipants(w.store, TRADING_DAYS[0]!, [VRN1, ORS1]);
     expect((await w.all()).length).toBe(events.length);
   });
+
+  it("同じ ID で別の種類の参加者が登録済みなら、株を配らずに例外", async () => {
+    const store = new InMemoryEventStore(w.values, holidayTables, new FakeClock(cutoffOf(PRIOR_DAY) + 3_600_000));
+    await store.append({ type: "holidays.adopted", actor: "operator:owner", refs: [], payload: { holidaysSha256: FIXTURE_HOLIDAYS.contentSha256 } });
+    await listCompanies(store, SEED, [VRN1]);
+    await store.append({ type: "agent.registered", actor: "operator:owner", refs: [], payload: { agentId: makerId("VRN1"), displayName: "x", startDate: TRADING_DAYS[0], initialCash: 100_000_000 } });
+    await expect(setUpParticipants(store, TRADING_DAYS[0]!, [VRN1])).rejects.toThrow(`agent.registered ${makerId("VRN1")}: already registered as investor`);
+    expect((await store.read()).some((e) => e.type === "shares.allotted")).toBe(false);
+  });
+});
+
+describe("runDay（入力の日数より前の価格が値幅の基準のとき）", () => {
+  it("板寄せの入力を1日に切っても、値幅の基準は価格のついた直近の板寄せで、注文票は拒否されない", async () => {
+    const w = await world(1);
+    for (const d of TRADING_DAYS) await runDay(d, w.deps);
+    const events = await w.all();
+    expect(events.filter((e) => e.type === "order_sheet.rejected")).toEqual([]);
+    const sheets = events.filter((e) => e.type === "order_sheet.committed" && p(e).agentId === makerId("VRN1"));
+    for (const s of sheets) {
+      const ref = events.filter((e) => e.type === "auction.cleared" && p(e).symbol === "VRN1" && p(e).price !== null && (p(e).date as string) < (p(s).tradingDate as string)).at(-1);
+      if (ref) expect(p(s).inputSeqs).toContain(ref.seq);
+    }
+  });
 });
 
 describe("runDay（売買役の毎日の注文）", async () => {
@@ -102,6 +125,8 @@ describe("runDay（売買役の毎日の注文）", async () => {
         expect(s.recordedAt).toBeLessThan(cutoffOf(d));
         const run = events[(p(s).runSeq as number) - 1]!;
         expect(p(run)).toMatchObject({ agentId: p(s).agentId, purpose: "order", ok: true, model: { provider: "rule" } });
+        // 注文を決める値は、記録の settings に残る
+        expect((p(run).model as { settings: Record<string, string> }).settings).toMatchObject(p(s).agentId === NOISE_ID ? { seed: String(SEED) } : { qtyPerLevel: "300", target: "5000" });
         expect(output(run).orders).toEqual(p(s).orders);
       }
     }

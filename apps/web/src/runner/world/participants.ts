@@ -9,7 +9,7 @@ import { priceBand } from "../../ledger/auction";
 import type { Deciyen, Order } from "../../ledger/types";
 import type { DecisionInput, ListedInput, RunnerAgent } from "../day";
 import { COMPANIES, type Company, fairPrice } from "./companies";
-import { type LiquidityOrder, makerOrders, noiseOrders } from "./liquidity";
+import { type LiquidityOrder, MAKER_PARAMS, NOISE_PARAMS, makerOrders, noiseOrders } from "./liquidity";
 
 /** 最初の持ち株と現金（#113 の lead の決定）。現金は0.1円単位 */
 export const ALLOTMENT = {
@@ -33,14 +33,17 @@ export async function setUpParticipants(store: EventStore, startDate: string, co
   const events: LogEvent[] = [];
   for (let page = await store.read(); page.length > 0; page = await store.read(page.at(-1)!.seq)) events.push(...page);
   const p = (e: LogEvent) => e.payload as Record<string, unknown>;
-  const registered = new Set(events.filter((e) => e.type === "agent.registered").map((e) => p(e).agentId as string));
+  const registered = new Map(events.filter((e) => e.type === "agent.registered").map((e) => [p(e).agentId as string, p(e)]));
   const allotted = new Set(events.filter((e) => e.type === "shares.allotted").map((e) => `${String(p(e).agentId)}:${String(p(e).symbol)}`));
   const write = async (type: "agent.registered" | "shares.allotted", payload: Record<string, unknown>) => {
     const r = await store.append({ type, actor: type === "agent.registered" ? operator : "system", refs: [], payload });
     if (!r.ok) throw new Error(`${type} ${String(payload.agentId)}: ${r.reason}`);
   };
   const register = async (agentId: string, kind: "market_maker" | "noise", initialCash: Deciyen) => {
-    if (!registered.has(agentId)) await write("agent.registered", { agentId, displayName: agentId, kind, initialCash, startDate });
+    const r = registered.get(agentId);
+    if (!r) return write("agent.registered", { agentId, displayName: agentId, kind, initialCash, startDate });
+    // 同じ ID で、別の種類・現金の参加者（AI投資家など）が登録済みなら、株を配らない
+    if (r.kind !== kind || r.initialCash !== initialCash) throw new Error(`agent.registered ${agentId}: already registered as ${String(r.kind ?? "investor")} with ${String(r.initialCash)}`);
   };
   const allot = async (agentId: string, symbol: string, qty: number) => {
     if (!allotted.has(`${agentId}:${symbol}`)) await write("shares.allotted", { agentId, symbol, qty });
@@ -53,14 +56,17 @@ export async function setUpParticipants(store: EventStore, startDate: string, co
   for (const c of companies) await allot(NOISE_ID, c.symbol, ALLOTMENT.noise.sharesPerCompany);
 }
 
-/** 値幅の基準の価格：判断の日より前の、直近の板寄せの価格（まだなければ上場の価格）。注文票の検査と同じ決め方 */
-const refPrice = (x: ListedInput): Deciyen => [...x.auctions].reverse().find((a) => a.price !== null)?.price ?? x.listing.price;
+const refPrice = (x: ListedInput): Deciyen => x.refPrice.price;
 /** 仮の注文の形（成行は limit: null）を、注文票の形（成行は limit を書かない）にする */
 const toOrder = ({ limit, ...o }: LiquidityOrder): Order => (limit === null ? o : { ...o, limit });
-const ruleModel = async (modelId: string, text: string) => ({
-  model: { provider: "rule", modelId, settings: {} },
-  prompt: { id: `rule-${modelId}`, version: "1", hash: await sha256Hex(new TextEncoder().encode(canonicalize({ kind: modelId, text }))) },
-});
+/** 規則の記録。注文を決める値（段の幅・株数・目標の株数・乱数のシードなど）を settings に入れ、説明の文と一緒にハッシュにする */
+const ruleModel = async (modelId: string, text: string, params: Record<string, number>) => {
+  const settings = Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)]));
+  return {
+    model: { provider: "rule", modelId, settings },
+    prompt: { id: `rule-${modelId}`, version: "1", hash: await sha256Hex(new TextEncoder().encode(canonicalize({ kind: modelId, text, settings }))) },
+  };
+};
 
 /**
  * 銘柄のマーケットメイカー。目安の価格は、締めより前に発表済みの決算（直近4四半期）から fairPrice で出す。
@@ -71,7 +77,7 @@ export async function makerAgent(company: Company): Promise<RunnerAgent> {
   const text = "Quote buy and sell limits around the fair price from disclosed results; lean against the inventory.";
   return {
     id,
-    ...(await ruleModel("market-maker", text)),
+    ...(await ruleModel("market-maker", text, { ...MAKER_PARAMS, target: ALLOTMENT.maker.target })),
     decide(input: DecisionInput) {
       const x = input.listed.find((l) => l.symbol === company.symbol);
       if (!x) return { orders: [], post: null, note: `${company.symbol} is not in the universe` };
@@ -88,7 +94,7 @@ export async function noiseAgent(seed: number): Promise<RunnerAgent> {
   const text = "Place small random market and limit orders around the previous price with a fixed seed.";
   return {
     id: NOISE_ID,
-    ...(await ruleModel("noise", text)),
+    ...(await ruleModel("noise", text, { ...NOISE_PARAMS, seed })),
     decide(input: DecisionInput) {
       const markets = input.listed.map((x) => ({ symbol: x.symbol, prevPrice: refPrice(x), band: priceBand(refPrice(x)) }));
       const holdings = Object.fromEntries(Object.entries(input.account.holdings).map(([s, h]) => [s, h.qty]));

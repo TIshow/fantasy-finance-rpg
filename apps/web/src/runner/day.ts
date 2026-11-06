@@ -26,6 +26,8 @@ export interface CloseInput {
 export interface ListedInput {
   symbol: string;
   listing: { seq: number; price: Deciyen; sharesOutstanding: number };
+  /** 値幅の基準の価格：判断の日より前で、価格のついた直近の板寄せ（日数で切らない）。まだなければ上場の記録。注文票の検査と同じ決め方 */
+  refPrice: { seq: number; price: Deciyen };
   /** 板寄せの結果（古い順。新しい方から inputDays 日分） */
   auctions: readonly { seq: number; date: string; price: Deciyen | null; volume: number }[];
   /** 決算の発表（記録の順。新しい方から4四半期分） */
@@ -171,11 +173,14 @@ class Day {
       .filter((x) => listed.has(x))
       .map((symbol) => {
         const listing = this.find("company.listed", (p) => p.symbol === symbol)!;
-        const auctions = this.log.events.filter((e) => e.type === "auction.cleared" && pl(e).symbol === symbol && (pl(e).date as string) < date).slice(-days);
+        const before = this.log.events.filter((e) => e.type === "auction.cleared" && pl(e).symbol === symbol && (pl(e).date as string) < date);
+        const auctions = before.slice(-days);
+        const ref = before.filter((e) => pl(e).price !== null).at(-1) ?? listing;
         const disclosures = this.log.events.filter((e) => e.type === "company.disclosed" && pl(e).symbol === symbol && e.recordedAt < cutoffOf(date)).slice(-4);
         return {
           symbol,
           listing: { seq: listing.seq, price: pl(listing).price as Deciyen, sharesOutstanding: pl(listing).sharesOutstanding as number },
+          refPrice: { seq: ref.seq, price: pl(ref).price as Deciyen },
           auctions: auctions.map((e) => ({ seq: e.seq, date: pl(e).date as string, price: pl(e).price as Deciyen | null, volume: pl(e).volume as number })),
           disclosures: disclosures.map((e) => {
             const q = pl(e);
@@ -283,7 +288,7 @@ class Day {
         });
         const applied = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id && inRange(pl(e).exDate as string) && (pl(e).announcedSeqs as number[]).some((s) => splits.some((x) => x.seq === s)));
         const listed = this.listedInputs(date);
-        const listedSeqs = listed.flatMap((x) => [x.listing.seq, ...x.auctions.map((a) => a.seq), ...x.disclosures.map((q) => q.seq)]);
+        const listedSeqs = listed.flatMap((x) => [x.listing.seq, x.refPrice.seq, ...x.auctions.map((a) => a.seq), ...x.disclosures.map((q) => q.seq)]);
         inputSeqs = [...new Set([...closes.map((e) => e.seq), ...splits.map((x) => x.seq), ...applied.map((e) => e.seq), basis.seq, ...listedSeqs])];
         const raw = closes.map((e) => ({ seq: e.seq, date: pl(e).date as string, prices: this.deps.values.get(pl(e).valuesHash as string)!.value as CloseInput["prices"] }));
         const input = deepFreeze(structuredClone({ agentId: id, tradingDate: date, at: this.deps.clock.now(), closes: adjustCloses(raw, splits), splits, account: this.ledger.account(id), listed }));
