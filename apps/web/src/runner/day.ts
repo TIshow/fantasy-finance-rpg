@@ -293,7 +293,8 @@ class Day {
    * 判断（出力）は、正規化した JSON をログの外に置き、outputHash で引き直せるようにする。run を書いた後に落ちたら、
    * 回し直しでは判断をやり直さず、記録した run の出力と入力から、欠けた投稿・注文票だけを補う。
    * 停止中のAIは、投稿を作らない（投稿の停止）・注文票は保管に渡して拒否（suspended）を残す（注文の停止）。
-   * 判断が例外を投げたAIは、失敗の run（ok: false）を残して次のAIへ進む（エラー文は残さない。EVENT_LOG §1）。
+   * 判断が例外を投げたAIは、失敗の run（ok: false、provider_error）を残して次のAIへ進む（エラー文は残さない。EVENT_LOG §1）。
+   * 出力が記録の形に直せないAI（NFC でない文字・U+0000・小数の株数など）も、失敗の run（invalid_output）を残して次へ進む。
    */
   async decide(date: string, prev: string): Promise<StageResult> {
     const stage = "decide";
@@ -329,10 +330,13 @@ class Day {
       }
       let decision: Decision;
       let inputSeqs: number[];
+      /** 記録の形（正規化した JSON）にした出力。記録した run から作り直すときは、その本文 */
+      let output: string;
       if (runs.length > 0) {
         const body = this.deps.values.body(pl(runs[0]!).outputHash as string);
         if (!body) throw new Error(`output of run ${runs[0]!.seq} is not available`);
-        decision = JSON.parse(body.value) as Decision;
+        output = body.value;
+        decision = JSON.parse(output) as Decision;
         inputSeqs = pl(runs[0]!).inputSeqs as number[];
       } else {
         // 口座の根拠：最後の引け後の処理（まだなければ登録）
@@ -352,11 +356,21 @@ class Day {
         inputSeqs = [...new Set([...closes.map((e) => e.seq), ...splits.map((x) => x.seq), ...applied.map((e) => e.seq), basis.seq, ...listedSeqs])];
         const raw = closes.map((e) => ({ seq: e.seq, date: pl(e).date as string, prices: this.deps.values.get(pl(e).valuesHash as string)!.value as CloseInput["prices"] }));
         const input = deepFreeze(structuredClone({ agentId: id, tradingDate: date, at: this.deps.clock.now(), closes: adjustCloses(raw, splits), splits, account: this.ledger.account(id), listed }));
+        let d: Decision;
         try {
-          const d = await agent.decide(input);
-          decision = { orders: d.orders, post: d.post ?? null, note: d.note ?? "" };
+          d = await agent.decide(input);
         } catch {
-          await this.run(agent, "order", date, inputSeqs, input.at, null);
+          await this.run(agent, "order", date, inputSeqs, input.at, null, "provider_error");
+          wrote = true;
+          continue;
+        }
+        try {
+          // 判断の記録を書く前に、出力を記録の形に直す（NFC でない文字・U+0000・小数などは、ここで断る）。
+          // 投稿の本文も出力の一部なので、ここを通れば、あとで本文を置くときにも断られない
+          decision = { orders: d.orders, post: d.post ?? null, note: d.note ?? "" };
+          output = canonicalize(decision);
+        } catch {
+          await this.run(agent, "order", date, inputSeqs, input.at, null, "invalid_output");
           wrote = true;
           continue;
         }
@@ -365,7 +379,7 @@ class Day {
         const recorded = runs.find((r) => pl(r).purpose === purpose);
         if (recorded) return recorded.seq;
         wrote = true;
-        return this.run(agent, purpose, date, inputSeqs, this.deps.clock.now(), canonicalize(decision));
+        return this.run(agent, purpose, date, inputSeqs, this.deps.clock.now(), output);
       };
       if (decision.post && !noPosts) {
         const postRun = await runSeq("post");
@@ -391,10 +405,10 @@ class Day {
   }
 
   /** agent.run を書く。output が null なら失敗の run。リクエストのハッシュは、AIに渡したものの識別（入力の seq と約定日）から作る */
-  private async run(agent: RunnerAgent, purpose: "post" | "order", tradingDate: string, inputSeqs: number[], startedAt: number, output: string | null): Promise<number> {
+  private async run(agent: RunnerAgent, purpose: "post" | "order", tradingDate: string, inputSeqs: number[], startedAt: number, output: string | null, errorCode: "provider_error" | "invalid_output" = "provider_error"): Promise<number> {
     const requestHash = await sha256Hex(new TextEncoder().encode(canonicalize({ model: agent.model, prompt: agent.prompt, purpose, tradingDate, inputSeqs })));
     const base = { agentId: agent.id, purpose, model: agent.model, prompt: agent.prompt, inputSeqs, requestHash, startedAt, finishedAt: this.deps.clock.now() };
-    const payload = output === null ? { ...base, ok: false, errorCode: "provider_error" } : { ...base, outputHash: await this.deps.values.putBody(output), ok: true };
+    const payload = output === null ? { ...base, ok: false, errorCode } : { ...base, outputHash: await this.deps.values.putBody(output), ok: true };
     return (await this.append("agent.run", "system", payload, inputSeqs)).seq;
   }
 

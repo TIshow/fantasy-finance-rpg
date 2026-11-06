@@ -138,7 +138,8 @@ export class PgEventStore implements EventStore {
   }
 
   commitSheet(agentId: string, sheet: SheetInput): Promise<CommitResult> {
-    if (hasNul([agentId, sheet])) return Promise.resolve({ ok: false, reason: `sheet ${NUL_REASON}` });
+    // U+0000 を含む注文票も、メモリの保管と同じく拒否の記録（order_sheet.rejected）を残す。記録の正規化が U+0000 を断るので、
+    // DB に U+0000 は届かない（受け取った中身は ordersUnreadable として残る。EVENT_LOG §3.2）
     return this.write((mem) => mem.commitSheet(agentId, sheet));
   }
 

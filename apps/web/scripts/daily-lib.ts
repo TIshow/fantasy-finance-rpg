@@ -13,11 +13,10 @@ import { INITIAL_CASH } from "../src/ledger/types";
 import { type RunnerAgent, type RunnerDeps, type StageResult, runDay } from "../src/runner/day";
 import { ruleAgents } from "../src/runner/rule-agents";
 import { discloseDue } from "../src/runner/world/disclosure";
-import type { RunnerValues } from "../src/runner/values";
 import { listCompanies } from "../src/runner/world/listing";
 import { liquidityAgents, setUpParticipants } from "../src/runner/world/participants";
 import { PgEventStore, readAllEvents } from "../src/store/pg-store";
-import { PgValueStore, type ValuesPort } from "../src/store/pg-values";
+import { PgValueStore } from "../src/store/pg-values";
 import type { SqlDb } from "../src/store/sql";
 import type { EventStore } from "../src/contracts";
 
@@ -120,8 +119,7 @@ async function runLocked(date: string, o: DailyOptions): Promise<StageResult[]> 
   const deps: RunnerDeps = {
     store,
     market: o.market ?? new IngestedMarketData(o.clock),
-    // 仮：runner が ValuesPort を受け取るようになるまで（#113 のセッションが直す。lead の指示）、型を合わせる
-    values: values as ValuesPort as unknown as RunnerValues,
+    values,
     holidayTables,
     agents,
     clock: o.clock,
