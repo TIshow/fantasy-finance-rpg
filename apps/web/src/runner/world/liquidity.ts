@@ -1,11 +1,12 @@
 // 値をつきやすくする売買役の注文を決める関数（#113 PR-3 のうち、記録に関わらない部分。MARKET_DESIGN §4）。
 // マーケットメイカー（銘柄ごとに1つ。目安の価格のまわりに、いつも買いと売りの指値を出す）と、ばらばらに売買する参加者
 // （まとめて1つ。小さい数量の成行・指値を、固定シードの乱数で出す）。どちらも決まった入力から決まった注文を返す純関数で、
-// 記録・時計・外部通信には触れない。注文の形は仮（core の #110 PR-2 で指値の注文票の形が決まったら合わせる）。
+// 記録・時計・外部通信には触れない。成行は limit: null で返し、注文票の形には participants.ts で直す。
+import { TICK } from "../../ledger/auction";
 import { LOT, type Deciyen, type Side } from "../../ledger/types";
 import { mulberry32, subSeed } from "./random";
 
-/** 仮の注文の形：limit が null なら成行（値段を指定しない注文） */
+/** 注文の形：limit が null なら成行（値段を指定しない注文） */
 export interface LiquidityOrder {
   symbol: string;
   side: Side;
@@ -19,8 +20,6 @@ export interface PriceBand {
   upper: Deciyen;
 }
 
-/** 呼値（価格の刻み）：1円（core の板寄せの TICK と同じ。#110 がマージされたら、そちらを使う） */
-const TICK: Deciyen = 10;
 /** 割合は基点（1万分の1）の整数で持つ。価格の計算を整数で行い、丸めの誤差で刻みがずれないように */
 const BP = 10_000;
 const clamp = (p: Deciyen, band: PriceBand) => Math.min(band.upper, Math.max(band.lower, p));
@@ -49,7 +48,7 @@ export interface MakerParams {
   maxSkewBp: number;
 }
 
-export const MAKER_PARAMS: MakerParams = { spreadBp: 100, levels: 3, qtyPerLevel: 100, skewPerLotBp: 20, maxSkewBp: 300 };
+export const MAKER_PARAMS: MakerParams = { spreadBp: 100, levels: 3, qtyPerLevel: 300, skewPerLotBp: 20, maxSkewBp: 300 };
 
 export interface MakerInput {
   symbol: string;

@@ -22,6 +22,16 @@ export interface CloseInput {
   prices: Readonly<Record<string, Deciyen | null>>;
 }
 
+/** 上場した銘柄の、判断の時点までの記録（seq つき）。上場の価格・判断の日より前の板寄せの結果・締めより前の決算の発表 */
+export interface ListedInput {
+  symbol: string;
+  listing: { seq: number; price: Deciyen; sharesOutstanding: number };
+  /** 板寄せの結果（古い順。新しい方から inputDays 日分） */
+  auctions: readonly { seq: number; date: string; price: Deciyen | null; volume: number }[];
+  /** 決算の発表（記録の順。新しい方から4四半期分） */
+  disclosures: readonly { seq: number; period: string; revenue: number; netIncome: number; eps: Deciyen; dividendPerShare: Deciyen }[];
+}
+
 export interface DecisionInput {
   agentId: string;
   tradingDate: string;
@@ -32,6 +42,8 @@ export interface DecisionInput {
   splits: readonly SplitInput[];
   /** 口座。根拠のイベント（そのAIの最後の引け後の処理）の seq を inputSeqs に入れる */
   account: Account;
+  /** 取引対象のうち上場した銘柄（銘柄コードの順）。記録の seq を inputSeqs に入れる */
+  listed: readonly ListedInput[];
 }
 
 export interface Decision {
@@ -148,6 +160,31 @@ class Day {
     return new Map(this.log.events.filter((e) => e.type === "company.listed").map((e) => [pl(e).symbol as string, e.recordedAt]));
   }
 
+  /**
+   * 判断の入力にする、取引対象のうち上場した銘柄の記録。板寄せは date より前の日の分、決算の発表は date の締めより前に
+   * 記録した分だけ（まだ発表していない業績で判断しないように）
+   */
+  private listedInputs(date: string): ListedInput[] {
+    const listed = this.listings();
+    const days = this.deps.inputDays ?? 20;
+    return this.universe()
+      .filter((x) => listed.has(x))
+      .map((symbol) => {
+        const listing = this.find("company.listed", (p) => p.symbol === symbol)!;
+        const auctions = this.log.events.filter((e) => e.type === "auction.cleared" && pl(e).symbol === symbol && (pl(e).date as string) < date).slice(-days);
+        const disclosures = this.log.events.filter((e) => e.type === "company.disclosed" && pl(e).symbol === symbol && e.recordedAt < cutoffOf(date)).slice(-4);
+        return {
+          symbol,
+          listing: { seq: listing.seq, price: pl(listing).price as Deciyen, sharesOutstanding: pl(listing).sharesOutstanding as number },
+          auctions: auctions.map((e) => ({ seq: e.seq, date: pl(e).date as string, price: pl(e).price as Deciyen | null, volume: pl(e).volume as number })),
+          disclosures: disclosures.map((e) => {
+            const q = pl(e);
+            return { seq: e.seq, period: q.period as string, revenue: q.revenue as number, netIncome: q.netIncome as number, eps: q.eps as Deciyen, dividendPerShare: q.dividendPerShare as Deciyen };
+          }),
+        };
+      });
+  }
+
   /** ログの停止・再開から、いまの停止を求める（EventLog と同じ決め方。"*" は全体） */
   private suspended(agentId: string, scope: "posts" | "orders"): boolean {
     const on = new Map<string, Set<string>>();
@@ -245,9 +282,11 @@ class Day {
           return { seq: e.seq, symbol: pl(e).symbol as string, exDate: pl(e).exDate as string, from: v.from, to: v.to };
         });
         const applied = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id && inRange(pl(e).exDate as string) && (pl(e).announcedSeqs as number[]).some((s) => splits.some((x) => x.seq === s)));
-        inputSeqs = [...new Set([...closes.map((e) => e.seq), ...splits.map((x) => x.seq), ...applied.map((e) => e.seq), basis.seq])];
+        const listed = this.listedInputs(date);
+        const listedSeqs = listed.flatMap((x) => [x.listing.seq, ...x.auctions.map((a) => a.seq), ...x.disclosures.map((q) => q.seq)]);
+        inputSeqs = [...new Set([...closes.map((e) => e.seq), ...splits.map((x) => x.seq), ...applied.map((e) => e.seq), basis.seq, ...listedSeqs])];
         const raw = closes.map((e) => ({ seq: e.seq, date: pl(e).date as string, prices: this.deps.values.get(pl(e).valuesHash as string)!.value as CloseInput["prices"] }));
-        const input = deepFreeze(structuredClone({ agentId: id, tradingDate: date, at: this.deps.clock.now(), closes: adjustCloses(raw, splits), splits, account: this.ledger.account(id) }));
+        const input = deepFreeze(structuredClone({ agentId: id, tradingDate: date, at: this.deps.clock.now(), closes: adjustCloses(raw, splits), splits, account: this.ledger.account(id), listed }));
         try {
           const d = await agent.decide(input);
           decision = { orders: d.orders, post: d.post ?? null, note: d.note ?? "" };
