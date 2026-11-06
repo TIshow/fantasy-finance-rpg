@@ -258,6 +258,21 @@ describe.skipIf(!testUrl)("PgEventStore（pg ドライバ・TEST_DATABASE_URL）
     }
   });
 
+  it("セッションの鍵は、別の接続からは取れず、手放すと取れる（毎日の実行を1つだけ動かす）", async () => {
+    const [d1, d2] = [pgDb({ connectionString: testUrl!, schema, max: 2 }), pgDb({ connectionString: testUrl!, schema, max: 2 })];
+    try {
+      const unlock = await d1.lock(25_000_099);
+      expect(unlock).not.toBeNull();
+      expect(await d2.lock(25_000_099)).toBeNull();
+      await unlock!();
+      const again = await d2.lock(25_000_099);
+      expect(again).not.toBeNull();
+      await again!();
+    } finally {
+      await Promise.all([d1.close(), d2.close()]);
+    }
+  });
+
   it("ログの外の値と本文を pg ドライバで置いて読み戻せる。更新・削除は断られる", async () => {
     const d = pgDb({ connectionString: testUrl!, schema, max: 2 });
     try {

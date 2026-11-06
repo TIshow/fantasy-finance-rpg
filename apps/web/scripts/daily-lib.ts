@@ -8,7 +8,7 @@ import { replay } from "../src/events/replay";
 import type { LogEvent } from "../src/events/types";
 import { holidayTable as bundledHolidays, holidaysFor, type HolidayTable } from "../src/holidays";
 import { IngestedMarketData } from "../src/ingest/market-data";
-import { cutoffOf, isBusinessDay, nextBusinessDay } from "../src/ledger/ledger";
+import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay } from "../src/ledger/ledger";
 import { INITIAL_CASH } from "../src/ledger/types";
 import { type RunnerAgent, type RunnerDeps, type StageResult, runDay } from "../src/runner/day";
 import { ruleAgents } from "../src/runner/rule-agents";
@@ -22,6 +22,8 @@ import type { EventStore } from "../src/contracts";
 
 /** 架空の世界の乱数の種。変えると、上場の価格とばらばらの参加者の注文が変わるので、動かし始めたら変えない */
 export const WORLD_SEED = 20261106;
+/** 毎日の実行を1つだけ動かす鍵の番号（ほかの鍵は pg-store.ts の 25_000_001） */
+export const RUN_LOCK_KEY = 25_000_002;
 
 const JST = 9 * 3_600_000;
 export const jstDate = (ms: number) => new Date(ms + JST).toISOString().slice(0, 10);
@@ -89,8 +91,24 @@ export async function productionSetup({ store, clock, seed, holidayTable }: Prep
   return [...investors, ...(await liquidityAgents(seed))];
 }
 
-/** date（取引日）の分を、済んでいない段から進める。段ごとの結果を返す。DB・保管の異常は例外 */
+/**
+ * date（取引日）の分を、済んでいない段から進める。段ごとの結果を返す。DB・保管の異常は例外。
+ * 処理の全体を通して DB の鍵を持ち、同時に2つ動かない（動いていれば例外）。準備や判断は、読んでから書く形なので、
+ * 2つ同時に動くと同じ記録が二重に書かれうる。
+ * 前提：市場は架空の市場だけ（外部の市場データの口は空）。取引対象に外部の銘柄が残ると、その銘柄の取り込みで止まる
+ */
 export async function runDaily(date: string, o: DailyOptions): Promise<StageResult[]> {
+  if (!isValidDate(date)) throw new RangeError("date must be a valid YYYY-MM-DD");
+  const unlock = await o.db.lock(RUN_LOCK_KEY);
+  if (!unlock) throw new Error("another daily run is in progress");
+  try {
+    return await runLocked(date, o);
+  } finally {
+    await unlock();
+  }
+}
+
+async function runLocked(date: string, o: DailyOptions): Promise<StageResult[]> {
   const holidayTable = o.holidayTable ?? bundledHolidays;
   const holidayTables = new Map([[holidayTable.contentSha256, holidayTable]]);
   const values = await PgValueStore.open(o.db);
@@ -108,6 +126,9 @@ export async function runDaily(date: string, o: DailyOptions): Promise<StageResu
   };
   return runDay(date, deps);
 }
+
+/** 判断の段が締めに間に合わなかった（全員の判断がその日はなくなる）。実行を失敗として終わらせる印 */
+export const missedCutoff = (results: readonly StageResult[]) => results.some((r) => r.stage === "decide" && r.status === "skipped" && (r.detail ?? "").startsWith("after the cutoff"));
 
 export interface VerifyReport {
   events: number;

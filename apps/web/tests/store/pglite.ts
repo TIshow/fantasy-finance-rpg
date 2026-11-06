@@ -16,6 +16,11 @@ export async function openPglite(): Promise<{ pg: PGlite; db: SqlDb }> {
           exec: async (text) => void (await tx.exec(text)),
         }),
       ),
+    // 接続が1つだけなので、競合は起こらない（競合の試験は pg ドライバ側で行う）
+    lock: async (key) => {
+      const { rows } = await pg.query<{ ok: boolean }>("SELECT pg_try_advisory_lock($1) AS ok", [key]);
+      return rows[0]!.ok ? async () => void (await pg.query("SELECT pg_advisory_unlock($1)", [key])) : null;
+    },
     close: () => pg.close(),
   };
   return { pg, db };

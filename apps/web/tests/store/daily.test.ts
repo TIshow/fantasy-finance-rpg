@@ -1,5 +1,6 @@
 // 毎日の実行（scripts/daily-lib.ts）の試験：PGlite の保管に対して、同じ日を何度回しても二重にならないこと、
 // 途中で落ちて回し直しても進むこと、記録だけから台帳を作り直せること、本番の準備が二重に書かないことを確かめる。
+import { execFileSync } from "node:child_process";
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { holidayTable } from "../../src/holidays";
@@ -9,7 +10,7 @@ import { scheduleOf } from "../../src/runner/day";
 import { ruleAgents } from "../../src/runner/rule-agents";
 import { readAllEvents } from "../../src/store/pg-store";
 import type { SqlDb } from "../../src/store/sql";
-import { type PrepareContext, firstOpenDay, productionSetup, runDaily, verifyDatabase } from "../../scripts/daily-lib";
+import { type PrepareContext, firstOpenDay, jstDate, missedCutoff, productionSetup, runDaily, verifyDatabase } from "../../scripts/daily-lib";
 import { FakeClock, jst } from "../contracts/fakes";
 import { FIXTURE_HOLIDAYS } from "../fixtures/golden";
 import { mulberry32 } from "../fixtures/prng";
@@ -73,6 +74,11 @@ function world() {
   };
   return { clock, market, waitUntil, prepare };
 }
+/** 指定した種類のイベントを DB に足す1回目だけ失敗する DB（書き込みの途中で落ちた場合） */
+function crashingOn(type: string): SqlDb {
+  let armed = true;
+  return { ...db, transaction: (fn) => db.transaction((tx) => fn({ ...tx, query: (t, p) => (armed && t.startsWith("INSERT INTO events") && p?.[2] === type ? ((armed = false), Promise.reject(new Error("crash"))) : tx.query(t, p)) })) };
+}
 const opts = (w: ReturnType<typeof world>) => ({ db, clock: w.clock, market: w.market, waitUntil: w.waitUntil, prepare: w.prepare, holidayTable: FIXTURE_HOLIDAYS });
 
 describe("runDaily", () => {
@@ -112,6 +118,34 @@ describe("runDaily", () => {
     await verifyDatabase(db, FIXTURE_HOLIDAYS);
   });
 
+  it("注文票を確定する直前（判断の記録は書いたあと）に落ちても、回し直すと続きから進み、同じ並びの記録になる", async () => {
+    await fresh();
+    const a = world();
+    for (const d of DAYS) await runDaily(d, opts(a));
+    const shape = async () => (await readAllEvents(db)).map((e) => e.type);
+    const expected = await shape();
+
+    await fresh();
+    const b = world();
+    await runDaily(DAYS[0]!, opts(b));
+    await expect(runDaily(DAYS[1]!, { ...opts(b), db: crashingOn("order_sheet.committed") })).rejects.toThrow("crash");
+    for (const d of DAYS.slice(1)) await runDaily(d, opts(b));
+    expect(await shape()).toEqual(expected);
+    await verifyDatabase(db, FIXTURE_HOLIDAYS);
+  });
+
+  it("実行の全体で鍵を持ち、取れなければ書かずに例外にする。終わったら（失敗でも）手放す", async () => {
+    await fresh();
+    const w = world();
+    const calls: string[] = [];
+    const lockedBy = (free: boolean): SqlDb => ({ ...db, lock: async (key) => (calls.push(`lock ${key}`), free ? async () => void calls.push("unlock") : null) });
+    await expect(runDaily(DAYS[0]!, { ...opts(w), db: lockedBy(false) })).rejects.toThrow("another daily run is in progress");
+    expect(await count()).toEqual({ n: 0 });
+    await runDaily(DAYS[0]!, { ...opts(w), db: lockedBy(true) });
+    expect(calls).toEqual(["lock 25000002", "lock 25000002", "unlock"]);
+    await expect(runDaily("2026-02-31", opts(w))).rejects.toThrow(RangeError);
+  });
+
   it("DB の行が書き換えられていれば、記録だけからの照合が止まる", async () => {
     await fresh();
     const w = world();
@@ -142,6 +176,40 @@ describe("本番の準備（productionSetup）", () => {
     expect((await readAllEvents(db)).length).toBe(n);
   });
 
+  it("登録のあと、配分の前に落ちても、回し直すと続きから進み、二重に配らない", async () => {
+    const run = (d: SqlDb, c: FakeClock) => runDaily("2026-11-09", { db: d, clock: c, prepare: productionSetup, holidayTable });
+    const counts = async () => {
+      const m = new Map<string, number>();
+      for (const e of await readAllEvents(db)) m.set(e.type, (m.get(e.type) ?? 0) + 1);
+      return [...m].sort();
+    };
+    await fresh();
+    await run(db, new FakeClock(jst("2026-11-09", 7)));
+    const expected = await counts();
+
+    await fresh();
+    const clock = new FakeClock(jst("2026-11-09", 7));
+    await expect(run(crashingOn("shares.allotted"), clock)).rejects.toThrow("crash");
+    await run(db, clock);
+    expect(await counts()).toEqual(expected);
+    await verifyDatabase(db, holidayTable);
+  });
+
+  it("日本時間の日付は、UTC では前の日になる朝7時でも合う", () => {
+    expect(jstDate(jst("2026-11-09", 7))).toBe("2026-11-09");
+    expect(jstDate(jst("2026-11-09", 0))).toBe("2026-11-09");
+    expect(jstDate(jst("2026-11-09", 23, 59))).toBe("2026-11-09");
+    expect(firstOpenDay(jst("2026-11-09", 8, 29), holidayTable)).toBe("2026-11-09");
+    expect(firstOpenDay(jst("2026-11-09", 8, 30), holidayTable)).toBe("2026-11-10"); // 締めちょうどは間に合わない
+  });
+
+  it("判断が締めに間に合わなかった実行は、失敗として見分けられる", () => {
+    const ok = [{ stage: "decide", status: "written" }, { stage: "day", status: "skipped", detail: "not a business day" }] as const;
+    expect(missedCutoff(ok)).toBe(false);
+    expect(missedCutoff([{ stage: "decide", status: "skipped", detail: "after the cutoff: ai-ma5,noise" }])).toBe(true);
+    expect(missedCutoff([{ stage: "decide", status: "skipped", detail: "after the open" }])).toBe(false);
+  });
+
   it("新しい参加者の開始日は、いまから締めがまだ来ていない最初の営業日（締めを過ぎていれば次の営業日、休日はとばす）", () => {
     expect(firstOpenDay(jst("2026-11-09", 7), holidayTable)).toBe("2026-11-09");
     expect(firstOpenDay(jst("2026-11-09", 9), holidayTable)).toBe("2026-11-10");
@@ -149,4 +217,31 @@ describe("本番の準備（productionSetup）", () => {
     expect(firstOpenDay(jst("2026-11-02", 7), holidayTable)).toBe("2026-11-02");
     expect(firstOpenDay(jst("2026-11-02", 20), holidayTable)).toBe("2026-11-04"); // 11/3 は文化の日
   });
+});
+
+describe("コマンド（scripts/daily.ts）の入口", () => {
+  const run = (args: string[], env: Record<string, string> = {}) => {
+    try {
+      const out = execFileSync("node", ["--experimental-transform-types", "--disable-warning=ExperimentalWarning", "--import", "./scripts/ts-loader.mjs", "scripts/daily.ts", ...args], { env: { PATH: process.env.PATH ?? "", ...env } as unknown as NodeJS.ProcessEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      return { code: 0, out, err: "" };
+    } catch (e) {
+      const x = e as { status: number; stdout: string; stderr: string };
+      return { code: x.status, out: x.stdout, err: x.stderr };
+    }
+  };
+
+  it("使い方の誤りは終了コード2、接続の情報がなければ1。接続の文字列は出力しない", () => {
+    expect(run([]).code).toBe(2);
+    expect(run(["run", "--date", "2026-02-31"], { DATABASE_URL: "postgres://u:secret@127.0.0.1:1/x" })).toMatchObject({ code: 2, err: expect.stringContaining("--date") });
+    expect(run(["run", "--nope"]).code).toBe(2);
+    expect(run(["run", "--seed", "1"]).code).toBe(2); // 乱数の種は変えられない
+    expect(run(["verify"])).toMatchObject({ code: 1, err: "daily: DATABASE_URL is not set\n" });
+    const bad = run(["verify"], { DATABASE_URL: "postgres://u:secret@127.0.0.1:1/x" });
+    expect(bad.code).toBe(1);
+    expect(bad.err + bad.out).not.toContain("secret");
+  }, 30_000);
+
+  it("ALLOW_OWNER_ROLE は GitHub Actions では効かず、失敗にする", () => {
+    expect(run(["verify"], { ALLOW_OWNER_ROLE: "1", GITHUB_ACTIONS: "true", DATABASE_URL: "postgres://u:p@127.0.0.1:1/x" })).toMatchObject({ code: 1, err: expect.stringContaining("not allowed in GitHub Actions") });
+  }, 30_000);
 });
