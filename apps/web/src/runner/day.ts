@@ -118,6 +118,20 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
   return out;
 }
 
+/** AIが返した判断の形を確かめ、記録する形にする（post と note を省いたものは、null と空の文字列）。形が違えば例外 */
+function decisionOf(d: unknown): Decision {
+  if (typeof d !== "object" || d === null) throw new TypeError("decision must be an object");
+  const { orders, post, note } = d as Record<string, unknown>;
+  if (!Array.isArray(orders)) throw new TypeError("orders must be an array");
+  if (note !== undefined && typeof note !== "string") throw new TypeError("note must be a string");
+  if (post !== undefined && post !== null) {
+    const { board, text } = (typeof post === "object" ? post : {}) as Record<string, unknown>;
+    if (typeof board !== "string" || typeof text !== "string") throw new TypeError("post must have a board and a text");
+    return { orders: orders as Order[], post: { board, text }, note: note ?? "" };
+  }
+  return { orders: orders as Order[], post: null, note: note ?? "" };
+}
+
 type Payload = Record<string, unknown>;
 const pl = (e: LogEvent) => e.payload as Payload;
 const deepFreeze = <T>(v: T): T => {
@@ -365,10 +379,13 @@ class Day {
           continue;
         }
         try {
-          // 判断の記録を書く前に、出力を記録の形に直す（NFC でない文字・U+0000・小数などは、ここで断る）。
-          // 投稿の本文も出力の一部なので、ここを通れば、あとで本文を置くときにも断られない
-          decision = { orders: d.orders, post: d.post ?? null, note: d.note ?? "" };
-          output = canonicalize(decision);
+          // 判断の記録を書く前に、出力の形（orders が配列・post が null か掲示板と本文が文字列・note が文字列）を確かめ、
+          // 記録の形（正規化した JSON）に直す。NFC でない文字・U+0000・小数などは、ここで断る。注文の各要素の中身は、
+          // 注文票の確定の検査が拒否の記録にする（形が違っても例外にしない）。投稿の掲示板と本文も、ここを通れば、
+          // あとで本文を置くとき・投稿を記録するときに断られない。
+          // 確定・投稿に使うのは、記録した出力を読み直したもの（回し直しのときと同じものにする）
+          output = canonicalize(decisionOf(d));
+          decision = JSON.parse(output) as Decision;
         } catch {
           await this.run(agent, "order", date, inputSeqs, input.at, null, "invalid_output");
           wrote = true;

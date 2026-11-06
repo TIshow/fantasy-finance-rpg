@@ -37,6 +37,11 @@ const BAD_OUTPUTS: [string, Decision][] = [
   ["投稿の本文に U+0000", { orders: [], post: { board: COMPANIES[0]!.symbol, text: "a\u0000b" }, note: "" }],
   ["説明に U+0000", { orders: [], post: null, note: "a\u0000b" }],
   ["注文の株数が小数", { orders: [{ symbol: COMPANIES[0]!.symbol, side: "buy", qty: 150.5 }], post: null, note: "" }],
+  // 形が違う出力（LLM は型を守らないことがある）
+  ["投稿の本文が文字列でない", { orders: [], post: { board: COMPANIES[0]!.symbol, text: 123 }, note: "" } as unknown as Decision],
+  ["投稿に掲示板がない", { orders: [], post: { text: "x" }, note: "" } as unknown as Decision],
+  ["注文が配列でない", { orders: { symbol: COMPANIES[0]!.symbol }, post: null, note: "" } as unknown as Decision],
+  ["説明が文字列でない", { orders: [], post: null, note: 1 } as unknown as Decision],
 ];
 
 /** 6社の上場・売買役の登録・AI 1体（先に判断する）をメモリの保管に用意し、1日回す */
@@ -107,6 +112,9 @@ describe("判断の出力が記録の形に直せないとき（Postgres の保�
     };
     await runDaily(DAY, { db, clock, waitUntil, holidayTable, prepare });
     const events = await readAllEvents(db);
+    // もう一度回しても、何も書かない
+    await runDaily(DAY, { db, clock, waitUntil, holidayTable, prepare });
+    expect(await readAllEvents(db)).toHaveLength(events.length);
     expect(badRuns(events)).toEqual([{ ok: false, errorCode: "invalid_output" }]);
     // AI投資家3体・マーケットメイカー6・ばらばらの参加者1
     expect(events.filter((e) => e.type === "order_sheet.committed" && p(e).agentId !== BAD && p(e).tradingDate === DAY)).toHaveLength(10);

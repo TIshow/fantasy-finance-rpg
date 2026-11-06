@@ -10,7 +10,7 @@ import type { ValueStore } from "../events/replay";
 import { SCHEMA, type LogEvent } from "../events/types";
 import type { HolidayTable } from "../holidays/table";
 import { ADOPT, InMemoryEventStore, READ_MAX } from "./memory-store";
-import { hasNul, type SqlDb, type SqlRunner } from "./sql";
+import type { SqlDb, SqlRunner } from "./sql";
 
 /** advisory lock の番号。この表への追記だけが使う */
 const LOCK_KEY = 25_000_001;
@@ -94,7 +94,6 @@ export async function checkAppendOnlyRole(db: SqlRunner): Promise<string[]> {
   return [...new Set(problems)];
 }
 
-const NUL_REASON = "contains U+0000, which the database cannot store";
 
 export class PgEventStore implements EventStore {
   private mem: InMemoryEventStore | null = null;
@@ -133,13 +132,13 @@ export class PgEventStore implements EventStore {
   }
 
   append(draft: DraftInput): Promise<AppendResult> {
-    if (hasNul(draft)) return Promise.resolve({ ok: false, reason: `draft ${NUL_REASON}` });
+    // U+0000 は、メモリの保管と同じく記録の正規化が断る（理由もメモリの保管と同じ）。DB には届かない
     return this.write((mem) => mem.append(draft));
   }
 
   commitSheet(agentId: string, sheet: SheetInput): Promise<CommitResult> {
     // U+0000 を含む注文票も、メモリの保管と同じく拒否の記録（order_sheet.rejected）を残す。記録の正規化が U+0000 を断るので、
-    // DB に U+0000 は届かない（受け取った中身は ordersUnreadable として残る。EVENT_LOG §3.2）
+    // DB に U+0000 は届かない（中身を読めないという印だけが残る。EVENT_LOG §3.2）
     return this.write((mem) => mem.commitSheet(agentId, sheet));
   }
 
