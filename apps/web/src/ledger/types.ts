@@ -6,6 +6,19 @@ export type Deciyen = number;
 
 export const LOT = 100;
 export const INITIAL_CASH: Deciyen = 10_000_000 * 10;
+/** 参加者の最初の現金の上限（100億円）。AI投資家は INITIAL_CASH ちょうど、マーケットメイカーなどはこの上限まで（#110） */
+export const MAX_INITIAL_CASH: Deciyen = 10_000_000_000 * 10;
+
+/** 参加者の種類（#110）。AI投資家、マーケットメイカー（値をつけ続ける参加者）、ばらばらに売買する参加者 */
+export const PARTICIPANT_KINDS = ["investor", "market_maker", "noise"] as const;
+export type ParticipantKind = (typeof PARTICIPANT_KINDS)[number];
+
+/** 登録の種類と最初の現金を確かめる。種類を書かない登録は AI投資家。AI投資家は INITIAL_CASH ちょうど、ほかは上限まで */
+export function registrationProblem(kind: unknown, cash: unknown): string | null {
+  if (kind !== undefined && !PARTICIPANT_KINDS.includes(kind as ParticipantKind)) return "kind must be investor, market_maker or noise";
+  if ((kind ?? "investor") === "investor") return cash === INITIAL_CASH ? null : "initialCash of an investor must be INITIAL_CASH";
+  return Number.isSafeInteger(cash) && (cash as number) > 0 && (cash as number) <= MAX_INITIAL_CASH ? null : "initialCash must be a positive amount up to MAX_INITIAL_CASH";
+}
 
 export type Side = "buy" | "sell";
 

@@ -13,7 +13,7 @@ function corrupt(e: LogEvent): LogEvent | null {
   const bad = (patch: Record<string, unknown>) => ({ ...e, payload: { ...p, ...patch } });
   switch (e.type) {
     case "agent.registered":
-      return bad({ initialCash: (p.initialCash as number) + 1 });
+      return bad({ initialCash: 0 });
     case "prices.open":
     case "prices.close":
     case "corporate_action.announced":

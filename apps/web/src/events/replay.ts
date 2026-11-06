@@ -4,7 +4,7 @@
 import { applyCorporateActions, type Dividend, type Split } from "../ledger/corporate";
 import { priceBand, runAuction, type AuctionOrder } from "../ledger/auction";
 import { executeSheet, newAccount, reserveBuys, totalValue, type AuctionedFill } from "../ledger/ledger";
-import { INITIAL_CASH, type Account, type Deciyen, type Fill, type Order } from "../ledger/types";
+import { registrationProblem, type Account, type ParticipantKind, type Deciyen, type Fill, type Order } from "../ledger/types";
 import { EventLog, type AppendContext } from "./append";
 import { canonicalize } from "./canonical";
 import { accountHash, bodyHash } from "./hash";
@@ -45,8 +45,10 @@ export interface Position {
   symbol: string;
   qty: number;
   price: Deciyen;
-  /** 評価に使った終値の prices.close の seq（直近の終値を使えば、評価日より前の日） */
-  closeSeq: number;
+  /** 評価に使った終値の prices.close の seq（直近の終値を使えば、評価日より前の日）。上場した銘柄にはない */
+  closeSeq?: number;
+  /** 上場した銘柄の評価に使った価格の記録（auction.cleared か company.listed）の seq。価格がつかない日は前の日の価格 */
+  priceSeq?: number;
 }
 
 export class Ledger {
@@ -62,6 +64,8 @@ export class Ledger {
   private readonly listed = new Map<string, ListedPrice[]>();
   /** 板寄せの結果（auction.cleared の seq ごと） */
   private readonly cleared = new Map<number, Cleared>();
+  /** 参加者の種類（登録に書かなければ AI投資家） */
+  private readonly kinds = new Map<string, ParticipantKind>();
   /** 再計算に一度失敗したら、それ以降は受け付けない（途中から進めると口座がずれるため） */
   private failed: string | null = null;
 
@@ -73,6 +77,14 @@ export class Ledger {
     const a = this.accounts.get(agentId);
     if (!a) throw new Error(`unknown agent ${agentId}`);
     return { cash: a.cash, holdings: Object.fromEntries(Object.entries(a.holdings).map(([k, h]) => [k, { ...h }])) };
+  }
+
+  /** 参加者の種類。順位表には AI投資家（investor）だけを出す */
+  kindOf(agentId: string): ParticipantKind {
+    if (this.failed) throw new Error(`ledger stopped at ${this.failed}`);
+    const k = this.kinds.get(agentId);
+    if (!k) throw new Error(`unknown agent ${agentId}`);
+    return k;
   }
 
   /**
@@ -149,9 +161,12 @@ export class Ledger {
 
   /** その日より前の、上場した銘柄の直近の価格 */
   private priceBefore(symbol: string, date: string): ListedPrice | undefined {
-    let best: ListedPrice | undefined;
-    for (const x of this.listed.get(symbol) ?? []) if (x.date < date && (!best || x.date >= best.date)) best = x;
-    return best;
+    return (this.listed.get(symbol) ?? []).filter((x) => x.date < date).at(-1);
+  }
+
+  /** その日までの（その日を含む）、上場した銘柄の直近の価格 */
+  private priceOnOrBefore(symbol: string, date: string): ListedPrice | undefined {
+    return (this.listed.get(symbol) ?? []).filter((x) => x.date <= date).at(-1);
   }
 
   /** 分割・配当の反映の中身。公表は §3.3 の決め方（権利落ち日が exDate、seq の昇順）で渡す */
@@ -188,6 +203,13 @@ export class Ledger {
     const today = this.closesByDate.get(date);
     const prices: Record<string, Deciyen> = {};
     for (const symbol of Object.keys(account.holdings).sort()) {
+      // 上場した銘柄は、その日までの直近の板寄せの価格（まだなければ上場の価格）で評価する（#110）
+      const listed = this.priceOnOrBefore(symbol, date);
+      if (listed) {
+        prices[symbol] = listed.price;
+        positions.push({ symbol, qty: account.holdings[symbol]!.qty, price: listed.price, priceSeq: listed.seq });
+        continue;
+      }
       const c = this.closeOn(symbol, date);
       if (!c) throw new Error(`no close price for ${symbol} up to ${date}`);
       // その日の終値の値には、保有銘柄の項目が（値がなくても null で）あること（§3.1）
@@ -241,9 +263,23 @@ export class Ledger {
     const at = `seq ${e.seq} (${e.type})`;
     const none = () => {};
     switch (e.type) {
-      case "agent.registered":
-        if (p.initialCash !== INITIAL_CASH) throw new Error(`${at}: initialCash must be INITIAL_CASH`);
-        return () => this.accounts.set(p.agentId as string, newAccount());
+      case "agent.registered": {
+        const why = registrationProblem(p.kind, p.initialCash);
+        if (why) throw new Error(`${at}: ${why}`);
+        return () => {
+          this.accounts.set(p.agentId as string, newAccount(p.initialCash as number));
+          this.kinds.set(p.agentId as string, (p.kind as ParticipantKind | undefined) ?? "investor");
+        };
+      }
+      case "shares.allotted": {
+        // 最初の配分。取得原価は上場の価格 × 株数（現金は動かさない）
+        const listing = (this.listed.get(p.symbol as string) ?? [])[0];
+        if (!listing) throw new Error(`${at}: ${String(p.symbol)} is not listed`);
+        const a = this.account(p.agentId as string);
+        const h = a.holdings[p.symbol as string] ?? { qty: 0, cost: 0 };
+        a.holdings[p.symbol as string] = { qty: h.qty + (p.qty as number), cost: h.cost + listing.price * (p.qty as number) };
+        return () => this.accounts.set(p.agentId as string, a);
+      }
       case "prices.open":
         // 値はいま確かめる（約定まで待つと、その日の約定が全員止まる）
         await this.valuesOf(e.seq, "prices.open", e);

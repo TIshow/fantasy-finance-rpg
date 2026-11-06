@@ -5,8 +5,8 @@ import { INITIAL_CASH, LOT, type Account, type Deciyen, type Fill, type FillReas
 
 export { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusinessDay, tradingDateFor } from "./calendar";
 
-export function newAccount(): Account {
-  return { cash: INITIAL_CASH, holdings: {} };
+export function newAccount(initialCash: Deciyen = INITIAL_CASH): Account {
+  return { cash: initialCash, holdings: {} };
 }
 
 export interface CommitContext {
