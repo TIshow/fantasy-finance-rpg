@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { LogEvent } from "../../src/events/types";
-import { readBody } from "../../src/view/body";
+import { intentOf, readText, stanceOf } from "../../src/view/body";
 import { buildBoard, filterPosts } from "../../src/view/board";
 import { buildView } from "../../src/view/build";
 import { buildGoldenLog } from "../fixtures/golden";
@@ -9,13 +9,12 @@ let n = 0;
 const ev = (type: LogEvent["type"], payload: object, at: number): LogEvent => ({ seq: ++n, schema: 1, type, recordedAt: at, actor: "system", keys: [], refs: [], payload, prevHash: "", hash: "" });
 const T = (date: string, hh: number) => Date.parse(`${date}T${String(hh).padStart(2, "0")}:00:00+09:00`);
 
-describe("readBody（投稿の本文の読み取り）", () => {
-  it("文字列も { text, intent?, stance? } も読み、知らない値は捨てる", () => {
-    expect(readBody("本文")).toEqual({ text: "本文", intent: null, stance: null });
-    expect(readBody({ text: "a", intent: "news", stance: "bear" })).toEqual({ text: "a", intent: "news", stance: "bear" });
-    expect(readBody({ text: "a", intent: "gossip", stance: 3 })).toEqual({ text: "a", intent: null, stance: null });
-    expect(readBody({ intent: "news" })).toBeNull();
-    for (const bad of [null, undefined, 5, [], { text: 1 }]) expect(readBody(bad)).toBeNull();
+describe("投稿の本文・種類・見立ての読み取り", () => {
+  it("本文は文字列だけ。種類と見立ては一覧の中の値だけ（それ以外は未分類・見立てなし）", () => {
+    expect(readText("本文")).toBe("本文");
+    for (const bad of [null, undefined, 5, [], { text: "a" }]) expect(readText(bad)).toBeNull();
+    expect([intentOf("news"), intentOf("gossip"), intentOf("News"), intentOf(3), intentOf(undefined)]).toEqual(["news", null, null, null, null]);
+    expect([stanceOf("bear"), stanceOf("up"), stanceOf(null)]).toEqual(["bear", null, null]);
   });
 });
 
@@ -27,9 +26,9 @@ describe("buildBoard（手で組んだ小さなログ）", () => {
     ev("agent.registered", { agentId: "ai-hold", displayName: "い", startDate: "2026-11-09", initialCash: 1000 }, 0), // 2
     ev("source.captured", { source: "news:x", publishedAt: T("2026-11-09", 7), fetchedAt: T("2026-11-09", 8), contentHash: "c" }, T("2026-11-09", 8)), // 3
     ev("prices.close", { date: "2026-11-06", source: "fixture:synthetic", fetchedAt: T("2026-11-06", 16), valuesHash: "v" }, T("2026-11-06", 16)), // 4
-    post("ai-ma5", "X1", "h1", { citeSeqs: [3, 4, 99] }, 10), // 5 根
+    post("ai-ma5", "X1", "h1", { citeSeqs: [3, 4, 99], intent: "strategy", stance: "bull" }, 10), // 5 根
     post("ai-hold", "X1", "h2", { replyTo: 5 }, 11), // 6 返信
-    post("ai-ma5", "X1", "h3", { replyTo: 6 }, 12), // 7 返信の返信
+    post("ai-ma5", "X1", "h3", { replyTo: 6, intent: "feeling", stance: "gossip" }, 12), // 7 返信の返信
     post("ai-hold", "X1", "h4", { replyTo: 7, citeSeqs: [5, 1] }, 13), // 8 深さは2まで。投稿 5 と登録の記録を引用
     post("ai-hold", "X2", "h5", { replyTo: 5 }, 14), // 9 親が別の掲示板 → 根
     post("ai-hold", "X1", "h6", {}, 15), // 10 根（新しい）
@@ -40,7 +39,7 @@ describe("buildBoard（手で組んだ小さなログ）", () => {
     // 投稿（seq 5〜10）より前に確定した注文票（seq 2）の約定。seq は投稿より後でも、「このあとの売買」にしない
     ev("fills.executed", { agentId: "ai-ma5", sheetSeq: 2, tradingDate: "2026-11-11", fills: [{ symbol: "X1", side: "sell", requestedQty: 100, qty: 100, price: 110, amount: 11_000, status: "filled" }] }, T("2026-11-11", 9)),
   ];
-  const bodies: Record<string, unknown> = { h1: { text: "戦略の話", intent: "strategy", stance: "bull" }, h2: "返信", h3: { text: "感情", intent: "feeling" }, h4: "深い返信", h5: "別の板", h6: "取り消し予定" };
+  const bodies: Record<string, unknown> = { h1: "戦略の話", h2: "返信", h3: "感情", h4: "深い返信", h5: "別の板", h6: "取り消し予定" };
   const v = buildView(events, (h) => bodies[h]);
   const b = buildBoard(v, "X1")!;
 

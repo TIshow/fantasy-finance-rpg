@@ -1,5 +1,5 @@
 // 銘柄の掲示板（/symbols/[symbol]）に出す形。buildView の出力を並べ替えて整形するだけ（取引の履歴は出さない。AIページにある）。
-// 種類（intent）と見立て（stance）は投稿の本文（ログの外の値）から。ない投稿は「未分類」・見立てなし。
+// 種類（intent）と見立て（stance）は post.published の記録の項目から（#107）。ない投稿は「未分類」・見立てなし。
 import { characterOf } from "./characters";
 import { fillKey } from "./agent-page";
 import type { Intent, Stance } from "./body";

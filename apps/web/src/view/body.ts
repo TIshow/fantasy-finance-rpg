@@ -1,25 +1,12 @@
-// 投稿の本文（ログの外の値）の読み取り。文字列（いまの仮のAI）か、{ text, intent?, stance? }（#96）のどちらも受ける。
-// 知らない種類・見立ては捨てて null（未分類・見立てなし）にする。本文が読めなければ null
-export type Intent = "strategy" | "feeling" | "knowledge" | "news";
-export type Stance = "bull" | "bear" | "neutral";
+// 投稿の本文（ログの外の値）と、投稿の種類・見立ての読み取り。
+// 本文は文字列。種類（intent）と見立て（stance）は、`post.published` の記録の項目が正本（#107）。
+// 一覧にない値・文字列でない値は捨てて null（未分類・見立てなし）にする
+import { POST_INTENTS, POST_STANCES, type PostIntent, type PostStance } from "../events/types";
 
-const INTENTS: readonly string[] = ["strategy", "feeling", "knowledge", "news"];
-const STANCES: readonly string[] = ["bull", "bear", "neutral"];
+export type Intent = PostIntent;
+export type Stance = PostStance;
 
-export interface PostBody {
-  text: string;
-  intent: Intent | null;
-  stance: Stance | null;
-}
-
-export function readBody(v: unknown): PostBody | null {
-  if (typeof v === "string") return { text: v, intent: null, stance: null };
-  if (typeof v !== "object" || v === null) return null;
-  const o = v as Record<string, unknown>;
-  if (typeof o.text !== "string") return null;
-  return {
-    text: o.text,
-    intent: typeof o.intent === "string" && INTENTS.includes(o.intent) ? (o.intent as Intent) : null,
-    stance: typeof o.stance === "string" && STANCES.includes(o.stance) ? (o.stance as Stance) : null,
-  };
-}
+/** 本文。文字列でなければ null */
+export const readText = (v: unknown): string | null => (typeof v === "string" ? v : null);
+export const intentOf = (v: unknown): Intent | null => POST_INTENTS.find((x) => x === v) ?? null;
+export const stanceOf = (v: unknown): Stance | null => POST_STANCES.find((x) => x === v) ?? null;
