@@ -12,11 +12,11 @@ import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay } from "../src/le
 import { INITIAL_CASH } from "../src/ledger/types";
 import { type RunnerAgent, type RunnerDeps, type StageResult, runDay } from "../src/runner/day";
 import { ruleAgents } from "../src/runner/rule-agents";
-import type { RunnerValues } from "../src/runner/values";
+import { discloseDue } from "../src/runner/world/disclosure";
 import { listCompanies } from "../src/runner/world/listing";
 import { liquidityAgents, setUpParticipants } from "../src/runner/world/participants";
 import { PgEventStore, readAllEvents } from "../src/store/pg-store";
-import { PgValueStore, type ValuesPort } from "../src/store/pg-values";
+import { PgValueStore } from "../src/store/pg-values";
 import type { SqlDb } from "../src/store/sql";
 import type { EventStore } from "../src/contracts";
 
@@ -80,6 +80,8 @@ export async function productionSetup({ store, clock, seed, holidayTable }: Prep
     await must("holidays.adopted", store.append({ type: "holidays.adopted", actor: "operator:owner", refs: [], payload: { holidaysSha256: holidayTable.contentSha256 } }));
   }
   await listCompanies(store, seed);
+  // 決算の発表：上場の直後の四半期と、前の実行が引けのあとに書けなかった分（時期が来ていて、まだ書いていないもの）
+  await discloseDue(store, seed, clock);
   const startDate = firstOpenDay(clock.now(), holidayTable);
   await setUpParticipants(store, startDate);
   const investors = await ruleAgents();
@@ -117,14 +119,19 @@ async function runLocked(date: string, o: DailyOptions): Promise<StageResult[]> 
   const deps: RunnerDeps = {
     store,
     market: o.market ?? new IngestedMarketData(o.clock),
-    // 仮：runner が ValuesPort を受け取るようになるまで（#113 のセッションが直す。lead の指示）、型を合わせる
-    values: values as ValuesPort as unknown as RunnerValues,
+    values,
     holidayTables,
     agents,
     clock: o.clock,
     waitUntil: o.waitUntil ?? (async () => {}),
+    // 決算の発表は runDay が、判断の前と1日の最後に書く
+    seed: o.seed ?? WORLD_SEED,
   };
-  return runDay(date, deps);
+  const results = await runDay(date, deps);
+  // 休日の実行（runDay が何もしない）でも、時期が来た決算を書く（前の営業日の引けのあとの実行がなかったとき）。
+  // 営業日なら runDay が書き終えているので、何も書かない
+  const disclosed = await discloseDue(store, o.seed ?? WORLD_SEED, o.clock);
+  return disclosed.length > 0 ? [...results, { stage: "disclose", status: "written", detail: disclosed.join(",") }] : results;
 }
 
 /** 判断の段が締めに間に合わなかった（全員の判断がその日はなくなる）。実行を失敗として終わらせる印 */
