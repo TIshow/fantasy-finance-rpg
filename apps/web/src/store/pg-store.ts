@@ -45,6 +45,13 @@ async function readRows(db: SqlRunner, afterSeq: number, limit: number): Promise
   return rows.map(toEvent);
 }
 
+/** 保存済みのイベントを、検査せずに先頭から全部読む（検査は呼び出し側。replay や verifyChain に渡す） */
+export async function readAllEvents(db: SqlRunner, pageSize = READ_MAX): Promise<LogEvent[]> {
+  const out: LogEvent[] = [];
+  for (let page = await readRows(db, 0, pageSize); page.length > 0; page = await readRows(db, out.at(-1)!.seq, pageSize)) out.push(...page);
+  return out;
+}
+
 export interface PgStoreDeps {
   /**
    * ログの外の値（価格など）。作り直しに要るので、追記より前に入れておく。
