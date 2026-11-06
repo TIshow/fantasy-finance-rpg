@@ -153,6 +153,7 @@ describe("権限（§3 の書ける者・AIの身元）", () => {
   const DOC_WRITER: Record<EventType, "system" | "operator" | "agent"> = {
     "source.captured": "system", "prices.open": "system", "prices.close": "system", "corporate_action.announced": "system",
     "market.closed": "operator", "holidays.adopted": "operator", "universe.set": "operator", "agent.registered": "operator", "company.listed": "system", "auction.cleared": "system",
+    "shares.allotted": "system", "company.disclosed": "system",
     "agent.run": "system", "post.published": "agent", "order_sheet.committed": "agent", "order_sheet.rejected": "system",
     "fills.executed": "system", "valuation.recorded": "system", "corporate_actions.applied": "system",
     "correction.issued": "operator", "ledger.adjusted": "operator", "content.withdrawn": "operator",
@@ -160,7 +161,7 @@ describe("権限（§3 の書ける者・AIの身元）", () => {
   };
   const ACTORS = { system: "system", operator: "operator:owner", agent: "agent:alpha" } as const;
   // 一意キーが作れる中身にして、書ける者の検査より前で落ちないようにする（公表のキーは銘柄・種類・権利落ち日。#67）
-  const payload = { agentId: "alpha", symbol: "AAA", kind: "dividend", exDate: "2026-11-11", date: "2026-11-10", tradingDate: "2026-11-10", asOf: "2026-11-10", announcedSeqs: [], correctionSeq: 1 };
+  const payload = { agentId: "alpha", symbol: "AAA", kind: "dividend", exDate: "2026-11-11", date: "2026-11-10", tradingDate: "2026-11-10", asOf: "2026-11-10", announcedSeqs: [], correctionSeq: 1, period: "2026-Q4" };
 
   it("文書の表に全種類があり、表の書ける者以外の追記はすべて拒む", async () => {
     expect(Object.keys(DOC_WRITER).sort()).toEqual([...EVENT_TYPES].sort());
