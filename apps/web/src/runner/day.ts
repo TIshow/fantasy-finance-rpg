@@ -157,6 +157,25 @@ class Day {
     return u ? (pl(u).symbols as string[]) : [];
   }
 
+  /** 取引対象がすべて上場した銘柄か。そうなら、外の始値・終値を取り込まず、板寄せの価格だけで動く（#113 PR-3b） */
+  private listedOnly(): boolean {
+    const listed = this.listings();
+    const u = this.universe();
+    return u.length > 0 && u.every((x) => listed.has(x));
+  }
+
+  /** date の板寄せがそろったか（date の締めより前に上場した、取引対象の銘柄すべて。臨時休場の日は板寄せがない） */
+  private auctionsDone(date: string): boolean {
+    if (this.find("market.closed", (p) => p.date === date)) return true;
+    const listed = this.listings();
+    return this.universe().every((x) => !listed.has(x) || cutoffOf(date) <= listed.get(x)! || this.find("auction.cleared", (p) => p.symbol === x && p.date === date) !== undefined);
+  }
+
+  /** date の価格がそろったか：終値。取引対象がすべて上場した銘柄なら、板寄せ */
+  private pricesDone(date: string): boolean {
+    return this.listedOnly() ? this.auctionsDone(date) : this.find("prices.close", (p) => p.date === date) !== undefined;
+  }
+
   /** 上場した銘柄（company.listed）と、その記録の時刻。これらの価格は外から取り込まず、板寄せで決める */
   private listings(): Map<string, number> {
     return new Map(this.log.events.filter((e) => e.type === "company.listed").map((e) => [pl(e).symbol as string, e.recordedAt]));
@@ -245,24 +264,28 @@ class Day {
   async decide(date: string, prev: string): Promise<StageResult> {
     const stage = "decide";
     if (this.find("prices.open", (p) => p.date === date)) return { stage, status: "skipped", detail: "after the open" };
-    const prevClose = this.find("prices.close", (p) => p.date === prev);
-    if (!prevClose) return { stage, status: "waiting", detail: `no close of ${prev}` };
-    const closes = this.log.events.filter((e) => e.type === "prices.close").slice(-(this.deps.inputDays ?? 20));
+    if (!this.pricesDone(prev)) return { stage, status: "waiting", detail: this.listedOnly() ? `auctions of ${prev} not done` : `no close of ${prev}` };
+    // 取引対象がすべて上場した銘柄なら、終値は入力に入れない（切り替えの前の古い終値に、取引対象の外の銘柄が残るため）
+    const closes = this.listedOnly() ? [] : this.log.events.filter((e) => e.type === "prices.close").slice(-(this.deps.inputDays ?? 20));
     let wrote = false;
     const late: string[] = [];
     const notReady: string[] = [];
     for (const agent of this.deps.agents.filter((a) => this.agentsOn(date).includes(a.id))) {
       const id = agent.id;
-      const runs = this.log.events.filter((e) => e.seq > prevClose.seq && e.type === "agent.run" && pl(e).agentId === id);
-      if (runs.some((r) => pl(r).ok !== true)) continue; // 失敗を記録済み
-      const noPosts = this.suspended(id, "posts");
-      if (runs.length === 0 && noPosts && this.suspended(id, "orders")) continue;
-      // 前の日の引け後の処理が済むまで判断しない（古い口座で判断すると、注文票が account_not_ready で拒否されて戻せない）
       const registered = this.find("agent.registered", (p) => p.agentId === id)!;
-      if (runs.length === 0 && (pl(registered).startDate as string) < date && !this.find("corporate_actions.applied", (p) => p.agentId === id && p.asOf === prev)) {
-        notReady.push(id);
+      const noPosts = this.suspended(id, "posts");
+      // 前の日の引け後の処理が済むまで判断しない（古い口座で判断すると、注文票が account_not_ready で拒否されて戻せない）
+      // 臨時休場の追加分（closedSeq つき）があれば、その最後の記録を基準にする（休場の日の run を拾わないように）
+      const prevDone = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id && pl(e).asOf === prev).at(-1);
+      // 投稿も注文も停止中のAIは、待たずに飛ばす（判断しないので、古い口座で判断するおそれがない）
+      if ((pl(registered).startDate as string) < date && !prevDone) {
+        if (!(noPosts && this.suspended(id, "orders"))) notReady.push(id);
         continue;
       }
+      // この日の run：前の日の引け後の処理より後のもの（開始日なら、そのAIの run はこの日の分しかない）
+      const runs = this.log.events.filter((e) => e.seq > (prevDone?.seq ?? 0) && e.type === "agent.run" && pl(e).agentId === id);
+      if (runs.some((r) => pl(r).ok !== true)) continue; // 失敗を記録済み
+      if (runs.length === 0 && noPosts && this.suspended(id, "orders")) continue;
       if (this.deps.clock.now() >= cutoffOf(date)) {
         late.push(id);
         continue;
@@ -347,7 +370,7 @@ class Day {
     const days: string[] = [];
     for (let d = upTo; ; d = previousBusinessDay(d, H)) {
       const agents = this.agentsOn(d);
-      const done = this.find("prices.close", (p) => p.date === d) && agents.every((id) => this.find("corporate_actions.applied", (p) => p.agentId === id && p.asOf === d && p.closedSeq === undefined));
+      const done = this.pricesDone(d) && agents.every((id) => this.find("corporate_actions.applied", (p) => p.agentId === id && p.asOf === d && p.closedSeq === undefined));
       if (done) break;
       days.unshift(d);
       if (agents.length === 0) break;
@@ -414,8 +437,16 @@ class Day {
     const stage = "after_close";
     const unfilled = this.log.events.filter((e) => e.type === "order_sheet.committed" && (pl(e).tradingDate as string) <= date && !this.find("fills.executed", (p) => p.sheetSeq === e.seq));
     if (unfilled.length > 0) return { stage, status: "waiting", detail: `sheets not filled: ${unfilled.map((e) => e.seq).join(",")}` };
-    const close = await this.ingest(date, "close");
-    if (!("seq" in close)) return close;
+    // 取引対象がすべて上場した銘柄なら、終値を取り込まず、その日の板寄せの価格で評価する
+    let closeSeq: number | undefined;
+    if (this.listedOnly()) {
+      if (!this.auctionsDone(date)) return { stage, status: "waiting", detail: `auctions of ${date} not done` };
+    } else {
+      const close = await this.ingest(date, "close");
+      if (!("seq" in close)) return close;
+      closeSeq = close.seq;
+    }
+    const auctionSeqs = this.log.events.filter((e) => e.type === "auction.cleared" && pl(e).date === date).map((e) => e.seq);
     const exDate = nextBusinessDay(date, this.log.holidays());
     // 前の日の引け後の処理が済んでいないAIがいれば、この日の評価もできない（順に1日ずつ進む）
     const prev = previousBusinessDay(date, this.log.holidays());
@@ -426,7 +457,8 @@ class Day {
     let wrote = false;
     for (const agentId of this.agentsOn(date)) {
       if (!this.find("valuation.recorded", (p) => p.agentId === agentId && p.date === date)) {
-        await this.append("valuation.recorded", "system", { agentId, date, closeSeq: close.seq, ...this.ledger.computeValuation(agentId, date) }, [close.seq]);
+        const basis = closeSeq === undefined ? { payload: {}, refs: auctionSeqs } : { payload: { closeSeq }, refs: [closeSeq] };
+        await this.append("valuation.recorded", "system", { agentId, date, ...basis.payload, ...this.ledger.computeValuation(agentId, date) }, basis.refs);
         wrote = true;
       }
       if (!this.find("corporate_actions.applied", (p) => p.agentId === agentId && p.asOf === date && p.closedSeq === undefined)) {
