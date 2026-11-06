@@ -12,6 +12,11 @@ export interface SqlRunner {
 export interface SqlDb extends SqlRunner {
   /** fn を1つのトランザクションで流す。fn が例外を投げれば取り消す */
   transaction<T>(fn: (tx: SqlRunner) => Promise<T>): Promise<T>;
+  /**
+   * 接続を通して持つ鍵（セッションの advisory lock）を取る。取れなければ null（別の処理が持っている）。
+   * 返す関数で手放す。プロセスが落ちれば、接続が切れて自動で手放される。毎日の実行が、全体を1つだけ動かすのに使う
+   */
+  lock(key: number): Promise<(() => Promise<void>) | null>;
   close(): Promise<void>;
 }
 

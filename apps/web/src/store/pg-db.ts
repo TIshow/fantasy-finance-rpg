@@ -42,6 +42,27 @@ export function pgDb({ connectionString, schema, max = 4 }: PgDbOptions): SqlDb 
         c.release(failed); // 失敗した接続は捨てて、状態が残らないようにする
       }
     },
+    async lock(key) {
+      const c = await pool.connect(); // この接続を、手放すまで専用に使う
+      try {
+        const { rows } = await c.query("SELECT pg_try_advisory_lock($1) AS ok", [key]);
+        if (!(rows[0] as { ok: boolean }).ok) {
+          c.release();
+          return null;
+        }
+      } catch (err) {
+        c.release(true);
+        throw err;
+      }
+      return async () => {
+        try {
+          await c.query("SELECT pg_advisory_unlock($1)", [key]);
+          c.release();
+        } catch {
+          c.release(true); // 手放せなければ接続ごと捨てる（切れれば鍵も外れる）
+        }
+      };
+    },
     close: () => pool.end(),
   };
 }
