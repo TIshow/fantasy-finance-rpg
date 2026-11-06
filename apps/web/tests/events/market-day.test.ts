@@ -111,6 +111,24 @@ describe("参加者の種類・最初の現金・最初の配分（#110 PR-2c）
     await w.add(op("universe.set", after, { symbols: ["NEO1", "NEO3"] }));
     expect(await w.rule(sys("shares.allotted", after, { agentId: "late", symbol: "NEO3", qty: 100 }))).toBe("the symbol cannot be auctioned on the first valuation date");
   });
+
+  it("AI投資家（種類を書かない登録も）には配らない。書く前の確かめも、保存済みのログの確かめ直しも断る（#110 PR-2d）", async () => {
+    const { w } = await setup();
+    const at = jst("2026-11-09", 20);
+    await w.add(op("agent.registered", at, { agentId: "plain", startDate: T, initialCash: INITIAL_CASH }));
+    await w.add(op("agent.registered", at, { agentId: "nz", startDate: T, kind: "noise", initialCash: 30_000_000 * 10 }));
+    for (const agentId of ["alpha", "plain"]) {
+      const why = await w.ledger.check({ type: "shares.allotted", payload: { agentId, symbol: "NEO1", qty: 100 } });
+      expect(why).toMatch(/: shares cannot be allotted to an investor$/);
+    }
+    // ばらばらに売買する参加者には配れる
+    expect(await w.ledger.check({ type: "shares.allotted", payload: { agentId: "nz", symbol: "NEO1", qty: 100 } })).toBeNull();
+    // 追記の処理だけを通して AI投資家に配った記録を作ると、確かめ直しが断る
+    const r = await w.log.append(sys("shares.allotted", at, { agentId: "alpha", symbol: "NEO1", qty: 100 }));
+    expect(r.ok).toBe(true);
+    await expect(replay(w.log.events, NO_VALUES, CTX)).rejects.toThrow(/seq \d+ \(shares\.allotted\): shares cannot be allotted to an investor/);
+    expect(w.ledger.account("alpha")).toEqual({ cash: INITIAL_CASH, holdings: {} });
+  });
 });
 
 describe("板寄せでの売買と、板寄せの価格での評価（#110 PR-2c）", () => {
