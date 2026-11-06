@@ -136,16 +136,25 @@ export interface NoiseParams {
   tilt: number;
   /** 買いの確率の下限（上限は 1 − これ）。乱数で決める部分を残す */
   minBuyChance: number;
+  /**
+   * 値幅の端の日（目安の価格が値幅の外にある銘柄）の買いの確率（#139 の lead の決定、案1）。上の外なら edgeBuyChance、
+   * 下の外なら 1 − edgeBuyChance。マーケットメイカーは端の値段で片側だけを出すので、その逆の側を多く出す。端の日は tilt より優先する
+   */
+  edgeBuyChance: number;
 }
 
-export const NOISE_PARAMS: NoiseParams = { chance: 1, maxQty: 300, marketShare: 0.95, maxOffsetBp: 300, tilt: 1, minBuyChance: 0.1 };
+export const NOISE_PARAMS: NoiseParams = { chance: 1, maxQty: 300, marketShare: 0.95, maxOffsetBp: 300, tilt: 1, minBuyChance: 0.1, edgeBuyChance: 0.9 };
 
 export interface NoiseInput {
   /** 世界のシードと約定日（日ごとに別の乱数の列になる） */
   seed: number;
   tradingDate: string;
   /** 銘柄ごとの前日の価格と値幅（銘柄コードの昇順に並べて使う） */
-  markets: readonly { symbol: string; prevPrice: Deciyen; band: PriceBand }[];
+  /**
+   * 銘柄ごとの前日の価格と値幅。edge は、目安の価格が値幅の上限より上（upper）か下限より下（lower）の日（値幅の端の日）。
+   * ふだんの日は省く
+   */
+  markets: readonly { symbol: string; prevPrice: Deciyen; band: PriceBand; edge?: "upper" | "lower" }[];
   holdings: Readonly<Record<string, number>>;
   cash: Deciyen;
   /** 最初の持ち株（銘柄ごと）と現金。売りと買いの片寄りの基準。省けば片寄らせない。最初の持ち株がない銘柄は、株の減り方を0とみなす */
@@ -153,7 +162,10 @@ export interface NoiseInput {
 }
 
 /** 買いの確率：最初の持ち株・現金からの減り方で片寄らせ、[minBuyChance, 1 − minBuyChance] に収める */
-function buyChance(input: NoiseInput, symbol: string, cash: Deciyen, params: NoiseParams): number {
+function buyChance(input: NoiseInput, symbol: string, cash: Deciyen, params: NoiseParams, edge?: "upper" | "lower"): number {
+  // 値幅の端の日は、マーケットメイカーの逆の側を多く出す（上の外なら買い、下の外なら売り）。持ち株・現金のずれより優先する
+  if (edge === "upper") return params.edgeBuyChance;
+  if (edge === "lower") return 1 - params.edgeBuyChance;
   const b = input.baseline;
   if (!b || b.cash <= 0) return 0.5;
   const base = Object.hasOwn(b.shares, symbol) ? b.shares[symbol]! : 0;
@@ -182,7 +194,7 @@ export function noiseOrders(input: NoiseInput, params: NoiseParams = NOISE_PARAM
   for (const m of markets) {
     const rand = mulberry32(subSeed(input.seed, `noise:${input.tradingDate}:${m.symbol}`));
     if (rand() >= params.chance) continue;
-    const side: Side = rand() < buyChance(input, m.symbol, cash, params) ? "buy" : "sell";
+    const side: Side = rand() < buyChance(input, m.symbol, cash, params, m.edge) ? "buy" : "sell";
     let qty = (1 + Math.floor(rand() * (params.maxQty / LOT))) * LOT;
     const isMarket = rand() < params.marketShare;
     const offsetBp = Math.round((2 * rand() - 1) * params.maxOffsetBp);

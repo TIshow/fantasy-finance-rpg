@@ -9,7 +9,7 @@ const sells = (os: LiquidityOrder[]) => os.filter((o) => o.side === "sell");
 // 関数の決まりは、決まった数字で確かめる（既定の数字は値がつく日数に合わせて変えることがあるので、別の項目で確かめる）。
 // 段の幅1%・3段・持ち株100株ごとに0.2%・上限3%。段の株数は数えやすいように100株
 const LOGIC_MAKER = { spreadBp: 100, levels: 3, qtyPerLevel: 100, skewPerLotBp: 20, maxSkewBp: 300 };
-const LOGIC_NOISE = { chance: 0.6, maxQty: 300, marketShare: 0.3, maxOffsetBp: 300, tilt: 1, minBuyChance: 0.1 };
+const LOGIC_NOISE = { chance: 0.6, maxQty: 300, marketShare: 0.3, maxOffsetBp: 300, tilt: 1, minBuyChance: 0.1, edgeBuyChance: 0.9 };
 const maker = (input: Parameters<typeof makerOrders>[0], params = LOGIC_MAKER) => makerOrders(input, params);
 const noise = (input: Parameters<typeof noiseOrders>[0], params = LOGIC_NOISE) => noiseOrders(input, params);
 
@@ -17,7 +17,7 @@ describe("売買役の既定の数字（#139 で、値段がつく日を増や�
   it("マーケットメイカーは0.5%ずつ3段・1段300株・中心をずらす上限は段の幅×段の数。ばらばらの参加者は毎日・95%が成行・持ち株と現金のずれで片寄る", () => {
     expect(MAKER_PARAMS).toEqual({ spreadBp: 50, levels: 3, qtyPerLevel: 300, skewPerLotBp: 20, maxSkewBp: 150 });
     expect(MAKER_PARAMS.maxSkewBp).toBe(MAKER_PARAMS.spreadBp * MAKER_PARAMS.levels);
-    expect(NOISE_PARAMS).toEqual({ chance: 1, maxQty: 300, marketShare: 0.95, maxOffsetBp: 300, tilt: 1, minBuyChance: 0.1 });
+    expect(NOISE_PARAMS).toEqual({ chance: 1, maxQty: 300, marketShare: 0.95, maxOffsetBp: 300, tilt: 1, minBuyChance: 0.1, edgeBuyChance: 0.9 });
   });
 
   it("既定の数字でも、買いの最高値は売りの最安値より低く（値幅の外では片側だけ）、ばらばらの参加者は毎日すべての銘柄に注文を出す", () => {
@@ -186,6 +186,43 @@ describe("ばらばらに売買する参加者の注文", () => {
     expect(none).toBeLessThan(0.6);
   });
 
+  describe("値幅の端の日（#139 の lead の決定、案1）", () => {
+    const baseline = { shares: Object.fromEntries(markets.map((m) => [m.symbol, 1000])), cash: 100_000_000 };
+    /** 全銘柄を同じ端の日にして、200通りの種で注文を集める */
+    const collect = (edge: "upper" | "lower" | undefined, over: Partial<typeof input> = {}) =>
+      Array.from({ length: 200 }, (_, seed) => noise({ ...input, seed, baseline, markets: markets.map((m) => ({ ...m, ...(edge ? { edge } : {}) })), ...over }, { ...LOGIC_NOISE, chance: 1 })).flat();
+    const buyShare = (os: LiquidityOrder[]) => buys(os).length / os.length;
+
+    it("上限の外の日は買いを多く、下限の外の日は売りを多く出す。持ち株と現金のずれ（tilt）より優先する", () => {
+      // 持ち株が最初より4割多く、現金が4割少ない：ふだんの日なら買いの確率は下限の0.1
+      const heavy = { holdings: Object.fromEntries(markets.map((m) => [m.symbol, 1400])), cash: 60_000_000 };
+      expect(buyShare(collect(undefined, heavy))).toBeLessThan(0.15);
+      expect(buyShare(collect("upper", heavy))).toBeGreaterThan(0.85);
+      // 持ち株が最初より少なく、現金が多い：ふだんの日なら買いが多いが、下限の外の日は売りが多い
+      const light = { holdings: Object.fromEntries(markets.map((m) => [m.symbol, 600])), cash: 100_000_000 };
+      expect(buyShare(collect(undefined, light))).toBeGreaterThan(0.85);
+      expect(buyShare(collect("lower", light))).toBeLessThan(0.15);
+    });
+
+    it("端の日でも、持っていない株は売らず、現金を超えて買わない", () => {
+      expect(sells(collect("lower", { holdings: {} }))).toEqual([]);
+      expect(buys(collect("upper", { cash: 0 }))).toEqual([]);
+      for (let seed = 0; seed < 40; seed++) {
+        const cash = 2_500_000;
+        const os = noise({ ...input, seed, cash, baseline, markets: markets.map((m) => ({ ...m, edge: "upper" as const })) });
+        expect(buys(os).reduce((a, o) => a + (o.limit ?? band.upper) * o.qty, 0)).toBeLessThanOrEqual(cash);
+      }
+    });
+
+    it("ふだんの日（edge なし）の注文は変わらない。端の日の銘柄があっても、ほかの銘柄の注文は変わらない", () => {
+      for (let seed = 0; seed < 20; seed++) {
+        const normal = noise({ ...input, seed, baseline });
+        const oneEdge = noise({ ...input, seed, baseline, markets: markets.map((m, i) => (i === 0 ? { ...m, edge: "upper" as const } : m)) });
+        expect(oneEdge.filter((o) => o.symbol !== markets[0]!.symbol)).toEqual(normal.filter((o) => o.symbol !== markets[0]!.symbol));
+      }
+    });
+  });
+
   it("銘柄を外しても、ほかの銘柄の注文は変わらない（乱数の列は銘柄ごと）", () => {
     for (let seed = 0; seed < 10; seed++) {
       const all = noise({ ...input, seed });
@@ -199,6 +236,6 @@ describe("ばらばらに売買する参加者の注文", () => {
   it("おかしな入力は受け付けない（重複した銘柄、刻みに合わない値幅、100株単位でない上限）", () => {
     expect(() => noise({ ...input, markets: [...markets, markets[0]!] })).toThrow("duplicate");
     expect(() => noise({ ...input, markets: [{ ...markets[0]!, band: { lower: 8005, upper: 12000 } }] })).toThrow("band");
-    expect(() => noiseOrders(input, { chance: 1, maxQty: 250, marketShare: 0, maxOffsetBp: 0, tilt: 0, minBuyChance: 0 })).toThrow("maxQty");
+    expect(() => noiseOrders(input, { chance: 1, maxQty: 250, marketShare: 0, maxOffsetBp: 0, tilt: 0, minBuyChance: 0, edgeBuyChance: 0.5 })).toThrow("maxQty");
   });
 });
