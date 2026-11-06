@@ -1,5 +1,6 @@
 // Postgres の EventStore（#25 PR-1）の試験。PGlite（Postgres を Node の中で動かす）で、Docker なしで動く。
 // 本物のドライバ（pg）の試験は、環境変数 TEST_DATABASE_URL があるときだけ動く（なければスキップして、その旨を出す）。
+import { readFileSync } from "node:fs";
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { DraftInput } from "../../src/contracts";
@@ -176,6 +177,9 @@ describe("追記だけであること（DB が守る）", () => {
     try {
       await pg.exec("SET ROLE ffr_app");
       expect(await checkAppendOnlyRole(db)).toEqual([]);
+      // 運営者の手順に入れる確認の SQL（db/ops/check_app_role.sql）も、想定の結果を返す
+      const check = (await pg.query(readFileSync(new URL("../../db/ops/check_app_role.sql", import.meta.url), "utf8"))).rows[0];
+      expect(check).toEqual({ who: "ffr_app", superuser: false, write_all_data: false, can_select: true, can_insert: true, can_update: false, can_delete: false, can_truncate: false });
       expect((await store.read()).length).toBe(5);
       for (const sql of ["UPDATE events SET type = 'x'", "DELETE FROM events", "TRUNCATE events", "DROP TABLE events"]) await expect(pg.exec(sql)).rejects.toThrow(/permission denied|must be owner/);
       const clock = new FakeClock(jst("2026-11-09", 23));
