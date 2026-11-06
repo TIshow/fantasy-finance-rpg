@@ -6,7 +6,7 @@ import { coveredHolidays, type HolidayTable } from "../holidays/table";
 import { MAX_PRICE, TICK } from "../ledger/auction";
 import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusinessDay, tradingDateFor, validateSheet } from "../ledger/ledger";
 import type { Listing } from "../ledger/ledger";
-import { MAX_INITIAL_CASH, type Account, type Order, type RejectReason } from "../ledger/types";
+import { registrationProblem, type Account, type Order, type RejectReason } from "../ledger/types";
 import { CanonicalizeError } from "./canonical";
 import { sealEvent } from "./chain";
 import { POST_INTENTS, POST_STANCES, type Actor, type EventType, type LogEvent } from "./types";
@@ -455,9 +455,8 @@ export class EventLog {
         const start = p.startDate;
         // 開始日は、登録した時点で締めがまだ来ていない最初の営業日だけ。先の日にすると、その前の日を臨時休場にできなくなるため
         if (!isValidDate(start) || start !== tradingDateFor(d.recordedAt, H)) return "startDate must be the next trading date";
-        // 最初の現金は参加者ごとに決める（AI投資家は INITIAL_CASH。マーケットメイカーなどは別の額、#110）
-        const cash = p.initialCash;
-        return Number.isSafeInteger(cash) && (cash as number) > 0 && (cash as number) <= MAX_INITIAL_CASH ? null : "initialCash must be a positive amount up to MAX_INITIAL_CASH";
+        // 種類と最初の現金（AI投資家は INITIAL_CASH ちょうど。マーケットメイカーなどは上限まで、#110）
+        return registrationProblem(p.kind, p.initialCash);
       }
       case "agent.run":
         return p.purpose === "post" || p.purpose === "order" ? this.inputProblem(p.inputSeqs, null) : "purpose must be post or order";

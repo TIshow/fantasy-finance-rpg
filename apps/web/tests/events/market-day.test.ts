@@ -48,20 +48,44 @@ async function setup() {
   const w = new World();
   await w.add(op("holidays.adopted", 0, { holidaysSha256: H }));
   const listed = await w.add(sys("company.listed", jst("2026-11-09", 18), { symbol: "NEO1", name: "ネオ電機", sector: "電機", sharesOutstanding: 500_000, price: 10_000 }));
-  await w.add(op("agent.registered", jst("2026-11-09", 19), { agentId: "mm", startDate: T, initialCash: MM_CASH }));
-  await w.add(op("agent.registered", jst("2026-11-09", 19), { agentId: "alpha", startDate: T, initialCash: INITIAL_CASH }));
+  await w.add(op("agent.registered", jst("2026-11-09", 19), { agentId: "mm", startDate: T, kind: "market_maker", initialCash: MM_CASH }));
+  await w.add(op("agent.registered", jst("2026-11-09", 19), { agentId: "alpha", startDate: T, kind: "investor", initialCash: INITIAL_CASH }));
   await w.add(op("universe.set", jst("2026-11-09", 19, 30), { symbols: ["NEO1"] }));
   await w.add(sys("shares.allotted", jst("2026-11-09", 19, 40), { agentId: "mm", symbol: "NEO1", qty: 5_000 }));
   return { w, listed };
 }
 
-describe("最初の配分と最初の現金（#110 PR-2c）", () => {
-  it("参加者ごとに最初の現金を決められ、配った株は上場の価格を取得原価にする（現金は動かさない）", async () => {
+describe("参加者の種類・最初の現金・最初の配分（#110 PR-2c）", () => {
+  it("AI投資家は1,000万円ちょうど、ほかの種類は上限まで最初の現金を決められ、配った株は上場の価格を取得原価にする（現金は動かさない）", async () => {
     const { w } = await setup();
     expect(w.ledger.account("mm")).toEqual({ cash: MM_CASH, holdings: { NEO1: { qty: 5_000, cost: 10_000 * 5_000 } } });
     expect(w.ledger.account("alpha")).toEqual({ cash: INITIAL_CASH, holdings: {} });
-    expect(await w.rule(op("agent.registered", jst("2026-11-09", 20), { agentId: "big", startDate: T, initialCash: 10_000_000_000 * 10 + 1 }))).toBe("initialCash must be a positive amount up to MAX_INITIAL_CASH");
-    expect(await w.rule(op("agent.registered", jst("2026-11-09", 20), { agentId: "zero", startDate: T, initialCash: 0 }))).toBe("initialCash must be a positive amount up to MAX_INITIAL_CASH");
+    expect([w.ledger.kindOf("mm"), w.ledger.kindOf("alpha")]).toEqual(["market_maker", "investor"]);
+    const reg = (agentId: string, extra: Record<string, unknown>) => op("agent.registered", jst("2026-11-09", 20), { agentId, startDate: T, ...extra });
+    // 種類を書かない登録は AI投資家。AI投資家は 1,000万円ちょうど
+    await w.add(reg("plain", { initialCash: INITIAL_CASH }));
+    expect(w.ledger.kindOf("plain")).toBe("investor");
+    expect(await w.rule(reg("rich", { initialCash: INITIAL_CASH + 10 }))).toBe("initialCash of an investor must be INITIAL_CASH");
+    expect(await w.rule(reg("rich", { kind: "investor", initialCash: MM_CASH }))).toBe("initialCash of an investor must be INITIAL_CASH");
+    expect(await w.rule(reg("x", { kind: "bank", initialCash: INITIAL_CASH }))).toBe("kind must be investor, market_maker or noise");
+    // ほかの種類は、0より大きく上限（100億円）まで
+    await w.add(reg("noise", { kind: "noise", initialCash: 30_000_000 * 10 }));
+    await w.add(reg("maxed", { kind: "market_maker", initialCash: 10_000_000_000 * 10 }));
+    expect(await w.rule(reg("big", { kind: "market_maker", initialCash: 10_000_000_000 * 10 + 1 }))).toBe("initialCash must be a positive amount up to MAX_INITIAL_CASH");
+    expect(await w.rule(reg("zero", { kind: "noise", initialCash: 0 }))).toBe("initialCash must be a positive amount up to MAX_INITIAL_CASH");
+    const again = await replay(w.log.events, NO_VALUES, CTX);
+    expect(again.kindOf("noise")).toBe("noise");
+    expect(() => again.kindOf("nobody")).toThrow("unknown agent nobody");
+    expect(await w.rule(reg("x", { kind: null, initialCash: INITIAL_CASH }))).toBe("kind must be investor, market_maker or noise");
+    // 保存済みの登録を書き換えたものは、確かめ直し（台帳）が断る
+    const saved = w.log.events.find((e) => e.type === "agent.registered" && (e.payload as Record<string, unknown>).agentId === "plain")!;
+    for (const [patch, why] of [
+      [{ kind: "bank" }, "kind must be investor, market_maker or noise"],
+      [{ kind: "investor", initialCash: MM_CASH }, "initialCash of an investor must be INITIAL_CASH"],
+      [{ initialCash: MM_CASH }, "initialCash of an investor must be INITIAL_CASH"],
+    ] as const) {
+      await expect(new Ledger(NO_VALUES).apply({ ...saved, seq: 1, payload: { ...(saved.payload as Record<string, unknown>), ...patch } })).rejects.toThrow(why);
+    }
   });
 
   it("配分は、システムだけが、参加者ごと・銘柄ごとに1回、発行済株式数の内で、最初の板寄せより前に書ける", async () => {
