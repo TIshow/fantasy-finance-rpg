@@ -1,4 +1,4 @@
-// 検証（verifier、#139）：AI の判断の出力が、記録の正規化（NFC・安全な整数）や DB（U+0000 を持てない）に合わないとき、
+// 検証（verifier、#139）：AI の判断の出力が、記録の正規化（NFC・安全な整数・U+0000 を含まない）に合わないとき、
 // 1つの AI のせいで、その日の全員の判断が止まらないか。runner（src/runner/day.ts）は、判断が例外を投げた AI を
 // 失敗の判断の記録（ok: false）にして次の AI へ進む。出力が記録に書けない形のときも、同じく次へ進むべき
 // （LLM の出力は、NFC でない文字や小数の株数を返しうる。#29 で LLM を入れる前に直す）。
@@ -81,7 +81,7 @@ describe("判断の出力が記録に書けない形でも、ほかの参加者�
   });
 });
 
-describe("投稿の本文に U+0000 があるとき、メモリの保管と Postgres の保管で結果が分かれない", () => {
+describe("投稿の本文に U+0000 があっても、ほかの参加者の判断は進む（メモリの保管と Postgres の保管）", () => {
   let pg: PGlite;
   let db: SqlDb;
   beforeAll(async () => {
@@ -91,15 +91,16 @@ describe("投稿の本文に U+0000 があるとき、メモリの保管と Post
 
   const bad = fixed({ orders: [], post: { board: COMPANIES[0]!.symbol, text: "a\u0000b" }, note: "" });
 
-  it("メモリの保管では、その日の全員が注文票を確定する", async () => {
+  // 欠陥（宛先 platform）：#110 PR-2d で、正規化（checkText）が U+0000 を断るようになった。そのため、メモリの保管でも、
+  // 上の NFC の場合と同じく、decide の canonicalize(decision) が try の外で例外になり、runDay ごと止まる
+  it.fails("メモリの保管でも、その日の全員が注文票を確定する", async () => {
     const r = await memoryDay(bad);
     expect(r.outcome).toBe("ok");
     expect(othersCommitted(r.events)).toBe(COMPANIES.length + 1);
   });
 
-  // 欠陥（宛先 platform）：PgValueStore.putBody は U+0000 を含む本文を例外で断る（DB の jsonb が持てないため）。
-  // day.ts の decide は、判断の記録（agent.run）を書いたあとに putBody(post.text) を呼ぶので、runDaily が例外で止まる。
-  // 回し直すと、記録した判断の出力から同じ本文を作り直して、また止まる。その日は締めまで、後に並ぶ全員の判断がなくなる
+  // 欠陥（宛先 platform）：Postgres の保管でも同じく runDaily が例外で止まる（#110 PR-2d の前は、PgValueStore.putBody が
+  // 断っていた）。回し直しても同じ判断を作り直して、また止まる。その日は締めまで、後に並ぶ全員の判断がなくなる
   it.fails("Postgres の保管でも、その日の全員が注文票を確定する（回し直しを2回まで許す）", async () => {
     await resetSchema(pg);
     await migrate(db);
