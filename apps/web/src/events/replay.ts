@@ -4,7 +4,7 @@
 import { applyCorporateActions, type Dividend, type Split } from "../ledger/corporate";
 import { priceBand, runAuction, type AuctionOrder } from "../ledger/auction";
 import { executeSheet, newAccount, reserveBuys, totalValue, type AuctionedFill } from "../ledger/ledger";
-import { MAX_INITIAL_CASH, type Account, type Deciyen, type Fill, type Order } from "../ledger/types";
+import { registrationProblem, type Account, type ParticipantKind, type Deciyen, type Fill, type Order } from "../ledger/types";
 import { EventLog, type AppendContext } from "./append";
 import { canonicalize } from "./canonical";
 import { accountHash, bodyHash } from "./hash";
@@ -64,6 +64,8 @@ export class Ledger {
   private readonly listed = new Map<string, ListedPrice[]>();
   /** 板寄せの結果（auction.cleared の seq ごと） */
   private readonly cleared = new Map<number, Cleared>();
+  /** 参加者の種類（登録に書かなければ AI投資家） */
+  private readonly kinds = new Map<string, ParticipantKind>();
   /** 再計算に一度失敗したら、それ以降は受け付けない（途中から進めると口座がずれるため） */
   private failed: string | null = null;
 
@@ -75,6 +77,14 @@ export class Ledger {
     const a = this.accounts.get(agentId);
     if (!a) throw new Error(`unknown agent ${agentId}`);
     return { cash: a.cash, holdings: Object.fromEntries(Object.entries(a.holdings).map(([k, h]) => [k, { ...h }])) };
+  }
+
+  /** 参加者の種類。順位表には AI投資家（investor）だけを出す */
+  kindOf(agentId: string): ParticipantKind {
+    if (this.failed) throw new Error(`ledger stopped at ${this.failed}`);
+    const k = this.kinds.get(agentId);
+    if (!k) throw new Error(`unknown agent ${agentId}`);
+    return k;
   }
 
   /**
@@ -254,8 +264,11 @@ export class Ledger {
     const none = () => {};
     switch (e.type) {
       case "agent.registered":
-        if (!Number.isSafeInteger(p.initialCash) || (p.initialCash as number) <= 0 || (p.initialCash as number) > MAX_INITIAL_CASH) throw new Error(`${at}: invalid initialCash`);
-        return () => this.accounts.set(p.agentId as string, newAccount(p.initialCash as number));
+        if (registrationProblem(p.kind, p.initialCash)) throw new Error(`${at}: ${registrationProblem(p.kind, p.initialCash)}`);
+        return () => {
+          this.accounts.set(p.agentId as string, newAccount(p.initialCash as number));
+          this.kinds.set(p.agentId as string, (p.kind as ParticipantKind | undefined) ?? "investor");
+        };
       case "shares.allotted": {
         // 最初の配分。取得原価は上場の価格 × 株数（現金は動かさない）
         const listing = (this.listed.get(p.symbol as string) ?? [])[0];
