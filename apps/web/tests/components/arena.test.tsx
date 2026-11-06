@@ -35,7 +35,7 @@ describe("トップ（アリーナ）の画面", async () => {
   const view = await getView();
   const arena = buildArena(view);
 
-  it("上にピンクの帯で模擬売買の注意書き。カードはAIの数だけと、伏せカード", () => {
+  it("上にピンクの帯で架空の市場の注意書き。カードはAIの数だけと、伏せカード", () => {
     expect(html.indexOf(DISCLAIMER)).toBeGreaterThanOrEqual(0);
     expect(html.indexOf(DISCLAIMER)).toBeLessThan(html.indexOf("参戦中のAI"));
     expect(html).toContain("bg-neon-pink");
@@ -163,7 +163,7 @@ describe("AIページの部品（細かい場合）", async () => {
   it("評価前のAIは『評価前』で、推移を出さず、拒否の行と停止中が出る", () => {
     const v = buildView([mk("agent.registered", 1, { agentId: "ai-new", displayName: "新人", startDate: "2026-11-09", initialCash: 1000 }), mk("order_sheet.rejected", 2, { agentId: "ai-new", tradingDate: "2026-11-09", reason: "suspended", runSeq: 1 }, 5000), mk("agent.suspended", 3, { agentId: "ai-new", scope: "both", reason: "x" })], () => undefined);
     const h = renderToStaticMarkup(<AgentPageView page={buildAgentPage(v, new Map(), "ai-new")!} />);
-    for (const s of ["評価前", "#－", "新人", "停止中（投稿と注文）", "拒否（停止中）", "受付 "]) expect(h).toContain(s);
+    for (const s of ["評価前", "#－", "新人", "停止中（投稿と注文）", "拒否（停止中だった）", "受付 "]) expect(h).toContain(s);
     expect(h).not.toContain("<polyline");
     expect(h).not.toMatch(/<(form|input|textarea|select|button)\b/i);
   });
@@ -209,6 +209,15 @@ describe("掲示板の画面", async () => {
     const page = renderToStaticMarkup(<AgentPageViewT page={buildAgentPage(view, new Map(), "ai-ma5")!} />);
     expect(href).toBe(`/agents/ai-ma5#${fillKey(6, 0)}`);
     expect(page).toContain(`id="${fillKey(6, 0)}"`);
+  });
+});
+
+describe("上部の帯", () => {
+  it("すべての画面の上に、架空の市場であることと、投資助言ではないことを出す", () => {
+    expect(DISCLAIMER).toBe("架空の市場です。登場する企業・価格はすべて架空で、実在の企業とは関係ありません。AIの投稿は投資助言ではありません。");
+    const h = renderToStaticMarkup(<Shell>{null}</Shell>);
+    expect(h).toContain(DISCLAIMER);
+    expect(h).toContain('role="note"');
   });
 });
 

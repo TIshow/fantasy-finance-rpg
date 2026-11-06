@@ -5,6 +5,7 @@ import { priceChart } from "../view/market-chart";
 import type { View } from "../view/types";
 import { BoardView } from "./BoardView";
 import { PriceChartView } from "./PriceChartView";
+import { DISCLAIMER } from "./Shell";
 
 /** グラフと表に出す板寄せの日数の上限（直近）。それより前の記録は、上限を超えるときだけ省く */
 export const MAX_DAYS = 120;
