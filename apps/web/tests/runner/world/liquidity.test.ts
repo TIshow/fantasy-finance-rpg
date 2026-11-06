@@ -65,10 +65,19 @@ describe("マーケットメイカーの注文", () => {
           expect(o.qty % 100).toBe(0);
           expect(o.qty).toBeGreaterThan(0);
         }
-        // 重なるのは、中心（持ち株でずらしたあと）が値幅の外で、端の値段で売りと買いの両方を出すときだけ
+        // 中心（持ち株でずらしたあと。makerOrders と同じ計算）が値幅の内側なら、買いの最高値は売りの最安値より必ず低い。
+        // 外なら、端の値段で売りと買いの両方を出す（売る株がなければ買いだけ）
+        const skew = Math.max(-LOGIC_MAKER.maxSkewBp, Math.min(LOGIC_MAKER.maxSkewBp, Math.trunc((held - base.target) / 100) * LOGIC_MAKER.skewPerLotBp));
+        const center = Math.round((fair * (10_000 - skew)) / 10_000);
         const hi = Math.max(...buys(os).map((o) => o.limit!));
         const lo = Math.min(...sells(os).map((o) => o.limit!));
-        if (hi >= lo) expect([hi === lo, [band.lower, band.upper].includes(hi)]).toEqual([true, true]);
+        if (center >= band.lower && center <= band.upper) expect(hi, `fair ${fair} held ${held}`).toBeLessThan(lo);
+        else {
+          const edge = center > band.upper ? band.upper : band.lower;
+          expect(buys(os).every((o) => o.limit === edge) && sells(os).every((o) => o.limit === edge), `fair ${fair} held ${held}`).toBe(true);
+          expect(buys(os).length).toBeGreaterThan(0);
+          expect(sells(os).length).toBe(held > 0 ? 1 : 0);
+        }
       }
     }
   });
@@ -152,7 +161,7 @@ describe("ばらばらに売買する参加者の注文", () => {
   });
 
   it("最初の持ち株と現金からのずれで、売りと買いを片寄らせる（株が減れば買い、現金が減れば売りが多い）。乱数の部分は残る", () => {
-    const baseline = { sharesPerSymbol: 1000, cash: 100_000_000 };
+    const baseline = { shares: Object.fromEntries(markets.map((m) => [m.symbol, 1000])), cash: 100_000_000 };
     const share = (h: number, cash: number, base: typeof baseline | null = baseline) => {
       let b = 0;
       let n = 0;
@@ -173,6 +182,10 @@ describe("ばらばらに売買する参加者の注文", () => {
     expect(poor).toBeLessThan(0.15);
     expect(poor).toBeGreaterThan(0);
     // 基準を渡さなければ片寄らせない（半々）
+    // 最初の持ち株がない銘柄（あとから上場した企業など）は、株の減り方を0とみなす（持ち株0でも買いに張り付かない）
+    const notAllotted = share(500, 100_000_000, { shares: {}, cash: 100_000_000 });
+    expect(notAllotted).toBeGreaterThan(0.4);
+    expect(notAllotted).toBeLessThan(0.6);
     const none = share(500, 100_000_000, null);
     expect(none).toBeGreaterThan(0.4);
     expect(none).toBeLessThan(0.6);

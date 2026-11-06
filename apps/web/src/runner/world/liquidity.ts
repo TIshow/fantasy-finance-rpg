@@ -90,14 +90,16 @@ export function makerOrders(input: MakerInput, params: MakerParams = MAKER_PARAM
     return out.map((x) => ({ symbol: input.symbol, side, qty: x.qty, limit: x.price }));
   };
   const range = Array.from({ length: params.levels }, (_, i) => i + 1);
-  let asks = merge("sell", range.map((i) => clamp(Math.ceil(at(i, 1) / (TICK * BP)) * TICK, input.band)));
-  let bids = merge("buy", range.map((i) => clamp(Math.floor(at(i, -1) / (TICK * BP)) * TICK, input.band)));
+  // 中心が値幅の外なら（#139 の lead の決定）、すべての段を値幅の端の値段に置き、売りと買いの両方を出す。上の外なら上限、
+  // 下の外なら下限で、自分の売りと買いが当たるので、その日に必ず値段がつき、値段は毎日値幅いっぱいずつ目安に近づく
+  // （ストップ高・安が続く動き）
+  const edge = center > input.band.upper ? input.band.upper : center < input.band.lower ? input.band.lower : null;
+  let asks = merge("sell", range.map((i) => edge ?? clamp(Math.ceil(at(i, 1) / (TICK * BP)) * TICK, input.band)));
+  let bids = merge("buy", range.map((i) => edge ?? clamp(Math.floor(at(i, -1) / (TICK * BP)) * TICK, input.band)));
   // 売りは先に持ち株で減らす（売れない売りのために買いを外さないように）
   asks = limitQty(asks, input.held, (o) => o.qty);
-  // 中心が値幅の外なら（#139 の lead の決定）、値幅の端の値段で売りと買いの両方を出す。上の外なら上限、下の外なら下限で、
-  // 自分の売りと買いが当たるので、その日に必ず値段がつき、値段は毎日値幅いっぱいずつ目安に近づく（ストップ高・安が続く動き）。
   // 中心が値幅の内側なら、重なった段は外す（自分どうしで約定しないように）
-  if (center <= input.band.upper && center >= input.band.lower) bids = bids.filter((b) => b.limit < (asks[0]?.limit ?? Infinity));
+  if (edge === null) bids = bids.filter((b) => b.limit < (asks[0]?.limit ?? Infinity));
   return [...asks, ...limitQty(bids, input.cash, (o) => o.qty * o.limit)];
 }
 
@@ -144,15 +146,16 @@ export interface NoiseInput {
   markets: readonly { symbol: string; prevPrice: Deciyen; band: PriceBand }[];
   holdings: Readonly<Record<string, number>>;
   cash: Deciyen;
-  /** 最初の持ち株（1銘柄あたり）と現金。売りと買いの片寄りの基準。省けば片寄らせない */
-  baseline?: { sharesPerSymbol: number; cash: Deciyen };
+  /** 最初の持ち株（銘柄ごと）と現金。売りと買いの片寄りの基準。省けば片寄らせない。最初の持ち株がない銘柄は、株の減り方を0とみなす */
+  baseline?: { shares: Readonly<Record<string, number>>; cash: Deciyen };
 }
 
 /** 買いの確率：最初の持ち株・現金からの減り方で片寄らせ、[minBuyChance, 1 − minBuyChance] に収める */
 function buyChance(input: NoiseInput, symbol: string, cash: Deciyen, params: NoiseParams): number {
   const b = input.baseline;
-  if (!b || b.sharesPerSymbol <= 0 || b.cash <= 0) return 0.5;
-  const sharesDown = (b.sharesPerSymbol - (input.holdings[symbol] ?? 0)) / b.sharesPerSymbol;
+  if (!b || b.cash <= 0) return 0.5;
+  const base = Object.hasOwn(b.shares, symbol) ? b.shares[symbol]! : 0;
+  const sharesDown = base > 0 ? (base - (input.holdings[symbol] ?? 0)) / base : 0;
   const cashDown = (b.cash - cash) / b.cash;
   return Math.min(1 - params.minBuyChance, Math.max(params.minBuyChance, 0.5 + params.tilt * (sharesDown - cashDown)));
 }
