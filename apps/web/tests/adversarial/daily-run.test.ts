@@ -4,7 +4,7 @@
 // (1) 同じ日を何度回しても、あとから前の日を回し直しても、休日に回しても、記録は増えない
 // (2) GitHub Actions の形（待たずに 06:50・07:20・09:35・16:35 に回す）でも、待つ形で回したのと同じ台帳になる
 // (3) 評価（valuation.recorded）と引け後の処理は、その日の 15:30 より後に書く
-// (4) 毎日の実行は、上場の日に上場の前の四半期の決算を発表する（「引けのあとの評価と決算の発表」まで進める）
+// (4) 毎日の実行は、上場の日に上場の前の四半期の決算を発表する（#143 で直った。確かめるのは daily-production.test.ts）
 // (5) verify（verifyDatabase）は、連鎖のハッシュを作り直した改ざん（数字の書き換え・1件の抜き取り）も、
 //     ログの外の値の書き換えも見逃さない
 import type { PGlite } from "@electric-sql/pglite";
@@ -104,15 +104,8 @@ describe("毎日の実行のコマンドを、本番の準備で3営業日回す
     expect(early.map((e) => `${e.type} ${String(p(e).agentId)} ${new Date(e.recordedAt).toISOString()}`)).toEqual([]);
   }, 120_000);
 
-  // 欠陥（宛先：platform、scripts/daily-lib.ts）：runDaily と productionSetup は discloseDue を呼ばない。
-  // 毎日の実行のコマンドだけで動かすと、決算の発表（company.disclosed）が1件も書かれず、マーケットメイカーはずっと上場の価格で注文する。
-  // #30 の lead の指示は「判断 → 締め切り → 板寄せ → 約定 → 引けのあとの評価と決算の発表」、#139 の通しの確認は「決算の発表が1回以上」
-  it.fails("毎日の実行のコマンドは、上場の日に6社の上場の前の四半期の決算を発表する", async () => {
-    await fresh();
-    await runWaiting(DAYS.slice(0, 1));
-    const disclosed = (await readAllEvents(db)).filter((e) => e.type === "company.disclosed");
-    expect(disclosed.length).toBe(6);
-  }, 120_000);
+  // 上場の日の決算の発表（以前の欠陥。#143 で直った）は、daily-production.test.ts の
+  // 「毎日の実行のコマンドだけで、上場の日に、6社の上場の前の四半期を発表する」が、銘柄と四半期まで確かめる（重複なので、ここからは外した）
 });
 
 /** 書き換えた記録を、連鎖のハッシュを先頭から作り直して DB に入れ直す（表の持ち主がトリガを外した場合） */
