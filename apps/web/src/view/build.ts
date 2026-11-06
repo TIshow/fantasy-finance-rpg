@@ -2,8 +2,9 @@
 // 台帳の記録（約定・評価）をそのまま写す。残高・損益・順位を台帳の外の規則で計算し直さない（順位は記録された評価額の並べ替えだけ）。
 import { readBody } from "./body";
 import type { LogEvent } from "../events/types";
-import { INITIAL_CASH, type Deciyen, type Fill } from "../ledger/types";
-import { formatMonthDay, formatSignedYen, formatYen } from "./format";
+import { INITIAL_CASH, type Deciyen, type Fill, type ParticipantKind } from "../ledger/types";
+import { buildMarket } from "./market";
+import { formatJst, formatMonthDay, formatSignedYen, formatYen } from "./format";
 import type { AgentDay, AgentPerformance, Evidence, SymbolThread, TimelineItem, View } from "./types";
 
 type P = Record<string, any>; // 連鎖の検査を通ったイベントの中身
@@ -15,6 +16,7 @@ type P = Record<string, any>; // 連鎖の検査を通ったイベントの中�
 export function buildView(events: readonly LogEvent[], body: (hash: string) => unknown): View {
   const names = new Map<string, string>();
   const initial = new Map<string, Deciyen>();
+  const kinds = new Map<string, ParticipantKind>();
   const timeline: TimelineItem[] = [];
   const evidence: Evidence[] = [];
   const last = new Map<string, Deciyen>();
@@ -24,7 +26,11 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
   const withdrawn = new Map<number, { seq: number; reason: string }>();
   for (const e of events) if (e.type === "content.withdrawn") withdrawn.set((e.payload as P).targetSeq, { seq: e.seq, reason: String((e.payload as P).reason ?? "") });
   const closeDate = new Map<number, string>();
-  for (const e of events) if (e.type === "prices.close") closeDate.set(e.seq, (e.payload as P).date);
+  // 評価に使う価格の記録の日：終値、板寄せ、上場（価格のつかなかった日の評価は、前の日の価格を使う）
+  for (const e of events) {
+    if (e.type === "prices.close" || e.type === "auction.cleared") closeDate.set(e.seq, (e.payload as P).date);
+    else if (e.type === "company.listed") closeDate.set(e.seq, formatJst(e.recordedAt).slice(0, 10));
+  }
   const nameOf = (id: string) => names.get(id) ?? id;
 
   for (const e of [...events].sort((a, b) => a.seq - b.seq)) {
@@ -34,6 +40,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
       case "agent.registered":
         names.set(p.agentId, p.displayName);
         initial.set(p.agentId, p.initialCash ?? INITIAL_CASH);
+        kinds.set(p.agentId, p.kind ?? "investor");
         break;
       case "post.published":
         {
@@ -58,7 +65,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
         const total: Deciyen = p.total;
         const change = total - (last.get(p.agentId) ?? initial.get(p.agentId) ?? INITIAL_CASH);
         last.set(p.agentId, total);
-        const positions = (p.positions as P[]).map((x) => ({ symbol: x.symbol, qty: x.qty, price: x.price, priceText: formatYen(x.price), closeSeq: x.closeSeq, stale: (closeDate.get(x.closeSeq) ?? p.date) < p.date }));
+        const positions = (p.positions as P[]).map((x) => ({ symbol: x.symbol, qty: x.qty, price: x.price, priceText: formatYen(x.price), closeSeq: x.priceSeq ?? x.closeSeq, stale: (closeDate.get(x.priceSeq ?? x.closeSeq) ?? p.date) < p.date }));
         timeline.push({ ...base(p.agentId), kind: "valuation", date: p.date, cash: p.cash, positions, total, totalText: formatYen(total), change, changeText: formatSignedYen(change) });
         // rank は全AIの出そろった後に入れる
         (days.get(p.agentId) ?? days.set(p.agentId, []).get(p.agentId)!).push({ date: p.date, total, totalText: formatYen(total), change, changeText: formatSignedYen(change), stale: positions.some((x) => x.stale), rank: 0 });
@@ -107,5 +114,5 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
     initialCash: initial.get(agentId) ?? INITIAL_CASH,
     days: (days.get(agentId) ?? []).sort((a, b) => lessThan(a.date, b.date)),
   }));
-  return { timeline, evidence, threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)) };
+  return { timeline, evidence, market: buildMarket(events), participants: [...kinds].map(([agentId, kind]) => ({ agentId, kind })).sort((a, b) => lessThan(a.agentId, b.agentId)), threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)) };
 }

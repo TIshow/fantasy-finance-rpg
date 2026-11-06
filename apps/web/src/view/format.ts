@@ -54,3 +54,15 @@ export function formatMonthDay(date: string): string {
 export function formatJstShort(ms: number): string {
   return formatJst(ms).slice(5, 16).replace("-", "/");
 }
+
+/** 円の整数（売上・純利益など、0.1円単位ではない金額）→ "¥1,234,567"。負は "-¥..." */
+export function formatPlainYen(yen: number): string {
+  if (!Number.isSafeInteger(yen)) throw new Error(`not a yen amount: ${String(yen)}`);
+  return `${yen < 0 ? "-" : ""}¥${group(Math.abs(yen))}`;
+}
+
+/** "2026-Q4" → "2026年 第4四半期" */
+export function formatPeriod(period: string): string {
+  const m = /^(\d{4})-Q([1-4])$/.exec(period);
+  return m ? `${m[1]}年 第${m[2]}四半期` : period;
+}
