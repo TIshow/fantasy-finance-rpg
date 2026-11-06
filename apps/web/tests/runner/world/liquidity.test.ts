@@ -24,8 +24,11 @@ describe("マーケットメイカーの注文", () => {
     const even = mid(makerOrders(base));
     expect(mid(makerOrders({ ...base, held: 2000 }))).toBeLessThan(even);
     expect(mid(makerOrders({ ...base, held: 500 }))).toBeGreaterThan(even);
-    const far = makerOrders({ ...base, held: 100_000 });
-    expect(mid(far)).toBeGreaterThanOrEqual(10000 * (1 - MAKER_PARAMS.maxSkew) - 400);
+    // 上限：中心は目安から 3% まで（多すぎても少なすぎても）
+    expect(buys(makerOrders({ ...base, held: 100_000 }))[0]!.limit).toBe(9600);
+    expect(sells(makerOrders({ ...base, held: 0, target: 100_000, cash: 1e12 }))).toEqual([]);
+    expect(buys(makerOrders({ ...base, held: 0, target: 100_000 }))[0]!.limit).toBe(10190); // 中心 10300 の 1% 下を切り下げ
+    expect(MAKER_PARAMS.maxSkewBp).toBe(MAKER_PARAMS.spreadBp * MAKER_PARAMS.levels);
   });
 
   it("値はすべて1円の刻みで、値幅の内側。買いの最高値は売りの最安値より低い（自分どうしで約定しない）", () => {
@@ -44,6 +47,18 @@ describe("マーケットメイカーの注文", () => {
         expect(hi).toBeLessThan(lo);
       }
     }
+  });
+
+  it("低い価格で値幅が狭くても、買いと売りは重ならない。刻みは整数で計算する（丸めの誤差で1刻み広がらない）", () => {
+    expect(makerOrders({ ...base, fair: 15, band: { lower: 10, upper: 20 } })).toEqual([
+      { symbol: "VRN1", side: "sell", qty: 300, limit: 20 },
+      { symbol: "VRN1", side: "buy", qty: 300, limit: 10 },
+    ]);
+    // 中心 × (1 ± 段の幅) がちょうど刻みに乗るときは、その値段（浮動小数で計算すると、切り上げで1刻みずれることがあった）
+    const os = makerOrders({ ...base, fair: 25000, band: { lower: 20000, upper: 30000 } });
+    expect(os.map((o) => o.limit)).toEqual([25250, 25500, 25750, 24750, 24500, 24250]);
+    expect(() => makerOrders({ ...base, fair: Number.NaN })).toThrow();
+    expect(() => makerOrders({ ...base, band: { lower: 12000, upper: 8000 } })).toThrow("band");
   });
 
   it("目安の価格が値幅より上なら、上限で買うだけ。下なら、下限で売るだけ（押しつけられた段はまとめる）", () => {
@@ -102,8 +117,19 @@ describe("ばらばらに売買する参加者の注文", () => {
     expect(buys(noiseOrders({ ...input, cash: 0 }))).toEqual([]);
   });
 
-  it("ある銘柄で注文を出せなくても、ほかの銘柄の注文は変わらない（乱数の列がずれない）", () => {
-    const without = noiseOrders({ ...input, holdings: { ...holdings, VRN1: 0 } }).filter((o) => o.symbol !== "VRN1");
-    expect(without).toEqual(noiseOrders(input).filter((o) => o.symbol !== "VRN1"));
+  it("銘柄を外しても、ほかの銘柄の注文は変わらない（乱数の列は銘柄ごと）", () => {
+    for (let seed = 0; seed < 10; seed++) {
+      const all = noiseOrders({ ...input, seed });
+      for (const gone of markets.map((m) => m.symbol)) {
+        const without = noiseOrders({ ...input, seed, markets: markets.filter((m) => m.symbol !== gone) });
+        expect(without).toEqual(all.filter((o) => o.symbol !== gone));
+      }
+    }
+  });
+
+  it("おかしな入力は受け付けない（重複した銘柄、刻みに合わない値幅、100株単位でない上限）", () => {
+    expect(() => noiseOrders({ ...input, markets: [...markets, markets[0]!] })).toThrow("duplicate");
+    expect(() => noiseOrders({ ...input, markets: [{ ...markets[0]!, band: { lower: 8005, upper: 12000 } }] })).toThrow("band");
+    expect(() => noiseOrders(input, { chance: 1, maxQty: 250, marketShare: 0, maxOffsetBp: 0 })).toThrow("maxQty");
   });
 });
