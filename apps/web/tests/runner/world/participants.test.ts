@@ -137,7 +137,10 @@ describe("runDay（売買役の毎日の注文）", async () => {
     const sheets = of("order_sheet.committed").filter((e) => p(e).agentId === makerId("VRN1"));
     // 初日は買いと売りを3段ずつ。決算の発表で目安の価格が値幅の下限より下がった日は、下限の売りだけ
     expect((p(sheets[0]!).orders as Order[]).map((o) => o.side)).toEqual(["sell", "sell", "sell", "buy", "buy", "buy"]);
-    expect(p(sheets[1]!).orders).toEqual([{ symbol: "VRN1", side: "sell", qty: 900, limit: priceBand(listingPrice(SEED, VRN1)).lower }]);
+    // 値幅は、2日目の前で価格のついた直近の板寄せ（なければ上場の価格）から決まる
+    const day1 = of("auction.cleared").find((e) => p(e).symbol === "VRN1" && p(e).date === p(sheets[0]!).tradingDate)!;
+    const ref = (p(day1).price as number | null) ?? listingPrice(SEED, VRN1);
+    expect(p(sheets[1]!).orders).toEqual([{ symbol: "VRN1", side: "sell", qty: 900, limit: priceBand(ref).lower }]);
     for (const s of sheets) {
       const orders = p(s).orders as Order[];
       const prev = of("auction.cleared").filter((e) => p(e).symbol === "VRN1" && (p(e).date as string) < (p(s).tradingDate as string));

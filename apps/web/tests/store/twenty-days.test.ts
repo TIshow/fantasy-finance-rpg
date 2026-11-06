@@ -112,12 +112,16 @@ describe("本番の入口で20営業日を回す（PGlite）", () => {
       expect(e.recordedAt).toBeLessThan(cutoffOf(DAY21));
     }
 
-    // 板寄せの値段：6社それぞれに値段のついた日があり、6社そろって値段のついた日もある
+    // 板寄せの値段（lead の目標、#139）：各社が8割以上の日（16日以上）に値段がつき、6社そろって値段がつく日が半分以上（10日以上）
     const priced = of("auction.cleared").filter((e) => p(e).price !== null);
-    for (const s of SYMBOLS) expect(priced.some((e) => p(e).symbol === s), s).toBe(true);
+    const pricedDays = Object.fromEntries(SYMBOLS.map((s) => [s, priced.filter((e) => p(e).symbol === s).length]));
     const byDay = new Map<string, Set<string>>();
     for (const e of priced) byDay.set(p(e).date as string, (byDay.get(p(e).date as string) ?? new Set()).add(p(e).symbol as string));
-    expect([...byDay.values()].filter((s) => s.size === SYMBOLS.length).length).toBeGreaterThanOrEqual(1);
+    const allSixDays = [...byDay.values()].filter((s) => s.size === SYMBOLS.length).length;
+    // 結果を出す（数字を変えたときに、どれだけ余裕があるかを見るため）
+    console.log(`priced days per company ${JSON.stringify(pricedDays)}, all six priced on ${allSixDays} of 20 days`);
+    for (const s of SYMBOLS) expect(pricedDays[s], `${s}: ${JSON.stringify(pricedDays)}`).toBeGreaterThanOrEqual(16);
+    expect(allSixDays, JSON.stringify(pricedDays)).toBeGreaterThanOrEqual(10);
 
     // 毎営業日、AI投資家3体の評価が残る
     expect(of("valuation.recorded").filter((e) => String(p(e).agentId).startsWith("ai-")).length).toBe(3 * 20);

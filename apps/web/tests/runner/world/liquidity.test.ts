@@ -1,13 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { type LiquidityOrder, MAKER_PARAMS, makerOrders, noiseOrders } from "../../../src/runner/world/liquidity";
+import { type LiquidityOrder, MAKER_PARAMS, NOISE_PARAMS, makerOrders, noiseOrders } from "../../../src/runner/world/liquidity";
 
 // 価格は0.1円単位（1000円 = 10000）
 const band = { lower: 8000, upper: 12000 };
 const base = { symbol: "VRN1", fair: 10000, band, held: 1000, target: 1000, cash: 100_000_000 };
 const buys = (os: LiquidityOrder[]) => os.filter((o) => o.side === "buy");
 const sells = (os: LiquidityOrder[]) => os.filter((o) => o.side === "sell");
-// 段の株数は既定の300株（#113 の lead の決定）。ここでは数えやすいように100株で確かめる
-const maker = (input: Parameters<typeof makerOrders>[0], params = { ...MAKER_PARAMS, qtyPerLevel: 100 }) => makerOrders(input, params);
+// 関数の決まりは、決まった数字で確かめる（既定の数字は値がつく日数に合わせて変えることがあるので、別の項目で確かめる）。
+// 段の幅1%・3段・持ち株100株ごとに0.2%・上限3%。段の株数は数えやすいように100株
+const LOGIC_MAKER = { spreadBp: 100, levels: 3, qtyPerLevel: 100, skewPerLotBp: 20, maxSkewBp: 300 };
+const LOGIC_NOISE = { chance: 0.6, maxQty: 300, marketShare: 0.3, maxOffsetBp: 300 };
+const maker = (input: Parameters<typeof makerOrders>[0], params = LOGIC_MAKER) => makerOrders(input, params);
+const noise = (input: Parameters<typeof noiseOrders>[0], params = LOGIC_NOISE) => noiseOrders(input, params);
+
+describe("売買役の既定の数字（#139 で、値段がつく日を増やすために変えた）", () => {
+  it("マーケットメイカーは0.5%ずつ3段・1段300株・中心をずらす上限は段の幅×段の数。ばらばらの参加者は毎日・9割が成行", () => {
+    expect(MAKER_PARAMS).toEqual({ spreadBp: 50, levels: 3, qtyPerLevel: 300, skewPerLotBp: 20, maxSkewBp: 150 });
+    expect(MAKER_PARAMS.maxSkewBp).toBe(MAKER_PARAMS.spreadBp * MAKER_PARAMS.levels);
+    expect(NOISE_PARAMS).toEqual({ chance: 1, maxQty: 300, marketShare: 0.9, maxOffsetBp: 300 });
+  });
+
+  it("既定の数字でも、買いの最高値は売りの最安値より低く、ばらばらの参加者は毎日すべての銘柄に注文を出す", () => {
+    for (const fair of [5000, 9000, 10000, 15000]) {
+      const os = makerOrders({ symbol: "VRN1", fair, band: { lower: 8000, upper: 12000 }, held: 5000, target: 5000, cash: 500_000_000 });
+      expect(Math.max(...os.filter((o) => o.side === "buy").map((o) => o.limit!))).toBeLessThan(Math.min(...os.filter((o) => o.side === "sell").map((o) => o.limit!)));
+    }
+    const markets = ["VRN1", "ORS1", "MRH1"].map((symbol) => ({ symbol, prevPrice: 10000, band: { lower: 8000, upper: 12000 } }));
+    const os = noiseOrders({ seed: 1, tradingDate: "2026-11-09", markets, holdings: { VRN1: 1000, ORS1: 1000, MRH1: 1000 }, cash: 100_000_000 });
+    expect(os.map((o) => o.symbol).sort()).toEqual(["MRH1", "ORS1", "VRN1"]);
+  });
+});
 
 describe("マーケットメイカーの注文", () => {
   it("目安の価格のまわりに、1%ずつ離した買いと売りの指値を3段ずつ出す（買いは切り下げ、売りは切り上げ）", () => {
@@ -30,8 +52,6 @@ describe("マーケットメイカーの注文", () => {
     expect(buys(maker({ ...base, held: 100_000 }))[0]!.limit).toBe(9600);
     expect(sells(maker({ ...base, held: 0, target: 100_000, cash: 1e12 }))).toEqual([]);
     expect(buys(maker({ ...base, held: 0, target: 100_000 }))[0]!.limit).toBe(10190); // 中心 10300 の 1% 下を切り下げ
-    expect(MAKER_PARAMS.maxSkewBp).toBe(MAKER_PARAMS.spreadBp * MAKER_PARAMS.levels);
-    expect(MAKER_PARAMS.qtyPerLevel).toBe(300);
   });
 
   it("値はすべて1円の刻みで、値幅の内側。買いの最高値は売りの最安値より低い（自分どうしで約定しない）", () => {
@@ -86,15 +106,15 @@ describe("ばらばらに売買する参加者の注文", () => {
   const input = { seed: 7, tradingDate: "2026-11-09", markets, holdings, cash: 100_000_000 };
 
   it("同じシードと日なら同じ注文、日やシードが違えば違う注文。銘柄の並べ方では変わらない", () => {
-    expect(noiseOrders(input)).toEqual(noiseOrders(input));
-    expect(noiseOrders({ ...input, markets: [...markets].reverse() })).toEqual(noiseOrders(input));
-    const days = ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12"].map((tradingDate) => JSON.stringify(noiseOrders({ ...input, tradingDate })));
+    expect(noise(input)).toEqual(noise(input));
+    expect(noise({ ...input, markets: [...markets].reverse() })).toEqual(noise(input));
+    const days = ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12"].map((tradingDate) => JSON.stringify(noise({ ...input, tradingDate })));
     expect(new Set(days).size).toBe(days.length);
-    expect(noiseOrders({ ...input, seed: 8 })).not.toEqual(noiseOrders(input));
+    expect(noise({ ...input, seed: 8 })).not.toEqual(noise(input));
   });
 
   it("株数は100株単位で上限まで、指値は前日の価格 ±3% の1円刻みで値幅の内側、成行も指値もある", () => {
-    const all = Array.from({ length: 60 }, (_, i) => noiseOrders({ ...input, tradingDate: `2026-12-${String((i % 28) + 1).padStart(2, "0")}`, seed: i })).flat();
+    const all = Array.from({ length: 60 }, (_, i) => noise({ ...input, tradingDate: `2026-12-${String((i % 28) + 1).padStart(2, "0")}`, seed: i })).flat();
     expect(all.length).toBeGreaterThan(100);
     for (const o of all) {
       expect(o.qty % 100).toBe(0);
@@ -114,27 +134,27 @@ describe("ばらばらに売買する参加者の注文", () => {
 
   it("持っていない銘柄は売らない。買いは指値（成行は値幅の上限）× 株数の合計が現金を超えない", () => {
     for (let seed = 0; seed < 40; seed++) {
-      expect(sells(noiseOrders({ ...input, seed, holdings: {} }))).toEqual([]);
+      expect(sells(noise({ ...input, seed, holdings: {} }))).toEqual([]);
       const cash = 2_500_000;
-      const os = noiseOrders({ ...input, seed, cash });
+      const os = noise({ ...input, seed, cash });
       expect(buys(os).reduce((a, o) => a + (o.limit ?? band.upper) * o.qty, 0)).toBeLessThanOrEqual(cash);
     }
-    expect(buys(noiseOrders({ ...input, cash: 0 }))).toEqual([]);
+    expect(buys(noise({ ...input, cash: 0 }))).toEqual([]);
   });
 
   it("銘柄を外しても、ほかの銘柄の注文は変わらない（乱数の列は銘柄ごと）", () => {
     for (let seed = 0; seed < 10; seed++) {
-      const all = noiseOrders({ ...input, seed });
+      const all = noise({ ...input, seed });
       for (const gone of markets.map((m) => m.symbol)) {
-        const without = noiseOrders({ ...input, seed, markets: markets.filter((m) => m.symbol !== gone) });
+        const without = noise({ ...input, seed, markets: markets.filter((m) => m.symbol !== gone) });
         expect(without).toEqual(all.filter((o) => o.symbol !== gone));
       }
     }
   });
 
   it("おかしな入力は受け付けない（重複した銘柄、刻みに合わない値幅、100株単位でない上限）", () => {
-    expect(() => noiseOrders({ ...input, markets: [...markets, markets[0]!] })).toThrow("duplicate");
-    expect(() => noiseOrders({ ...input, markets: [{ ...markets[0]!, band: { lower: 8005, upper: 12000 } }] })).toThrow("band");
+    expect(() => noise({ ...input, markets: [...markets, markets[0]!] })).toThrow("duplicate");
+    expect(() => noise({ ...input, markets: [{ ...markets[0]!, band: { lower: 8005, upper: 12000 } }] })).toThrow("band");
     expect(() => noiseOrders(input, { chance: 1, maxQty: 250, marketShare: 0, maxOffsetBp: 0 })).toThrow("maxQty");
   });
 });
