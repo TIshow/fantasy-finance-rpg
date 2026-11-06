@@ -22,6 +22,8 @@ describe("指値の確定の検査", () => {
       expect(check([{ symbol: "NEO1", side: "buy", qty: 100, limit }]), String(limit)).toEqual({ ok: false, reason: "invalid_price" });
     }
     expect(check([{ symbol: "NEO1", side: "buy", qty: 100, limit: "1000" as unknown as number }])).toEqual({ ok: false, reason: "invalid_price" });
+    // 成行は limit を書かない。null は成行と読まず断る
+    expect(check([{ symbol: "NEO1", side: "buy", qty: 100, limit: null as unknown as number }])).toEqual({ ok: false, reason: "invalid_price" });
   });
 
   it("上場の記録がない銘柄には、指値を出せない（基準の価格がない）。成行はこれまでどおり", () => {
@@ -33,6 +35,15 @@ describe("指値の確定の検査", () => {
     expect(check([{ symbol: "NEO1", side: "buy", qty: 500_000 }])).toEqual({ ok: true });
     expect(check([{ symbol: "NEO1", side: "buy", qty: 500_100 }])).toEqual({ ok: false, reason: "invalid_qty" });
     expect(check([{ symbol: "NEO1", side: "buy", qty: 9_000_000_000_000_000 }])).toEqual({ ok: false, reason: "invalid_qty" });
+    // 売りも同じ。保有が上限を超えていても、1件は上限まで
+    const big = { cash: INITIAL_CASH, holdings: { NEO1: { qty: 500_150, cost: 1 } } };
+    expect(check([{ symbol: "NEO1", side: "sell", qty: 500_000 }], big)).toEqual({ ok: true });
+    expect(check([{ symbol: "NEO1", side: "sell", qty: 500_150 }], big)).toEqual({ ok: false, reason: "invalid_qty" });
+  });
+
+  it("注文は並びの順に確かめ、最初に見つかった理由を返す", () => {
+    const held = { cash: INITIAL_CASH, holdings: { NEO1: { qty: 100, cost: 1 } } };
+    expect(check([{ symbol: "NEO1", side: "buy", qty: 100, limit: yen(5) }, { symbol: "NEO1", side: "sell", qty: 1000 }], held)).toEqual({ ok: false, reason: "invalid_price" });
   });
 });
 

@@ -76,6 +76,15 @@ const JUDGED_DATES: Partial<Record<EventType, string[]>> = {
 /** 注文の中身で決まる拒否の理由（validateSheet の注文ごとの検査） */
 const ORDER_REASONS: ReadonlySet<RejectReason> = new Set<RejectReason>(["invalid_order", "unknown_symbol", "invalid_qty", "insufficient_holdings", "invalid_price"]);
 
+/** company.listed の項目 */
+const LISTING_FIELDS = ["symbol", "name", "sector", "sharesOutstanding", "price"];
+/**
+ * 発行済株式数の上限（100億株）。1件の注文の株数は発行済株式数までなので、注文が数十万件あっても、
+ * 板寄せの株数の合計は正確に扱える整数の範囲（約900京）に収まる
+ */
+const MAX_SHARES = 10_000_000_000;
+const isShortText = (v: unknown) => typeof v === "string" && v !== "" && v.length <= 100;
+
 /** 銘柄コード（例：7203、130A。テストでは架空の英字） */
 const SYMBOL = /^[0-9A-Z]{3,8}$/;
 
@@ -313,6 +322,8 @@ export class EventLog {
         // 遅れた公表は、どの引け後処理でも反映されないので、黙って残さず拒む（運営者が §6.2 で扱う）
         // 権利落ち日は、その時点の休場日（臨時休場を含む）で営業日であること。休場日の公表は、どの引け後処理にも渡らない
         const exDate = p.exDate as string;
+        // 上場した銘柄の分割は、株数の上限と値幅の基準の価格を合わせる規則を決めるまで受け付けない（#110）
+        if (p.kind === "split" && this.listings.has(p.symbol as string)) return "splits of listed companies are not supported yet";
         let before: string;
         try {
           if (!isBusinessDay(exDate, H)) return "exDate must be a business day";
@@ -328,9 +339,11 @@ export class EventLog {
         return null;
       }
       case "company.listed": {
-        // 架空の企業の上場（MARKET_DESIGN §1・§2）。社名・業種は空でない文字列、発行済株式数は正の整数、最初の価格は呼値に合う値
-        if (typeof p.name !== "string" || p.name === "" || typeof p.sector !== "string" || p.sector === "") return "name and sector are required";
-        if (!Number.isSafeInteger(p.sharesOutstanding) || (p.sharesOutstanding as number) <= 0) return "sharesOutstanding must be a positive integer";
+        // 架空の企業の上場（MARKET_DESIGN §1・§2）。社名・業種は空でない短い文字列、発行済株式数は上限までの正の整数、最初の価格は呼値に合う値
+        if (Object.keys(p).some((k) => !LISTING_FIELDS.includes(k))) return "unknown field in a listing";
+        if ((p.symbol as string).startsWith("TST")) return "symbols starting with TST are for tests";
+        if (!isShortText(p.name) || !isShortText(p.sector)) return "name and sector are required (up to 100 characters)";
+        if (!Number.isSafeInteger(p.sharesOutstanding) || (p.sharesOutstanding as number) <= 0 || (p.sharesOutstanding as number) > MAX_SHARES) return `sharesOutstanding must be a positive integer up to ${MAX_SHARES}`;
         const price = p.price;
         if (!Number.isSafeInteger(price) || (price as number) < TICK || (price as number) > MAX_PRICE || (price as number) % TICK !== 0) return "price must be a positive multiple of the tick";
         return null;

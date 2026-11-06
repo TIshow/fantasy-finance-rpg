@@ -36,6 +36,20 @@ async function setup() {
 }
 
 describe("company.listed（#110 PR-2a）", () => {
+  it("上場した銘柄の分割の公表は、まだ受け付けない。配当は受け付ける", async () => {
+    const { log } = await setup();
+    const at = jst("2026-11-09", 23);
+    expect(await reason(log, sys("corporate_action.announced", at, { symbol: "NEO1", kind: "split", exDate: "2026-11-16", valuesHash: "c".repeat(64) }))).toBe("splits of listed companies are not supported yet");
+    expect(await reason(log, sys("corporate_action.announced", at, { symbol: "NEO1", kind: "dividend", exDate: "2026-11-16", valuesHash: "c".repeat(64) }))).toBe("ok");
+  });
+
+  it("正規化できない指値（小数）は、理由 invalid_price の読めない拒否として残り、照合でも認められる", async () => {
+    const { log, src, run } = await setup();
+    const r = await log.commitSheet(jst("2026-11-10", 7), "alpha", { tradingDate: "2026-11-10", orders: [{ symbol: "NEO1", side: "buy", qty: 100, limit: 10_000.5 }], runSeq: run, inputSeqs: [src] });
+    expect(r.ok && [r.rejected, (r.event.payload as Record<string, unknown>).ordersUnreadable]).toEqual(["invalid_price", true]);
+    await expect(replay(log.events, { get: () => undefined }, CTX)).resolves.toBeDefined();
+  });
+
   it("システムだけが書け、同じ銘柄の上場は1回だけ", async () => {
     const { log } = await setup();
     expect(await reason(log, { ...sys("company.listed", 3, { ...listing, symbol: "NEO2" }), actor: "operator:owner" })).toBe("company.listed must be written by system");
@@ -47,10 +61,14 @@ describe("company.listed（#110 PR-2a）", () => {
     const at = jst("2026-11-09", 23);
     const bad: [Record<string, unknown>, string][] = [
       [{ symbol: "neo2" }, "invalid symbol"],
-      [{ name: "" }, "name and sector are required"],
-      [{ sector: 1 }, "name and sector are required"],
-      [{ sharesOutstanding: 0 }, "sharesOutstanding must be a positive integer"],
-      [{ sharesOutstanding: 1.5 }, "sharesOutstanding must be a positive integer"],
+      [{ symbol: "TSTX" }, "symbols starting with TST are for tests"],
+      [{ name: "" }, "name and sector are required (up to 100 characters)"],
+      [{ name: "あ".repeat(101) }, "name and sector are required (up to 100 characters)"],
+      [{ sector: 1 }, "name and sector are required (up to 100 characters)"],
+      [{ sharesOutstanding: 0 }, "sharesOutstanding must be a positive integer up to 10000000000"],
+      [{ sharesOutstanding: 1.5 }, "sharesOutstanding must be a positive integer up to 10000000000"],
+      [{ sharesOutstanding: 10_000_000_001 }, "sharesOutstanding must be a positive integer up to 10000000000"],
+      [{ ceo: "x" }, "unknown field in a listing"],
       [{ price: 10_005 }, "price must be a positive multiple of the tick"],
       [{ price: 0 }, "price must be a positive multiple of the tick"],
     ];
