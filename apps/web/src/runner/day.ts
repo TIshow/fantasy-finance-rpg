@@ -12,8 +12,8 @@ import type { LogEvent } from "../events/types";
 import type { HolidayTable } from "../holidays/table";
 import { cutoffOf, isBusinessDay, nextBusinessDay, previousBusinessDay } from "../ledger/ledger";
 import type { Account, Deciyen, Order } from "../ledger/types";
+import type { ValuesPort } from "../store/pg-values";
 import { type SplitInput, adjustCloses } from "./adjust";
-import type { RunnerValues } from "./values";
 
 /** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引き、凍結した写しを渡す */
 export interface CloseInput {
@@ -66,7 +66,11 @@ export interface RunnerAgent {
 export interface RunnerDeps {
   store: EventStore;
   market: MarketDataPort;
-  values: RunnerValues;
+  /**
+   * 値と本文を置く・引く口（メモリの RunnerValues か、Postgres の PgValueStore）。store に渡したものと同じものを渡す
+   * （store は追記の前に、ここに置いた値をハッシュで引いて確かめる）
+   */
+  values: ValuesPort;
   holidayTables: ReadonlyMap<string, HolidayTable>;
   agents: readonly RunnerAgent[];
   /** 時計の権威（保管と同じもの） */

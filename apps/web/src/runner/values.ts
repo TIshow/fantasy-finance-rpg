@@ -1,14 +1,14 @@
 // ログの外に置く値（EVENT_LOG §5.2）：prices.* の値（valuesHash）と、投稿の本文・AIの出力（bodyHash・outputHash）。
-// メモリ上に持つだけ（保存先は #20）。乱数（salt）は外側なので、差し替えられる関数で受け取る（試験では固定シード）。
+// メモリ上に持つだけ（Postgres に残すものは src/store/pg-values.ts の PgValueStore）。乱数（salt）は外側なので、差し替えられる関数で受け取る（試験では固定シード）。
 import { bodyHash } from "../events/hash";
-import type { ValueStore } from "../events/replay";
+import type { ValuesPort } from "../store/pg-values";
 
 export type Salted<T> = { salt: Uint8Array; value: T };
 
 /** 本番の salt：暗号用の乱数 16 バイト */
 export const randomSalt = () => crypto.getRandomValues(new Uint8Array(16));
 
-export class RunnerValues implements ValueStore {
+export class RunnerValues implements ValuesPort {
   private readonly values = new Map<string, Salted<unknown>>();
   private readonly bodies = new Map<string, Salted<string>>();
 
