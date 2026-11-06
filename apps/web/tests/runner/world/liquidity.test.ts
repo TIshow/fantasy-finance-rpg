@@ -6,10 +6,12 @@ const band = { lower: 8000, upper: 12000 };
 const base = { symbol: "VRN1", fair: 10000, band, held: 1000, target: 1000, cash: 100_000_000 };
 const buys = (os: LiquidityOrder[]) => os.filter((o) => o.side === "buy");
 const sells = (os: LiquidityOrder[]) => os.filter((o) => o.side === "sell");
+// 段の株数は既定の300株（#113 の lead の決定）。ここでは数えやすいように100株で確かめる
+const maker = (input: Parameters<typeof makerOrders>[0], params = { ...MAKER_PARAMS, qtyPerLevel: 100 }) => makerOrders(input, params);
 
 describe("マーケットメイカーの注文", () => {
   it("目安の価格のまわりに、1%ずつ離した買いと売りの指値を3段ずつ出す（買いは切り下げ、売りは切り上げ）", () => {
-    expect(makerOrders({ ...base, fair: 10005 })).toEqual([
+    expect(maker({ ...base, fair: 10005 })).toEqual([
       { symbol: "VRN1", side: "sell", qty: 100, limit: 10110 },
       { symbol: "VRN1", side: "sell", qty: 100, limit: 10210 },
       { symbol: "VRN1", side: "sell", qty: 100, limit: 10310 },
@@ -21,20 +23,21 @@ describe("マーケットメイカーの注文", () => {
 
   it("持ち株が目標より多ければ値段を下げ、少なければ上げる。ずらす幅には上限がある", () => {
     const mid = (os: LiquidityOrder[]) => (buys(os)[0]!.limit! + sells(os)[0]!.limit!) / 2;
-    const even = mid(makerOrders(base));
-    expect(mid(makerOrders({ ...base, held: 2000 }))).toBeLessThan(even);
-    expect(mid(makerOrders({ ...base, held: 500 }))).toBeGreaterThan(even);
+    const even = mid(maker(base));
+    expect(mid(maker({ ...base, held: 2000 }))).toBeLessThan(even);
+    expect(mid(maker({ ...base, held: 500 }))).toBeGreaterThan(even);
     // 上限：中心は目安から 3% まで（多すぎても少なすぎても）
-    expect(buys(makerOrders({ ...base, held: 100_000 }))[0]!.limit).toBe(9600);
-    expect(sells(makerOrders({ ...base, held: 0, target: 100_000, cash: 1e12 }))).toEqual([]);
-    expect(buys(makerOrders({ ...base, held: 0, target: 100_000 }))[0]!.limit).toBe(10190); // 中心 10300 の 1% 下を切り下げ
+    expect(buys(maker({ ...base, held: 100_000 }))[0]!.limit).toBe(9600);
+    expect(sells(maker({ ...base, held: 0, target: 100_000, cash: 1e12 }))).toEqual([]);
+    expect(buys(maker({ ...base, held: 0, target: 100_000 }))[0]!.limit).toBe(10190); // 中心 10300 の 1% 下を切り下げ
     expect(MAKER_PARAMS.maxSkewBp).toBe(MAKER_PARAMS.spreadBp * MAKER_PARAMS.levels);
+    expect(MAKER_PARAMS.qtyPerLevel).toBe(300);
   });
 
   it("値はすべて1円の刻みで、値幅の内側。買いの最高値は売りの最安値より低い（自分どうしで約定しない）", () => {
     for (const fair of [5000, 7990, 8000, 9000, 10000, 11900, 12000, 15000]) {
       for (const held of [0, 300, 1000, 5000]) {
-        const os = makerOrders({ ...base, fair, held });
+        const os = maker({ ...base, fair, held });
         for (const o of os) {
           expect(o.limit! % 10).toBe(0);
           expect(o.limit!).toBeGreaterThanOrEqual(band.lower);
@@ -50,28 +53,30 @@ describe("マーケットメイカーの注文", () => {
   });
 
   it("低い価格で値幅が狭くても、買いと売りは重ならない。刻みは整数で計算する（丸めの誤差で1刻み広がらない）", () => {
-    expect(makerOrders({ ...base, fair: 15, band: { lower: 10, upper: 20 } })).toEqual([
+    expect(maker({ ...base, fair: 15, band: { lower: 10, upper: 20 } })).toEqual([
       { symbol: "VRN1", side: "sell", qty: 300, limit: 20 },
       { symbol: "VRN1", side: "buy", qty: 300, limit: 10 },
     ]);
     // 中心 × (1 ± 段の幅) がちょうど刻みに乗るときは、その値段（浮動小数で計算すると、切り上げで1刻みずれることがあった）
-    const os = makerOrders({ ...base, fair: 25000, band: { lower: 20000, upper: 30000 } });
+    const os = maker({ ...base, fair: 25000, band: { lower: 20000, upper: 30000 } });
     expect(os.map((o) => o.limit)).toEqual([25250, 25500, 25750, 24750, 24500, 24250]);
-    expect(() => makerOrders({ ...base, fair: Number.NaN })).toThrow();
-    expect(() => makerOrders({ ...base, band: { lower: 12000, upper: 8000 } })).toThrow("band");
+    expect(() => maker({ ...base, fair: Number.NaN })).toThrow();
+    expect(() => maker({ ...base, band: { lower: 12000, upper: 8000 } })).toThrow("band");
   });
 
   it("目安の価格が値幅より上なら、上限で買うだけ。下なら、下限で売るだけ（押しつけられた段はまとめる）", () => {
-    expect(makerOrders({ ...base, fair: 20000 })).toEqual([{ symbol: "VRN1", side: "buy", qty: 300, limit: 12000 }]);
-    expect(makerOrders({ ...base, fair: 5000 })).toEqual([{ symbol: "VRN1", side: "sell", qty: 300, limit: 8000 }]);
+    expect(maker({ ...base, fair: 20000 })).toEqual([{ symbol: "VRN1", side: "buy", qty: 300, limit: 12000 }]);
+    expect(maker({ ...base, fair: 5000 })).toEqual([{ symbol: "VRN1", side: "sell", qty: 300, limit: 8000 }]);
   });
 
   it("売りは持っている株数まで、買いは指値 × 株数の合計が現金を超えない分まで", () => {
-    expect(sells(makerOrders({ ...base, held: 200, target: 200 })).map((o) => o.qty)).toEqual([100, 100]);
-    expect(sells(makerOrders({ ...base, held: 0, target: 0 }))).toEqual([]);
-    const poor = makerOrders({ ...base, cash: 9900 * 100 + 9800 * 100 + 5 });
+    expect(sells(maker({ ...base, held: 200, target: 200 })).map((o) => o.qty)).toEqual([100, 100]);
+    expect(sells(maker({ ...base, held: 0, target: 0 }))).toEqual([]);
+    // 目安が値幅の下限より下でも、売る株がなければ買いを外さない（値幅の下限で買う）
+    expect(maker({ ...base, fair: 5000, held: 0, target: 0 })).toEqual([{ symbol: "VRN1", side: "buy", qty: 300, limit: 8000 }]);
+    const poor = maker({ ...base, cash: 9900 * 100 + 9800 * 100 + 5 });
     expect(buys(poor).map((o) => [o.limit, o.qty])).toEqual([[9900, 100], [9800, 100]]);
-    expect(buys(makerOrders({ ...base, cash: 0 }))).toEqual([]);
+    expect(buys(maker({ ...base, cash: 0 }))).toEqual([]);
   });
 });
 

@@ -59,10 +59,10 @@ describe("buildAgentPage（手で組んだ小さなログ）", () => {
   it("取引履歴は新しい約定日から。確定の時刻と判断の実行の番号は元の注文票から", () => {
     expect(page.history.map((h) => [h.dateText, h.head, h.symbol, h.tail, h.status, h.reason, h.runSeq])).toEqual([
       ["11/10", "注文なし", null, "", "売買なし", null, 88],
-      ["11/09", "買", "X1", " 100株 @¥10（注文 200株）", "一部のみ約定", "現金不足", 77],
+      ["11/09", "買", "X1", " 100株 @¥10（注文 200株）", "一部のみ約定", "現金が足りなかった", 77],
     ]);
     expect(page.history[1]!.committedText).toBe("11/08 21:00");
-    expect(buildAgentPage(view, new Map(), "ai-hold")!.history).toMatchObject([{ head: "注文票", status: "拒否", reason: "停止中" }]);
+    expect(buildAgentPage(view, new Map(), "ai-hold")!.history).toMatchObject([{ head: "注文票", status: "拒否", reason: "停止中だった" }]);
   });
 
   it("推移は全AIを重ね、このAIを最後に太く描く。全部の点が枠の中", () => {

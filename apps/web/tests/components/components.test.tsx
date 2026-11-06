@@ -21,7 +21,7 @@ describe("画面の部品（ゴールデンログ）", async () => {
     </Shell>,
   );
 
-  it("上部に模擬売買の注意書きがあり、タイムラインの全項目が出る", () => {
+  it("上部に架空の市場の注意書きがあり、タイムラインの全項目が出る", () => {
     expect(html.indexOf(DISCLAIMER)).toBeGreaterThanOrEqual(0);
     expect(html.indexOf(DISCLAIMER)).toBeLessThan(html.indexOf("<ol>"));
     expect(html.match(/<time /g)?.length).toBe(view.timeline.length);
