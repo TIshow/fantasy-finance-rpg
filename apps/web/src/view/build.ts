@@ -32,6 +32,8 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
     else if (e.type === "company.listed") closeDate.set(e.seq, formatJst(e.recordedAt).slice(0, 10));
   }
   const nameOf = (id: string) => names.get(id) ?? id;
+  // 順位・カード・AIのページに出るのは、種類が AI投資家（種類のない登録も）の参加者だけ。ほかの参加者は売買の記録（タイムライン）にだけ出る
+  const isInvestor = (id: string) => (kinds.get(id) ?? "investor") === "investor";
 
   for (const e of [...events].sort((a, b) => a.seq - b.seq)) {
     const p = e.payload as P;
@@ -68,7 +70,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
         const positions = (p.positions as P[]).map((x) => ({ symbol: x.symbol, qty: x.qty, price: x.price, priceText: formatYen(x.price), closeSeq: x.priceSeq ?? x.closeSeq, stale: (closeDate.get(x.priceSeq ?? x.closeSeq) ?? p.date) < p.date }));
         timeline.push({ ...base(p.agentId), kind: "valuation", date: p.date, cash: p.cash, positions, total, totalText: formatYen(total), change, changeText: formatSignedYen(change) });
         // rank は全AIの出そろった後に入れる
-        (days.get(p.agentId) ?? days.set(p.agentId, []).get(p.agentId)!).push({ date: p.date, total, totalText: formatYen(total), change, changeText: formatSignedYen(change), stale: positions.some((x) => x.stale), rank: 0 });
+        if (isInvestor(p.agentId)) (days.get(p.agentId) ?? days.set(p.agentId, []).get(p.agentId)!).push({ date: p.date, total, totalText: formatYen(total), change, changeText: formatSignedYen(change), stale: positions.some((x) => x.stale), rank: 0 });
         break;
       }
       case "source.captured":
@@ -108,7 +110,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
     (threadMap.get(it.symbol) ?? threadMap.set(it.symbol, { symbol: it.symbol, items: [] }).get(it.symbol)!).items.push(it);
   }
   // 登録されたAIは、まだ評価がなくても載せる（最初の日の前でも参戦中として見える）
-  const agents: AgentPerformance[] = [...new Set([...initial.keys(), ...days.keys()])].map((agentId) => ({
+  const agents: AgentPerformance[] = [...new Set([...initial.keys(), ...days.keys()])].filter(isInvestor).map((agentId) => ({
     agentId,
     agentName: nameOf(agentId),
     initialCash: initial.get(agentId) ?? INITIAL_CASH,

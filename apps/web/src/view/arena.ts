@@ -98,9 +98,12 @@ const FEED_LIMIT = 12;
 
 export function buildArena(view: View): Arena {
   const who = (id: string, loggedName: string) => characterOf(id, loggedName).name;
-  const posts = view.timeline.filter((t): t is TimelineItem & { kind: "post" } => t.kind === "post");
-  const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.qty > 0);
-  const valuations = view.timeline.filter((t): t is TimelineItem & { kind: "valuation" } => t.kind === "valuation");
+  // トップに出すのはAI投資家（view.agents）の動きだけ。マーケットメイカー・ばらばらの参加者の売買は、タイムラインにある
+  const investors = new Set(view.agents.map((a) => a.agentId));
+  const mine = view.timeline.filter((t) => investors.has(t.agentId));
+  const posts = mine.filter((t): t is TimelineItem & { kind: "post" } => t.kind === "post");
+  const fills = mine.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.qty > 0);
+  const valuations = mine.filter((t): t is TimelineItem & { kind: "valuation" } => t.kind === "valuation");
 
   const settledDays = settledDates(view);
   const cards: ArenaCard[] = view.agents.map((a) => {

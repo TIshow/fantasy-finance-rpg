@@ -104,7 +104,8 @@ export function buildBoard(view: View, symbol: string): Board | null {
   for (const p of out) counts[p.intent ?? "none"]++;
 
   const lastVal = new Map<string, TimelineItem & { kind: "valuation" }>();
-  for (const t of view.timeline) if (t.kind === "valuation") lastVal.set(t.agentId, t);
+  const investors = new Set(view.agents.map((a) => a.agentId)); // この銘柄を持つ「AI」は、AI投資家だけ
+  for (const t of view.timeline) if (t.kind === "valuation" && investors.has(t.agentId)) lastVal.set(t.agentId, t);
   const holders = [...lastVal.values()].flatMap((v) => {
     const pos = v.positions.find((x) => x.symbol === symbol && x.qty > 0);
     const c = characterOf(v.agentId, v.agentName);
