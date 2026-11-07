@@ -14,6 +14,7 @@ const card = (over: Partial<ArenaCard> = {}): ArenaCard => ({
   character: characterOf("ai-reversal", "x"),
   loggedName: "x",
   handle: "@ai-reversal",
+  model: null,
   rank: 2,
   totalText: "¥9,900,000",
   asOf: "11/18",

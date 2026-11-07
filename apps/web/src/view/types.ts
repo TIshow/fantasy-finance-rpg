@@ -72,6 +72,13 @@ export interface Evidence {
   fetchedAt: number | null;
 }
 
+/** 判断の記録（agent.run）に残ったモデル。AIごとに、最後の記録のもの */
+export interface AgentModel {
+  agentId: string;
+  provider: string;
+  modelId: string;
+}
+
 export interface View {
   timeline: TimelineItem[];
   /** 架空の市場の記録（上場・板寄せ・決算）。記録がなければ companies は空 */
@@ -81,4 +88,6 @@ export interface View {
   evidence: Evidence[];
   threads: SymbolThread[];
   agents: AgentPerformance[];
+  /** 判断の記録のあるAIのモデル（AIのID順） */
+  models: AgentModel[];
 }

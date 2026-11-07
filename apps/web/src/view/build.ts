@@ -5,7 +5,7 @@ import type { LogEvent } from "../events/types";
 import { INITIAL_CASH, type Deciyen, type Fill, type ParticipantKind } from "../ledger/types";
 import { buildMarket } from "./market";
 import { formatJst, formatMonthDay, formatSignedYen, formatYen } from "./format";
-import type { AgentDay, AgentPerformance, Evidence, SymbolThread, TimelineItem, View } from "./types";
+import type { AgentDay, AgentModel, AgentPerformance, Evidence, SymbolThread, TimelineItem, View } from "./types";
 
 type P = Record<string, any>; // 連鎖の検査を通ったイベントの中身
 
@@ -18,6 +18,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
   const initial = new Map<string, Deciyen>();
   const kinds = new Map<string, ParticipantKind>();
   const timeline: TimelineItem[] = [];
+  const models = new Map<string, AgentModel>();
   const evidence: Evidence[] = [];
   const last = new Map<string, Deciyen>();
   const days = new Map<string, AgentDay[]>();
@@ -45,6 +46,10 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
         names.set(p.agentId, p.displayName);
         initial.set(p.agentId, p.initialCash ?? INITIAL_CASH);
         kinds.set(p.agentId, p.kind ?? "investor");
+        break;
+      case "agent.run":
+        // 最後の記録のモデルを残す。形が違う記録は読み飛ばす（画面を止めない）
+        if (typeof p.agentId === "string" && typeof p.model?.provider === "string" && typeof p.model?.modelId === "string") models.set(p.agentId, { agentId: p.agentId, provider: p.model.provider, modelId: p.model.modelId });
         break;
       case "post.published":
         {
@@ -117,5 +122,5 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
     initialCash: initial.get(agentId) ?? INITIAL_CASH,
     days: (days.get(agentId) ?? []).sort((a, b) => lessThan(a.date, b.date)),
   }));
-  return { timeline, evidence, market: buildMarket(events), participants: [...kinds].map(([agentId, kind]) => ({ agentId, kind })).sort((a, b) => lessThan(a.agentId, b.agentId)), threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)) };
+  return { timeline, evidence, market: buildMarket(events), participants: [...kinds].map(([agentId, kind]) => ({ agentId, kind })).sort((a, b) => lessThan(a.agentId, b.agentId)), threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)), models: [...models.values()].sort((a, b) => lessThan(a.agentId, b.agentId)) };
 }
