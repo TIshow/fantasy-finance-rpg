@@ -123,7 +123,7 @@ describe("Anthropic のバッチの口", () => {
 
   describe("記録にないバッチを探す", () => {
     const status = (id: string, createdAt: string) => ({ ...JSON.parse(recorded("anthropic-batch-ended.json")), id, created_at: createdAt });
-    const q = { agentId: "claude-ai", tradingDate: "2026-11-10", since: AT - 600_000, now: AT, recordedBatchIds: new Set(["msgbatch_rec"]) };
+    const q = { agentId: "claude-ai", tradingDate: "2026-11-10", since: AT - 600_000, now: AT, requestedAt: AT - 300_000, recordedBatchIds: new Set(["msgbatch_rec"]) };
 
     it("since より後に作られた、記録にないものを返す。古いものに届いたら止める", async () => {
       const page = { data: [status("msgbatch_new", "2026-11-09T07:36:00Z"), status("msgbatch_rec", "2026-11-09T07:35:30Z"), status("msgbatch_old", "2026-11-08T07:35:00Z")], has_more: true, first_id: "msgbatch_new", last_id: "msgbatch_old" };

@@ -1,9 +1,12 @@
 // バッチの口の共通部分（費用の上限の予約・送る前の確かめ・閉じた結果）の試験。提供元は呼ばず、偽の driver を使う。
 import { describe, expect, it } from "vitest";
 import type { LlmBatchRequest, LlmBatchTicket } from "../../src/contracts";
+import { EventLog } from "../../src/events/append";
 import { sha256Hex } from "../../src/events/hash";
-import { llmTokenCost } from "../../src/events/llm-cost";
-import { BatchBudget, BatchPort, batchCustomIdOf, batchKeyOf, batchSpendOf, type BatchDriver, type BatchOutcome, type BatchSpend, type SendResult } from "../../src/llm/batch-port";
+import { llmCostUsed, llmTokenCost } from "../../src/events/llm-cost";
+import { newAccount } from "../../src/ledger/ledger";
+import { INITIAL_CASH } from "../../src/ledger/types";
+import { BatchBudget, BatchPort, batchCustomIdOf, batchKeyOf, batchSpendOf, unknownCostDrafts, type BatchDriver, type BatchOutcome, type BatchSpend, type SendResult } from "../../src/llm/batch-port";
 
 const PRICE = { inputCentsPer10MTok: 1000, outputCentsPer10MTok: 5000 };
 const AT = Date.parse("2026-11-09T07:35:00Z"); // 日本時間 16:35
@@ -132,9 +135,14 @@ describe("送る前の確かめ（RangeError で reject し、送らない）", 
     ["料金表にないモデル", { model: { provider: "fake", modelId: "m2", settings: { max_tokens: "2000" } } }],
     ["maxOutputTokens が max_tokens より小さい", { maxOutputTokens: 1999, maxCost: 1000 }],
     ["maxInputTokens が送る本文のバイト数より小さい", { maxInputTokens: 10 }],
+    ["maxInputTokens が送る本文のバイト数×inputCostFactor より小さい", { maxInputTokens: 60, maxCost: 1000 }],
     ["取引日の形が違う", { tradingDate: "2026/11/10" }],
+    ["submittedAt が今から5分より前", { submittedAt: AT - 300_000 }],
+    ["submittedAt が今から5分より後", { submittedAt: AT + 302_000 }],
+    ["messages が配列でない", { messages: "入力" as never }],
+    ["messages の content が文字列でない・role が決まりの外", { messages: [{ role: "user", content: 1 }, { role: "tool", content: "x" }] as never }],
   ])("%s", async (_name, over) => {
-    const { driver, calls } = fakeDriver();
+    const { driver, calls } = fakeDriver({ inputCostFactor: 3 });
     await expect(port(driver).submit(req(over))).rejects.toThrow(RangeError);
     expect(calls.send).toBe(0);
   });
@@ -184,9 +192,39 @@ describe("受け取りと打ち切り", () => {
   it("記録にないバッチを探す：customId を渡し、例外は unknown", async () => {
     const seen: string[] = [];
     const { driver } = fakeDriver({ lookup: async (q) => (seen.push(q.customId), { kind: "found", batchIds: ["b9"] }) });
-    expect(await port(driver).findUnrecorded({ agentId: "ai-1", tradingDate: "2026-11-10", since: AT, now: AT, recordedBatchIds: new Set() })).toEqual({ kind: "found", batchIds: ["b9"] });
+    expect(await port(driver).findUnrecorded({ agentId: "ai-1", tradingDate: "2026-11-10", since: AT, now: AT, requestedAt: AT, recordedBatchIds: new Set() })).toEqual({ kind: "found", batchIds: ["b9"] });
     expect(seen).toEqual([await batchCustomIdOf("ai-1", "2026-11-10")]);
     const bad = fakeDriver({ lookup: async () => Promise.reject(new Error("x")) });
-    expect(await port(bad.driver).findUnrecorded({ agentId: "ai-1", tradingDate: "2026-11-10", since: AT, now: AT, recordedBatchIds: new Set() })).toEqual({ kind: "unknown" });
+    expect(await port(bad.driver).findUnrecorded({ agentId: "ai-1", tradingDate: "2026-11-10", since: AT, now: AT, requestedAt: AT, recordedBatchIds: new Set() })).toEqual({ kind: "unknown" });
+  });
+});
+
+describe("課金されたか分からない依頼の2つの記録（unknownCostDrafts・unrecordedDrafts）", () => {
+  const H = "a".repeat(64);
+  const l = new EventLog({ holidayTables: new Map([[H, { firstYear: 2026, lastYear: 2027, sourceSha256: "0".repeat(64), contentSha256: H, dates: new Set<string>() }]]), accountOf: () => newAccount() });
+  async function write(d: Awaited<ReturnType<typeof unknownCostDrafts>>) {
+    expect(await l.canAppend(d.submitted)).toBeNull();
+    const s = await l.append(d.submitted);
+    expect(s.ok && (await l.canAppend(d.closedFor(s.event.seq))) === null && (await l.append(d.closedFor(s.event.seq))).ok).toBe(true);
+  }
+
+  it("止まる前に送った依頼（found・unknown）：送らずに書け、費用は maxCost で一意キーも埋まる。billingUnknown でも同じ形で書ける", async () => {
+    await l.append({ type: "holidays.adopted", recordedAt: 0, actor: "operator:owner", refs: [], payload: { holidaysSha256: H } });
+    for (const agentId of ["ai-1", "ai-2"]) await l.append({ type: "agent.registered", recordedAt: AT - 6 * 3_600_000, actor: "operator:owner", refs: [], payload: { agentId, startDate: "2026-11-10", initialCash: INITIAL_CASH } });
+    const { driver, calls } = fakeDriver();
+    const d = await port(driver).unrecordedDrafts(req(), AT + 1000);
+    expect(d.submitted.payload).toMatchObject({ batchId: null, maxCost: 160, customId: await batchCustomIdOf("ai-1", "2026-11-10"), sentBodyHash: await sha256Hex(new TextEncoder().encode(JSON.stringify(req().messages))) });
+    expect(d.closedFor(9).payload).toEqual({ batchSeq: 9, agentId: "ai-1", result: "failed", cost: 160, costUnknown: true, inputTokens: 0, outputTokens: 0 });
+    await write(d);
+    expect(calls.send).toBe(0);
+    expect(llmCostUsed(l.events, DAY)).toBe(160);
+    expect(await l.canAppend((await port(driver).unrecordedDrafts(req(), AT + 2000)).submitted)).toMatch(/duplicate key/);
+    await expect(port(driver).unrecordedDrafts(req({ maxCost: 95 }), AT + 1000)).rejects.toThrow(RangeError);
+    // submit が billingUnknown を返したとき。予約は記録の側に移り、二重に数えない
+    const b = new BatchBudget({ dailyCostLimit: 1000, dryRun: false }, async (day: string) => batchSpendOf(l.events, day));
+    const r = await port(fakeDriver({}, async () => ({ ok: false, errorCode: "timeout", billingUnknown: true })).driver, b).submit(req({ agentId: "ai-2" }));
+    if (r.ok || r.errorCode === "budget_exceeded") throw new Error("unexpected");
+    await write(await unknownCostDrafts(req({ agentId: "ai-2" }), r.sentBodyHash, AT + 1000));
+    expect(await b.spent(DAY)).toBe(320);
   });
 });

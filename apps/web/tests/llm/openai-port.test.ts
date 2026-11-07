@@ -3,9 +3,10 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { LlmBatchRequest, LlmBatchTicket } from "../../src/contracts";
 import { sha256Hex } from "../../src/events/hash";
+import { llmTokenCost } from "../../src/events/llm-cost";
 import { BatchBudget, batchCustomIdOf } from "../../src/llm/batch-port";
-import { OpenAIBatchClient } from "../../src/llm/openai-batch";
-import { openaiBatchPort, openaiReservePrice } from "../../src/llm/openai-port";
+import { OpenAIBatchClient, openaiBatchFileBody, toOpenAIParams } from "../../src/llm/openai-batch";
+import { OPENAI_CREATE_SETTLE_MS, openaiBatchPort, openaiReservePrice } from "../../src/llm/openai-port";
 
 const recorded = (name: string) => readFileSync(new URL(`./recorded/${name}`, import.meta.url), "utf8");
 const KEY = "sk-test-not-a-real-key";
@@ -118,6 +119,25 @@ describe("OpenAI のバッチの口", () => {
       expect(await make((await done("run-b")).f).collect(await ticketFor())).toMatchObject({ result: "collected", usage: { inputTokens: 20_000, outputTokens: 4500, cacheCreationInputTokens: 8192 } });
     });
 
+    it("キャッシュの書き込みが入力のほぼすべてで、出力が max_tokens ちょうどでも、費用は maxCost を超えない（予約は入力の3倍を見込む）", async () => {
+      const id = await batchCustomIdOf("gpt-ai", "2026-11-10");
+      const bytes = new TextEncoder().encode(openaiBatchFileBody([{ customId: id, params: toOpenAIParams(req().model, req().messages) }])).length;
+      const maxCost = llmTokenCost({ inputTokens: bytes * 3, outputTokens: 4000 }, { ...PRICE, yenPerUsd: 160 })!;
+      const created = () => fakeFetch((_m, url) => new Response(recorded(url.endsWith("/v1/files") ? "openai-file-uploaded.json" : "openai-batch-created.json"))).f;
+      await expect(make(created()).submit(req({ maxInputTokens: bytes * 3 - 1, maxCost }))).rejects.toThrow(RangeError);
+      const r = await make(created()).submit(req({ maxInputTokens: bytes * 3, maxCost }));
+      if (!r.ok) throw new Error("submit failed");
+      // 記録済みの run-b の行の使用量を、入力が本文のバイト数ちょうどで、1つを除いてキャッシュへの書き込みにしたもの
+      const line = JSON.parse(recorded("openai-batch-output.jsonl").split("\n").find((l) => l.includes('"run-b"'))!);
+      line.custom_id = id;
+      line.response.body.usage = { input_tokens: bytes, input_tokens_details: { cached_tokens: 0, cache_write_tokens: bytes - 1 }, output_tokens: 4000, output_tokens_details: { reasoning_tokens: 4000 }, total_tokens: bytes + 4000 };
+      const { f } = fakeFetch((_m, url) => new Response(url.endsWith(`/files/${OUT}/content`) ? JSON.stringify(line) : recorded(url.endsWith(`/files/${ERR}/content`) ? "openai-batch-errors.jsonl" : "openai-batch-completed.json")));
+      const c = await make(f).collect(r.ticket);
+      expect(c).toMatchObject({ result: "collected", usage: { inputTokens: bytes, outputTokens: 4000, cacheCreationInputTokens: bytes - 1 } });
+      if (c.status !== "closed") throw new Error("pending");
+      expect(c.usage.cost).toBeLessThanOrEqual(maxCost);
+    });
+
     it("期限切れは課金されない。失敗した1件は課金が分からない（maxCost）。エラー文は返さない", async () => {
       expect(await make((await done("run-d")).f).collect(await ticketFor())).toMatchObject({ result: "expired", errorCode: "timeout", usage: { cost: 0 }, price: PRICE });
       const failed = await make((await done("run-c")).f).collect(await ticketFor());
@@ -139,12 +159,15 @@ describe("OpenAI のバッチの口", () => {
     });
   });
 
-  it("記録にないバッチを探す：since より後に作られた、記録にないもの", async () => {
-    const status = (id: string, createdAt: number) => ({ ...JSON.parse(recorded("openai-batch-completed.json")), id, created_at: createdAt / 1000 });
-    const page = { object: "list", data: [status("batch_new", AT), status("batch_rec", AT), status("batch_old", AT - 86_400_000)], has_more: true, first_id: "batch_new", last_id: "batch_old" };
-    const q = { agentId: "gpt-ai", tradingDate: "2026-11-10", since: AT - 600_000, now: AT, recordedBatchIds: new Set(["batch_rec"]) };
-    expect(await make(fakeFetch(() => new Response(JSON.stringify(page))).f).findUnrecorded(q)).toEqual({ kind: "found", batchIds: ["batch_new"] });
-    expect(await make(fakeFetch(() => new Response('{"object":"list","data":[],"has_more":false}')).f).findUnrecorded(q)).toEqual({ kind: "none" });
+  it("記録にないバッチを探す：since（秒に切り下げ）より後に作られた、記録にないもの。送ってから1時間たつまでは none にしない", async () => {
+    const status = (id: string, createdAt: number) => ({ ...JSON.parse(recorded("openai-batch-completed.json")), id, created_at: Math.floor(createdAt / 1000) });
+    // batch_sec は since と同じ秒に作られた（created_at は秒なので、切り下げずに比べると since より前に見える）
+    const page = { object: "list", data: [status("batch_new", AT), status("batch_rec", AT), status("batch_sec", AT - 600_000), status("batch_old", AT - 86_400_000)], has_more: true, first_id: "batch_new", last_id: "batch_old" };
+    const q = { agentId: "gpt-ai", tradingDate: "2026-11-10", since: AT - 600_000 + 999, now: AT + OPENAI_CREATE_SETTLE_MS, requestedAt: AT, recordedBatchIds: new Set(["batch_rec"]) };
+    expect(await make(fakeFetch(() => new Response(JSON.stringify(page))).f).findUnrecorded(q)).toEqual({ kind: "found", batchIds: ["batch_new", "batch_sec"] });
+    const empty = () => fakeFetch(() => new Response('{"object":"list","data":[],"has_more":false}')).f;
+    expect(await make(empty()).findUnrecorded(q)).toEqual({ kind: "none" });
+    expect(await make(empty()).findUnrecorded({ ...q, now: AT + OPENAI_CREATE_SETTLE_MS - 1 })).toEqual({ kind: "unknown" });
     expect(await make(fakeFetch(() => new Response("", { status: 500 })).f).findUnrecorded(q)).toEqual({ kind: "unknown" });
   });
 });

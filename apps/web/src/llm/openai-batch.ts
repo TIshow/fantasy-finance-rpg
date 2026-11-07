@@ -336,7 +336,8 @@ function knownError(error: unknown): { errorType?: OpenAIErrorType; errorCode?: 
  * input_tokens はキャッシュから読んだ分と書き込んだ分を含む（含まない数が返ったら形が合わないとして断る）。
  * - 入力：input_tokens 全部を入力の単価で数える（読み出し（0.05倍）も入力の単価で数える）
  * - 書き込み：cache_write_tokens を cost.ts の書き込みの欄（入力の2倍）にも入れる。入力の欄と合わせて3倍になり、
- *   12時間の書き込み（2.5倍）より高い。cost.ts の読み出しの欄は使わない
+ *   12時間の書き込み（2.5倍）より高い。cost.ts の読み出しの欄は使わない。
+ *   予約はこの3倍を見込む（openai-port.ts の inputCostFactor）ので、費用は maxCost を超えない
  * - 出力：output_tokens（推論のトークンを含む）
  */
 function toTokenUsage(u: Record<string, unknown>): { usage: TokenUsage; reasoningTokens: number } {
