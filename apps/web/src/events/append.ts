@@ -514,7 +514,7 @@ export class EventLog {
         // 依頼を決めた時刻。取引日と費用の暦日はこれで決める（送ったあとに記録が遅れても、取引日が変わらないように）
         const at = p.submittedAt;
         if (!isTime(at) || at > d.recordedAt || d.recordedAt - at > LLM_RECORD_WINDOW_MS) return "submittedAt must be within an hour before recordedAt";
-        // 予約に使った料金（実際の費用の料金はこれ以下）と、予約の見積もりに使ったトークン数の上限
+        // 予約に使った料金（閉じたときも同じ料金で数える）と、予約の見積もりに使ったトークン数の上限
         if (!Number.isSafeInteger(p.yenPerUsd) || (p.yenPerUsd as number) < 1) return "yenPerUsd must be a positive integer";
         if (![...LLM_PRICE_FIELDS, "maxInputTokens", "maxOutputTokens"].every((f) => isCount(p[f]))) return "prices and max token counts must be non-negative integers";
         const bound = llmTokenCost({ inputTokens: p.maxInputTokens as number, outputTokens: p.maxOutputTokens as number }, p as unknown as LlmPrice);
@@ -537,9 +537,11 @@ export class EventLog {
         if (p.costUnknown !== undefined && (p.costUnknown !== true || p.cost !== sp.maxCost)) return "an unknown cost must be the reserved maxCost";
         if (sp.batchId === null && (p.result !== "failed" || p.costUnknown !== true)) return "a submission without a batch id must close as failed with the reserved cost";
         if (p.costUnknown === true) return LLM_PRICE_FIELDS.every((f) => p[f] === undefined) ? null : "an unknown cost has no price";
-        // 実際の費用は、トークン数と使った料金（予約の料金以下）から出した値ちょうど。予約を超えるのは書ける（上限の検査が挙げる）
-        if (!LLM_PRICE_FIELDS.every((f) => isCount(p[f]) && (p[f] as number) <= (sp[f] as number))) return "the price must be non-negative integers not above the reserved price";
-        const want = llmTokenCost(p as unknown as LlmTokens, { yenPerUsd: sp.yenPerUsd as number, inputCentsPer10MTok: p.inputCentsPer10MTok as number, outputCentsPer10MTok: p.outputCentsPer10MTok as number });
+        // 料金は予約の料金ちょうど（安い料金や 0 を書いて、その日の使った額を少なく見せられないように）。
+        // 提供元が実際にはもっと安く請求しても、予約の料金で数える（多めに数えるので安全側）
+        if (!LLM_PRICE_FIELDS.every((f) => p[f] === sp[f])) return "the price must equal the reserved price";
+        // 実際の費用は、トークン数と予約の料金から出した値ちょうど。予約を超えるのは書ける（上限の検査が挙げる）
+        const want = llmTokenCost(p as unknown as LlmTokens, sp as unknown as LlmPrice);
         return p.cost === want ? null : `cost must be ${String(want)} (from the tokens and the price)`;
       }
       case "post.published":

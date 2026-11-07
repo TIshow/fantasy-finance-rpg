@@ -135,7 +135,11 @@ export interface LlmBatchRequest extends LlmRequest {
    * 取引日と費用の暦日（日本時間）はこれで決まる。記録はこの時刻から1時間以内に書く（LLM_RECORD_WINDOW_MS）
    */
   submittedAt: number;
-  /** 予約に使う料金と1ドルあたりの円（既定160）。閉じたときの料金はこれ以下で、円は同じ値を使う */
+  /**
+   * 予約に使う料金と1ドルあたりの円（既定160）。料金は予約のときに一度だけ、submittedAt の時点の料金で決める
+   * （Gemini は 2027-01-01 から値上げ。依頼が切り替えをまたいでも、閉じたときは同じ料金を使う）。
+   * 閉じたときの料金と円は、これとちょうど同じ値（記録の検査が確かめる）
+   */
   reservePrice: LlmBatchPrice & { yenPerUsd: number };
   /**
    * 予約の見積もりに使うトークン数の上限。maxCost は llmTokenCost(この2つ, reservePrice) 以上（上限として見積もる）。
@@ -182,8 +186,10 @@ export type LlmSubmitResult =
  * - collected：答えを受け取った。output と respondedModel がある
  * - expired：締め（8:30）で打ち切った、または提供元で期限が切れた
  * - failed：提供元で失敗した、結果が読めなかった
- * usage.cost は実際の費用（0.1円単位、端数は切り上げ）。llmTokenCost(usage のトークン数, price と reservePrice.yenPerUsd) ちょうど
- * （記録の検査が同じ計算で確かめる）。price は使った料金で、reservePrice 以下（OpenAI の短い文脈の料金など）。
+ * usage.cost は実際の費用（0.1円単位、端数は切り上げ）。llmTokenCost(usage のトークン数, reservePrice) ちょうど
+ * （記録の検査が同じ計算で確かめる）。price は reservePrice の2つの単価をそのまま写したもの（違えば記録できない）。
+ * 提供元が実際にはもっと安く請求しても（OpenAI の短い文脈の料金など）、予約の料金で数える（多めに数えるので安全側）。
+ * 閉じたときに料金を選び直さない（提供元のバッチを作った時刻で選ぶと、値上げをまたいだ依頼が記録できなくなる）。
  * 費用が分からなければ、price を付けず、usage.cost に maxCost をそのまま入れ、costUnknown: true を付ける。
  * 実費が maxCost を超えても切り捨てない。トークン数が分からなければ 0。
  */

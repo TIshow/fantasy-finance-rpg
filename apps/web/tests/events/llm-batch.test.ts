@@ -230,10 +230,17 @@ describe("llm.batch.closed", () => {
     [{ result: "expired", cost: 1, inputTokens: 0, outputTokens: 0 }, "cost must be 0 (from the tokens and the price)"],
     // キャッシュへの書き込みは入力の2倍：1万トークンで 3.2円 を足す
     [{ cacheCreationInputTokens: 10_000 }, "cost must be 76 (from the tokens and the price)"],
-    // 料金は予約の料金以下。書かないのは費用が分からないときだけ
-    [{ inputCentsPer10MTok: 1001 }, "the price must be non-negative integers not above the reserved price"],
-    [{ outputCentsPer10MTok: -1 }, "the price must be non-negative integers not above the reserved price"],
-    [{ outputCentsPer10MTok: null }, "the price must be non-negative integers not above the reserved price"],
+    // 料金は予約の料金ちょうど。高くても安くても、0 でも断る（使った額を少なく見せられないように）。書かないのは費用が分からないときだけ
+    [{ inputCentsPer10MTok: 1001 }, "the price must equal the reserved price"],
+    [{ inputCentsPer10MTok: 999 }, "the price must equal the reserved price"],
+    [{ inputCentsPer10MTok: 500, cost: 33 }, "the price must equal the reserved price"],
+    [{ outputCentsPer10MTok: 4999 }, "the price must equal the reserved price"],
+    [{ inputCentsPer10MTok: 0, outputCentsPer10MTok: 0, cost: 0 }, "the price must equal the reserved price"],
+    [{ inputCentsPer10MTok: 0, outputCentsPer10MTok: 0, cost: 0, inputTokens: 1_000_000, outputTokens: 100_000 }, "the price must equal the reserved price"],
+    [{ outputCentsPer10MTok: -1 }, "the price must equal the reserved price"],
+    [{ outputCentsPer10MTok: null }, "the price must equal the reserved price"],
+    [{ outputCentsPer10MTok: "5000" }, "the price must equal the reserved price"],
+    [{ inputCentsPer10MTok: undefined }, "the price must equal the reserved price"],
   ];
 
   it("形の合わない中身は断る。費用が分からないときは予約した費用ちょうど（実費が予約を超えるのは書ける）", async () => {
@@ -248,10 +255,10 @@ describe("llm.batch.closed", () => {
     // 入力10万・出力1万は 240。予約（150）を超えても書ける（上限の検査が挙げる）
     await ok(log, closed(jst("2026-11-10", 6, 50), s2.seq, { agentId: "beta", cost: 240, inputTokens: 100_000, outputTokens: 10_000 }));
     await ok(log, closed(jst("2026-11-10", 8, 30), s1.seq, { result: "expired", costUnknown: true, cost: 150, inputTokens: 0, outputTokens: 0 }));
-    // 予約より安い料金（OpenAI の短い文脈など）とキャッシュの欄：(2万×500 ＋ 1万×2×500 ＋ 1,500×5000) セント/1,000万 × 160円 ＝ 4.4円
+    // キャッシュの欄は予約の料金で数える：(2万×1000 ＋ 1万×2×1000 ＋ 1,500×5000) セント/1,000万 × 160円 ＝ 7.6円
     const log2 = await setup();
     const s3 = await ok(log2, submitted(jst("2026-11-09", 16, 35)));
-    await ok(log2, closed(jst("2026-11-10", 6, 50), s3.seq, { inputCentsPer10MTok: 500, cost: 44, cacheCreationInputTokens: 10_000, cacheReadInputTokens: 0 }));
+    await ok(log2, closed(jst("2026-11-10", 6, 50), s3.seq, { cost: 76, cacheCreationInputTokens: 10_000, cacheReadInputTokens: 0 }));
   });
 
   it("batchId が null の依頼は、failed・予約した費用（costUnknown）でだけ閉じられる", async () => {
