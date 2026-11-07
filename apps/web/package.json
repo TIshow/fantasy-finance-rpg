@@ -14,7 +14,8 @@
     "lint:purity": "node scripts/check-purity.ts",
     "test": "vitest run",
     "holidays:update": "node scripts/update-holidays.mjs",
-    "holidays:check": "node scripts/update-holidays.mjs --check"
+    "holidays:check": "node scripts/update-holidays.mjs --check",
+    "daily": "node --experimental-transform-types --disable-warning=ExperimentalWarning --import ./scripts/ts-loader.mjs scripts/daily.ts"
   },
   "dependencies": {
     "next": "16.4.3",
