@@ -14,6 +14,7 @@
 import type { LlmMessage, LlmModel } from "../contracts";
 import { sha256Hex } from "../events/hash";
 import type { BatchFailure, SentBody } from "./anthropic-batch";
+import type { TokenUsage } from "./cost";
 
 export type { BatchCall, BatchFailure, SentBody } from "./anthropic-batch";
 
@@ -201,6 +202,32 @@ export function isOpenAIBillingError(f: { providerErrorType?: OpenAIErrorType; p
   );
 }
 
+/**
+ * 1件の結果。
+ * succeeded：応答が 200 で、Responses の status が completed か incomplete（出力の上限・内容の検査で途中で止まった）。
+ *   どちらも課金される。output は output_text をつないだもの。refused は、モデルが答えを断った部分があったか。
+ * errored：応答が 200 でない、または応答がなくエラーだけがある。資料は課金されるのを「完了した依頼のトークン」とだけ書き、
+ *   失敗した依頼の課金を書いていない。トークン数も返らないので、呼び出し側は maxCost を費用として残す。
+ *   エラーの種類と印は、公式の一覧にあるときだけ持つ。エラー文は持たない。
+ * expired：24時間以内に処理されなかった（課金されない）。
+ * malformed：その行の形が合わなかったもの（line は何行目か。1から）。課金されたかは分からない（maxCost を費用とする）。
+ */
+export type BatchItemResult =
+  | {
+      customId: string;
+      type: "succeeded";
+      status: "completed" | "incomplete";
+      incompleteReason?: "max_output_tokens" | "content_filter";
+      output: string;
+      refused: boolean;
+      respondedModel: string;
+      usage: TokenUsage;
+      reasoningTokens: number;
+    }
+  | { customId: string; type: "errored"; statusCode?: number; errorType?: OpenAIErrorType; errorCode?: OpenAIErrorCode }
+  | { customId: string; type: "expired" }
+  | { type: "malformed"; line: number; customId?: string };
+
 const CUSTOM_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const OBJECT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -212,6 +239,8 @@ export interface OpenAIBatchClientOptions {
   baseUrl?: string;
   /** 1回の HTTP の呼び出し（本文を読み終えるまで）の待ち時間の上限（ミリ秒）。超えたら timeout */
   timeoutMs?: number;
+  /** 結果のファイルの取り出しの待ち時間の上限（ミリ秒）。件数が多いと本文が大きくなるので、ほかより長い既定にする */
+  resultsTimeoutMs?: number;
   /** ファイルの上げの待ち時間の上限（ミリ秒）。上げるファイルは最大 200MB なので、ほかより長い既定にする */
   uploadTimeoutMs?: number;
 }
@@ -231,6 +260,7 @@ const optTime = (v: unknown): number | null => (v === null || v === undefined ? 
 const isId = (v: unknown): v is string => isStr(v) && OBJECT_ID.test(v);
 /** ID の欄。なければ null。あれば英数字・ハイフン・下線だけ（あとで URL のパスに入れるので、形を確かめる） */
 const optId = (v: unknown): string | null => (v === null || v === undefined ? null : need(isId(v), v as string));
+const optCount = (v: unknown): number => (v === null || v === undefined ? 0 : need(isCount(v), v as number));
 
 function parseFile(json: unknown): UploadedFile {
   need(isObj(json) && json.object === "file" && isStr(json.id) && OBJECT_ID.test(json.id) && json.purpose === "batch", null);
@@ -279,6 +309,130 @@ function knownError(error: unknown): { errorType?: OpenAIErrorType; errorCode?: 
     ...(isStr(error.type) && KNOWN_TYPES.has(error.type) ? { errorType: error.type as OpenAIErrorType } : {}),
     ...(isStr(error.code) && KNOWN_CODES.has(error.code) ? { errorCode: error.code as OpenAIErrorCode } : {}),
   };
+}
+
+/**
+ * 提供元のトークン数を cost.ts の欄に、高めに数える側で割り当てる。
+ * input_tokens はキャッシュから読んだ分と書き込んだ分を含む（含まない数が返ったら形が合わないとして断る）。
+ * - 入力：input_tokens 全部を入力の単価で数える（読み出し（0.05倍）も入力の単価で数える）
+ * - 書き込み：cache_write_tokens を cost.ts の書き込みの欄（入力の2倍）にも入れる。入力の欄と合わせて3倍になり、
+ *   12時間の書き込み（2.5倍）より高い。cost.ts の読み出しの欄は使わない
+ * - 出力：output_tokens（推論のトークンを含む）
+ */
+function toTokenUsage(u: Record<string, unknown>): { usage: TokenUsage; reasoningTokens: number } {
+  need(isCount(u.input_tokens) && isCount(u.output_tokens), null);
+  const inDetails = u.input_tokens_details ?? {};
+  const outDetails = u.output_tokens_details ?? {};
+  need(isObj(inDetails) && isObj(outDetails), null);
+  const input = u.input_tokens as number;
+  const output = u.output_tokens as number;
+  const cached = optCount((inDetails as Record<string, unknown>).cached_tokens);
+  const written = optCount((inDetails as Record<string, unknown>).cache_write_tokens);
+  const reasoning = optCount((outDetails as Record<string, unknown>).reasoning_tokens);
+  need(cached + written <= input && reasoning <= output, null);
+  return { usage: { inputTokens: input, outputTokens: output, cacheCreationInputTokens: written, cacheReadInputTokens: 0 }, reasoningTokens: reasoning };
+}
+
+function parseSucceeded(customId: string, body: unknown): BatchItemResult {
+  need(isObj(body) && body.object === "response" && (body.status === "completed" || body.status === "incomplete"), null);
+  const b = body as Record<string, unknown>;
+  need(isStr(b.model) && Array.isArray(b.output) && isObj(b.usage), null);
+  let output = "";
+  let refused = false;
+  // 出力は message の output_text の部分だけをつなぐ（推論の部分などは入れない）
+  for (const item of b.output as unknown[]) {
+    need(isObj(item), null);
+    const it = item as Record<string, unknown>;
+    if (it.type !== "message") continue;
+    need(Array.isArray(it.content), null);
+    for (const part of it.content as unknown[]) {
+      need(isObj(part), null);
+      const p = part as Record<string, unknown>;
+      if (p.type === "output_text") output += need(isStr(p.text), p.text as string);
+      else if (p.type === "refusal") refused = true;
+    }
+  }
+  const { usage, reasoningTokens } = toTokenUsage(b.usage as Record<string, unknown>);
+  const reason = isObj(b.incomplete_details) ? b.incomplete_details.reason : undefined;
+  const incompleteReason =
+    b.status === "incomplete" && (reason === "max_output_tokens" || reason === "content_filter") ? { incompleteReason: reason as "max_output_tokens" | "content_filter" } : {};
+  return { customId, type: "succeeded", status: b.status as "completed" | "incomplete", ...incompleteReason, output, refused, respondedModel: b.model as string, usage, reasoningTokens };
+}
+
+function parseItem(json: unknown): BatchItemResult {
+  need(isObj(json) && isStr(json.custom_id) && CUSTOM_ID.test(json.custom_id), null);
+  const j = json as Record<string, unknown>;
+  const customId = j.custom_id as string;
+  const res = j.response;
+  if (res === null || res === undefined) {
+    need(isObj(j.error), null);
+    const err = knownError(j.error);
+    return err.errorCode === "batch_expired" ? { customId, type: "expired" } : { customId, type: "errored", ...err };
+  }
+  need(isObj(res) && isCount(res.status_code), null);
+  const r = res as Record<string, unknown>;
+  if (r.status_code !== 200) {
+    const err = isObj(r.body) ? knownError(r.body.error) : {};
+    return { customId, type: "errored", statusCode: r.status_code as number, ...err };
+  }
+  return parseSucceeded(customId, r.body);
+}
+
+/** 結果の1行を読む。形が合わなければ、その行だけ malformed にする（ほかの行は生かす） */
+function parseLine(line: string, lineNo: number): BatchItemResult {
+  let json: unknown;
+  try {
+    json = JSON.parse(line);
+    return parseItem(json);
+  } catch {
+    const id = isObj(json) && isStr(json.custom_id) && CUSTOM_ID.test(json.custom_id) ? json.custom_id : undefined;
+    return id === undefined ? { type: "malformed", line: lineNo } : { type: "malformed", line: lineNo, customId: id };
+  }
+}
+
+export interface ReconciledResults {
+  /** 依頼した customId ごとの結果（ちょうど1回だけ出て、形が合っていたもの） */
+  matched: Map<string, Exclude<BatchItemResult, { type: "malformed" }>>;
+  /** 依頼したのに結果がない customId と、形が合わない行にだけ出た customId */
+  missing: string[];
+  /** 結果に2回以上出た customId（形が合わない行も数える）。どれを信じるか決められないので matched に入れない */
+  duplicated: string[];
+  /** 依頼にない customId の結果の数 */
+  unexpected: number;
+  /** 形が合わなかった行の数 */
+  malformed: number;
+}
+
+/**
+ * 依頼した customId と結果を突き合わせる。成功のファイルと失敗のファイルの結果は、つないでから渡す。
+ * 結果の並びは依頼の順と限らない。重なり・依頼にない ID・形が合わない行は、信じずに数だけ返す
+ * （呼び出し側は missing と duplicated を maxCost のまま残す）。
+ */
+export function reconcileResults(requested: readonly string[], items: readonly BatchItemResult[]): ReconciledResults {
+  const wanted = new Set(requested);
+  const seen = new Map<string, BatchItemResult[]>();
+  let unexpected = 0;
+  let malformed = 0;
+  for (const it of items) {
+    if (it.type === "malformed") malformed += 1;
+    if (it.customId === undefined) continue;
+    if (!wanted.has(it.customId)) {
+      if (it.type !== "malformed") unexpected += 1;
+      continue;
+    }
+    seen.set(it.customId, [...(seen.get(it.customId) ?? []), it]);
+  }
+  const matched: ReconciledResults["matched"] = new Map();
+  const duplicated: string[] = [];
+  const missing: string[] = [];
+  for (const id of wanted) {
+    const got = seen.get(id) ?? [];
+    const only = got[0];
+    if (got.length > 1) duplicated.push(id);
+    else if (only !== undefined && only.type !== "malformed") matched.set(id, only);
+    else missing.push(id);
+  }
+  return { matched, missing, duplicated, unexpected, malformed };
 }
 
 /**
@@ -357,6 +511,7 @@ export class OpenAIBatchClient {
   readonly #fetch: typeof fetch;
   readonly #baseUrl: string;
   readonly #timeoutMs: number;
+  readonly #resultsTimeoutMs: number;
   readonly #uploadTimeoutMs: number;
 
   constructor(options: OpenAIBatchClientOptions) {
@@ -365,6 +520,7 @@ export class OpenAIBatchClient {
     this.#fetch = options.fetch ?? ((input, init) => fetch(input, init));
     this.#baseUrl = checkBaseUrl(options.baseUrl ?? OPENAI_BASE_URL);
     this.#timeoutMs = options.timeoutMs ?? 30_000;
+    this.#resultsTimeoutMs = options.resultsTimeoutMs ?? 120_000;
     this.#uploadTimeoutMs = options.uploadTimeoutMs ?? 120_000;
   }
 
@@ -437,6 +593,21 @@ export class OpenAIBatchClient {
   async cancel(batchId: string): Promise<OpenAIBatchCall<BatchStatus>> {
     checkId(batchId);
     return this.#json("POST", `/v1/batches/${batchId}/cancel`, undefined, parseStatus);
+  }
+
+  /**
+   * 結果のファイル（1行1件の JSON）。バッチの outputFileId（成功）と errorFileId（失敗・期限切れ）の両方を読み、
+   * つないでから reconcileResults で突き合わせる。形が合わない行は、その行だけ malformed にして、ほかの行は返す。
+   */
+  async results(fileId: string): Promise<OpenAIBatchCall<BatchItemResult[]>> {
+    checkId(fileId);
+    return this.#call("GET", `/v1/files/${fileId}/content`, undefined, (text) => {
+      const out: BatchItemResult[] = [];
+      text.split("\n").forEach((line, i) => {
+        if (line.trim() !== "") out.push(parseLine(line, i + 1));
+      });
+      return out;
+    }, this.#resultsTimeoutMs);
   }
 
   #json<T>(method: string, path: string, body: string | undefined, parse: (json: unknown) => T): Promise<OpenAIBatchCall<T>> {

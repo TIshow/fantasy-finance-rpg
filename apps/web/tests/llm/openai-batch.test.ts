@@ -9,7 +9,9 @@ import {
   findBatchesByInputFile,
   isOpenAIBillingError,
   openaiApiKeyFromEnv,
+  reconcileResults,
   toOpenAIParams,
+  type BatchItemResult,
   type BatchStatus,
 } from "../../src/llm/openai-batch";
 import { openaiBatchPrice, openaiBatchReservePrice } from "../../src/llm/openai-pricing";
@@ -87,17 +89,19 @@ describe("OpenAI のバッチの口", () => {
     expect(JSON.parse(seen[0]!.init.body as string)).toEqual({ input_file_id: FILE, endpoint: "/v1/responses", completion_window: "24h" });
   });
 
-  it("状態・取り消しの URL。末尾に / のある baseUrl でも / が重ならない", async () => {
-    const { f, seen } = fakeFetch(() => new Response(recorded("openai-batch-completed.json")));
+  it("状態・取り消し・結果の URL。末尾に / のある baseUrl でも / が重ならない", async () => {
+    const { f, seen } = fakeFetch((url) => new Response(recorded(url.endsWith("/content") ? "openai-batch-output.jsonl" : "openai-batch-completed.json")));
     const c = client(f, undefined, "https://proxy.example.test/base/");
     expect(await c.retrieve(BATCH)).toMatchObject({
       ok: true,
       value: { status: "completed", outputFileId: "file-Bq7pY1nC2dE3fG4hJ5kL6m", errorFileId: "file-Zx9wV8uT7sR6qP5oN4mL3k", counts: { total: 5, completed: 2, failed: 3 }, endedAt: 1762675331_000 },
     });
     expect((await c.cancel(BATCH)).ok).toBe(true);
+    expect((await c.results("file-Bq7pY1nC2dE3fG4hJ5kL6m")).ok).toBe(true);
     expect(seen.map((s) => `${s.init.method} ${s.url}`)).toEqual([
       `GET https://proxy.example.test/base/v1/batches/${BATCH}`,
       `POST https://proxy.example.test/base/v1/batches/${BATCH}/cancel`,
+      "GET https://proxy.example.test/base/v1/files/file-Bq7pY1nC2dE3fG4hJ5kL6m/content",
     ]);
   });
 
@@ -154,6 +158,81 @@ describe("OpenAI のバッチの口", () => {
     expect(await client(none.f).retrieve(BATCH)).toMatchObject({ ok: true, value: { outputFileId: null, errorFileId: null } });
   });
 
+  it("結果（成功のファイル）：output_text だけをつなぎ、トークン数を読む。断りの文は入れない", async () => {
+    const { f } = fakeFetch(() => new Response(recorded("openai-batch-output.jsonl")));
+    const r = await client(f).results("file-Bq7pY1nC2dE3fG4hJ5kL6m");
+    expect(r).toEqual({
+      ok: true,
+      value: [
+        { customId: "run-a", type: "succeeded", status: "completed", output: '{"post":null,"orders":[]}', refused: false, respondedModel: "gpt-6.1-sol", usage: { inputTokens: 20000, outputTokens: 4500, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, reasoningTokens: 3000 },
+        { customId: "run-b", type: "succeeded", status: "incomplete", incompleteReason: "max_output_tokens", output: "", refused: true, respondedModel: "gpt-6.1-sol", usage: { inputTokens: 20000, outputTokens: 4500, cacheCreationInputTokens: 8192, cacheReadInputTokens: 0 }, reasoningTokens: 4500 },
+      ],
+    });
+    expect(JSON.stringify(r)).not.toContain("secret");
+  });
+
+  it("結果（失敗のファイル）：公式の一覧にあるエラーの種類と印だけを残し、エラー文を入れない。期限切れは expired", async () => {
+    const { f } = fakeFetch(() => new Response(recorded("openai-batch-errors.jsonl")));
+    const r = await client(f).results("file-Zx9wV8uT7sR6qP5oN4mL3k");
+    expect(r).toEqual({
+      ok: true,
+      value: [
+        { customId: "run-c", type: "errored", statusCode: 400, errorType: "invalid_request_error" },
+        { customId: "run-d", type: "expired" },
+        { customId: "run-e", type: "errored", statusCode: 500 },
+      ],
+    });
+    expect(JSON.stringify(r)).not.toContain("secret");
+  });
+
+  it("応答がなくエラーだけの行：batch_expired 以外は errored。一覧にある種類・印だけ持ち、状態コードは持たない", async () => {
+    const lines = [
+      '{"custom_id":"e-1","response":null,"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"req_secret123"}}',
+      '{"custom_id":"e-2","response":null,"error":{"code":"made_up_code","message":"req_secret123"}}',
+      '{"custom_id":"e-3","response":null,"error":{"type":"insufficient_quota","code":"credit_balance_exhausted"}}',
+    ];
+    const { f } = fakeFetch(() => new Response(lines.join("\n")));
+    expect(await client(f).results(FILE)).toEqual({
+      ok: true,
+      value: [
+        { customId: "e-1", type: "errored", errorType: "service_unavailable_error", errorCode: "server_is_overloaded" },
+        { customId: "e-2", type: "errored" },
+        { customId: "e-3", type: "errored", errorType: "insufficient_quota", errorCode: "credit_balance_exhausted" },
+      ],
+    });
+  });
+
+  it("結果の1行が形に合わなければ、その行だけ malformed にして、ほかの行は生かす", async () => {
+    const ok = '{"custom_id":"ok-1","response":null,"error":{"code":"batch_expired"}}';
+    const usage = (u: object) => JSON.stringify({ custom_id: "bad-3", response: { status_code: 200, body: { object: "response", status: "completed", model: "m", output: [], usage: u } } });
+    const lines = [
+      ok,
+      "not json req_secret123",
+      '{"custom_id":"bad-1","response":{"status_code":200,"body":{"object":"response","status":"failed"}}}',
+      '{"custom_id":"a/b","response":null,"error":{"code":"batch_expired"}}',
+      '{"custom_id":"bad-2","response":null,"error":null}',
+      usage({ input_tokens: 10, output_tokens: 5, input_tokens_details: { cached_tokens: 8, cache_write_tokens: 8 } }),
+      usage({ input_tokens: 10, output_tokens: 5, output_tokens_details: { reasoning_tokens: 6 } }),
+      usage({ input_tokens: -1, output_tokens: 0 }),
+    ];
+    const { f } = fakeFetch(() => new Response(lines.join("\n")));
+    const r = await client(f).results(FILE);
+    expect(r).toEqual({
+      ok: true,
+      value: [
+        { customId: "ok-1", type: "expired" },
+        { type: "malformed", line: 2 },
+        { type: "malformed", line: 3, customId: "bad-1" },
+        { type: "malformed", line: 4 },
+        { type: "malformed", line: 5, customId: "bad-2" },
+        { type: "malformed", line: 6, customId: "bad-3" },
+        { type: "malformed", line: 7, customId: "bad-3" },
+        { type: "malformed", line: 8, customId: "bad-3" },
+      ],
+    });
+    expect(JSON.stringify(r)).not.toContain("secret");
+  });
+
   it("HTTP の失敗は状態コードと、公式の一覧にあるエラーの種類・印だけを返し、エラー文を入れない。503 は 429 と同じく rate_limited", async () => {
     for (const [status, errorCode] of [[429, "rate_limited"], [503, "rate_limited"], [408, "timeout"], [504, "timeout"], [401, "provider_error"], [500, "provider_error"]] as const) {
       const { f } = fakeFetch(() => new Response('{"error":{"message":"request-id=req_secret123","type":"invalid_request_error","code":"made_up_code"}}', { status }));
@@ -198,6 +277,17 @@ describe("OpenAI のバッチの口", () => {
     expect(await client(odd.f).retrieve(BATCH)).toEqual({ ok: false, errorCode: "provider_error", reason: "unexpected" });
     const hang = (async (_: RequestInfo | URL, init?: RequestInit) => abortable(init)) as typeof fetch;
     expect(await client(hang, 5).retrieve(BATCH)).toEqual({ ok: false, errorCode: "timeout", reason: "timeout" });
+  });
+
+  it("結果の取り出しは、ほかと別の待ち時間を使う", async () => {
+    const slow = (async (_: RequestInfo | URL, init?: RequestInit) => {
+      await new Promise((ok) => setTimeout(ok, 30));
+      if (init?.signal?.aborted) throw new DOMException("aborted", "AbortError");
+      return new Response("");
+    }) as typeof fetch;
+    const c = new OpenAIBatchClient({ apiKey: KEY, fetch: slow, timeoutMs: 5, resultsTimeoutMs: 1000 });
+    expect(await c.results(FILE)).toEqual({ ok: true, value: [] });
+    expect(await c.retrieve(BATCH)).toMatchObject({ ok: false, errorCode: "timeout" });
   });
 
   it("ファイルの上げは、ほかと別の待ち時間を使う", async () => {
@@ -284,8 +374,35 @@ describe("OpenAI のバッチの口", () => {
     }
     await expect(c.create("../../v1/models")).rejects.toThrow(RangeError);
     await expect(c.retrieve("a?b")).rejects.toThrow(RangeError);
+    await expect(c.results("a/b")).rejects.toThrow(RangeError);
     expect(seen).toHaveLength(0);
     expect((await c.upload([{ customId: "a".repeat(64), params }])).ok).toBe(true);
+  });
+});
+
+describe("結果の突き合わせ（reconcileResults）", () => {
+  it("重なった customId と依頼にない customId は信じず、形が合わない行は数える", () => {
+    const items: BatchItemResult[] = [
+      { customId: "a", type: "expired" },
+      { customId: "b", type: "expired" },
+      { customId: "b", type: "errored" },
+      { customId: "zzz", type: "expired" },
+      { type: "malformed", line: 5, customId: "c" },
+      { type: "malformed", line: 6 },
+    ];
+    const r = reconcileResults(["a", "b", "c", "d"], items);
+    expect([...r.matched.entries()]).toEqual([["a", { customId: "a", type: "expired" }]]);
+    expect(r.duplicated).toEqual(["b"]);
+    expect(r.missing).toEqual(["c", "d"]);
+    expect(r.unexpected).toBe(1);
+    expect(r.malformed).toBe(2);
+  });
+
+  it("同じ customId が形の合う行と合わない行の両方に出たら、重なりとして扱う", () => {
+    const r = reconcileResults(["a"], [{ customId: "a", type: "expired" }, { type: "malformed", line: 2, customId: "a" }]);
+    expect(r.matched.size).toBe(0);
+    expect(r.duplicated).toEqual(["a"]);
+    expect(r.missing).toEqual([]);
   });
 });
 
