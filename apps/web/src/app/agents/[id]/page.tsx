@@ -3,7 +3,10 @@ import { AgentPageView } from "../../../components/AgentPageView";
 import { buildAgentPage } from "../../../view/agent-page";
 import { getAccounts, getView } from "../../data";
 
-// AIはビルドの時点で決まる。知らないIDは 404
+// 1時間ごとに作り直す（ISR）。見る人のたびにデータベースを読まない
+export const revalidate = 3600;
+
+// AIは作り直しのときに決まる。知らないIDは 404（読むたびに記録を全部読むのを避けるため、その場では作らない）
 export const dynamicParams = false;
 
 export async function generateStaticParams() {

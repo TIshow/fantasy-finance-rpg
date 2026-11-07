@@ -2,6 +2,9 @@ import { notFound } from "next/navigation";
 import { SymbolPageView } from "../../../components/SymbolPageView";
 import { getView } from "../../data";
 
+// 1時間ごとに作り直す（ISR）。見る人のたびにデータベースを読まない
+export const revalidate = 3600;
+
 // 銘柄はビルドの時点で決まる。知らない銘柄はページの処理を通さず 404（不正なURLの500も避ける）
 export const dynamicParams = false;
 
