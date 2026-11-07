@@ -27,8 +27,10 @@ export const GEMINI_MODEL_ID = "gemini-3.8-flash";
 export const GEMINI_API_VERSION = "v1";
 export const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 export const GEMINI_API_KEY_ENV = "GEMINI_API_KEY";
-/** 1回の作成で送れる本文の大きさ。資料は「20MB 未満」なので、少し小さく取る */
+/** 1回の作成で送れる本文の大きさの上限（このバイト数「未満」だけを送る）。資料の「20MB 未満」を、小さいほうの 20,000,000 バイトで読む */
 export const GEMINI_MAX_BODY_BYTES = 20_000_000;
+/** LlmModel.provider のうち、この口が受け付ける値 */
+export const GEMINI_PROVIDER = "google";
 
 /** 見出しに入れられる文字（表示できる ASCII で空白なし）だけの API キー */
 const API_KEY = /^[\x21-\x7e]{1,512}$/;
@@ -48,10 +50,14 @@ export interface GeminiRequest {
   contents: { role: "user" | "model"; parts: [{ text: string }] }[];
   generationConfig: { maxOutputTokens: number; thinkingConfig?: { thinkingLevel: ThinkingLevel } };
 }
+/**
+ * バッチの中の1件。送る中身は create が、渡された LlmModel とこの messages から toGeminiRequest で作る
+ * （記録するモデル・設定と、実際に送るモデル・設定が食い違わないように、組み立て済みの中身は受け取らない）
+ */
 export interface GeminiBatchRequestItem {
   /** バッチの中の1件のID（metadata.key で送り、結果にも返る）。英数字・ハイフン・下線で1〜64文字 */
   customId: string;
-  request: GeminiRequest;
+  messages: readonly LlmMessage[];
 }
 
 export type GeminiBatchState = "pending" | "running" | "succeeded" | "failed" | "cancelled" | "expired";
@@ -106,10 +112,23 @@ export interface GeminiListOptions {
   pageSize?: number;
   pageToken?: string;
 }
+/** 一覧の中の、読めなかった項目（埋め込みのバッチ、知らない状態の名前、createTime がない、など）から取り出せた名前だけ */
+export interface GeminiUnreadableBatch {
+  /** batches/ のあとの部分。決まりに合うときだけ */
+  id?: string;
+  /** metadata.displayName。決まり（^[A-Za-z0-9_-]{1,128}$）に合うときだけ */
+  displayName?: string;
+}
+/**
+ * 一覧の1ページ。
+ * 注意：unreadable が空でない、または nextPageToken が残っている間は、ある displayName のバッチが
+ * 「作られていない」とは決められない（読めない項目やまだ読んでいないページに、そのバッチがあるかもしれない）。
+ * 作成が billingUnknown で終わったあとの突き合わせには、全ページを読む findGeminiBatchByDisplayName を使う。
+ */
 export interface GeminiList {
   batches: GeminiBatchStatus[];
-  /** 読めなかった項目の数（埋め込みのバッチなど、形が違うもの）。ほかの項目は返す */
-  unreadable: number;
+  /** 読めなかった項目。ほかの項目は batches に返す */
+  unreadable: GeminiUnreadableBatch[];
   nextPageToken: string | null;
 }
 
@@ -136,6 +155,14 @@ const THINKING: Readonly<Record<string, ThinkingLevel>> = Object.freeze({ low: "
  * 「加工せずそのまま送る」）と食い違いうる。Anthropic の分と同じく lead の判断待ち（#179）。実際に送った本文とハッシュは create が返す。
  */
 export function toGeminiRequest(model: LlmModel, messages: readonly LlmMessage[]): GeminiRequest {
+  // 型をすり抜けた値（文字列でないモデル名・内容、知らない役）を送らない
+  if (!isObj(model) || model.provider !== GEMINI_PROVIDER) throw new RangeError(`model.provider must be "${GEMINI_PROVIDER}"`);
+  if (!isStr(model.modelId) || !MODEL_ID.test(model.modelId)) throw new RangeError("invalid model id");
+  if (!isObj(model.settings)) throw new RangeError("model.settings must be an object");
+  if (!Array.isArray(messages)) throw new RangeError("messages must be an array");
+  for (const m of messages as unknown[]) {
+    if (!isObj(m) || !isStr(m.content) || (m.role !== "system" && m.role !== "user" && m.role !== "assistant")) throw new RangeError("invalid message");
+  }
   const unknown = Object.keys(model.settings).filter((k) => k !== "max_tokens" && k !== "thinking_level");
   if (unknown.length > 0) throw new RangeError(`unsupported settings: ${unknown.join(",")}`);
   const maxTokens = model.settings.max_tokens;
@@ -163,34 +190,8 @@ export function toGeminiRequest(model: LlmModel, messages: readonly LlmMessage[]
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 const isStr = (v: unknown): v is string => typeof v === "string";
-const onlyText = (v: unknown): v is [{ text: string }] =>
-  Array.isArray(v) && v.length === 1 && isObj(v[0]) && Object.keys(v[0]).length === 1 && isStr(v[0].text);
-
-/**
- * 型をすり抜けた余分な欄（tools など）を送らないように、決まった欄・順で組み立て直す。合わなければ RangeError。
- */
-function rebuildRequest(r: GeminiRequest): GeminiRequest {
-  const bad = () => new RangeError("request must be made by toGeminiRequest");
-  if (!isObj(r) || !Array.isArray(r.contents) || r.contents.length === 0 || !isObj(r.generationConfig)) throw bad();
-  const contents = (r.contents as unknown[]).map((c) => {
-    if (!isObj(c) || (c.role !== "user" && c.role !== "model") || !onlyText(c.parts)) throw bad();
-    const role: "user" | "model" = c.role === "model" ? "model" : "user";
-    return { role, parts: [{ text: c.parts[0].text }] as [{ text: string }] };
-  });
-  if (contents[0]!.role !== "user") throw bad();
-  const sys = r.systemInstruction as unknown;
-  if (sys !== undefined && (!isObj(sys) || !onlyText(sys.parts))) throw bad();
-  const gc = r.generationConfig as unknown as Record<string, unknown>;
-  const max = gc.maxOutputTokens;
-  if (typeof max !== "number" || !MAX_TOKENS.test(String(max))) throw bad();
-  const tc = gc.thinkingConfig;
-  if (tc !== undefined && !(isObj(tc) && (tc.thinkingLevel === "LOW" || tc.thinkingLevel === "MEDIUM" || tc.thinkingLevel === "HIGH"))) throw bad();
-  return {
-    ...(sys === undefined ? {} : { systemInstruction: { parts: [{ text: (sys as { parts: [{ text: string }] }).parts[0].text }] as [{ text: string }] } }),
-    contents,
-    generationConfig: { maxOutputTokens: max, ...(tc === undefined ? {} : { thinkingConfig: { thinkingLevel: (tc as { thinkingLevel: ThinkingLevel }).thinkingLevel } }) },
-  };
-}
+/** 応答の本文が空だったことの印（JSON の値と区別する） */
+const EMPTY_BODY: unique symbol = Symbol("empty body");
 
 /** 形が合わないとき。呼び出し元で provider_error（malformed）に直す */
 class Malformed extends Error {}
@@ -238,13 +239,16 @@ function parseStatus(json: unknown): GeminiBatchStatus {
   need(type === undefined || (isStr(type) && type.endsWith(".GenerateContentBatch")), null);
   need(isStr(m.state) && Object.hasOwn(STATES, m.state) && isStr(m.model) && isStr(m.displayName), null);
   need(op.done === undefined || typeof op.done === "boolean", null);
+  const state = STATES[m.state as string]!;
+  // done（長く続く処理が終わったか）と状態が食い違えば、どちらを信じるか決められない。done は false のとき省かれうる
+  need((op.done === true) === TERMINAL.has(state), null);
   const stats = m.batchStats ?? {};
   need(isObj(stats), null);
   const s = stats as Record<string, unknown>;
   const errorCode = rpcCode(op.error);
   return {
     id: (op.name as string).slice("batches/".length),
-    state: STATES[m.state as string]!,
+    state,
     done: op.done === true,
     model: m.model as string,
     displayName: m.displayName as string,
@@ -263,6 +267,8 @@ function parseItem(json: unknown): GeminiItemResult {
   const customId = (j.metadata as Record<string, unknown>).key as string;
   if (j.error !== undefined) {
     need(isObj(j.error) && j.response === undefined, null);
+    // コード 0 は「成功」の意味なので、失敗の1件としては形が合わない
+    need((j.error as Record<string, unknown>).code !== 0, null);
     const errorCode = rpcCode(j.error);
     return errorCode === undefined ? { customId, type: "errored" } : { customId, type: "errored", errorCode };
   }
@@ -291,6 +297,14 @@ function parseItem(json: unknown): GeminiItemResult {
   const feedback = r.promptFeedback;
   need(feedback === undefined || isObj(feedback), null);
   const respondedModel = r.modelVersion === undefined ? null : need(isStr(r.modelVersion), r.modelVersion as string);
+  const promptTokens = u.promptTokenCount as number;
+  const toolUsePromptTokens = count(u.toolUsePromptTokenCount);
+  const candidatesTokens = count(u.candidatesTokenCount);
+  const thoughtsTokens = count(u.thoughtsTokenCount);
+  // 合計（totalTokenCount）が、入力・候補・考えた過程の足し算より大きいときは、差を出力に足す
+  // （資料にない種類のトークンも、高いほうの出力の単価で数える側）
+  const total = count(u.totalTokenCount);
+  const extra = Math.max(0, total - (promptTokens + toolUsePromptTokens + candidatesTokens + thoughtsTokens));
   return {
     customId,
     type: "succeeded",
@@ -298,31 +312,32 @@ function parseItem(json: unknown): GeminiItemResult {
     respondedModel,
     finishReason,
     blockReason: isObj(feedback) ? optEnum(feedback.blockReason) : null,
-    usage: geminiTokenUsage({
-      promptTokens: u.promptTokenCount as number,
-      toolUsePromptTokens: count(u.toolUsePromptTokenCount),
-      candidatesTokens: count(u.candidatesTokenCount),
-      thoughtsTokens: count(u.thoughtsTokenCount),
-    }),
+    usage: geminiTokenUsage({ promptTokens, toolUsePromptTokens, candidatesTokens: candidatesTokens + extra, thoughtsTokens }),
   };
 }
 
 /**
  * 結果の並び（inlinedResponses）を探す。資料の中で置き場所の書き方が3通りある：
- * metadata.output（バッチの資料の欄）、response.output（作成の応答の例）、response（使い方の例）。この順で最初に見つかったものを使う。
+ * metadata.output（バッチの資料の欄）、response.output（作成の応答の例）、response（使い方の例）。3つとも読む。
+ * 2か所以上にあって中身（件数を含む）が食い違えば、どれを信じるか決められないので Malformed（黙って結果を失わない）。
  * どこにもなければ undefined。見つかったのに形が合わなければ Malformed。
+ * TODO：本物の API で応答の形を確かめたら、置き場所を1か所に絞る（#179）。
  */
 function findInlined(op: Record<string, unknown>): unknown[] | undefined {
   const m = op.metadata as Record<string, unknown>;
   const r = isObj(op.response) ? op.response : undefined;
   const places = [isObj(m.output) ? m.output : undefined, r !== undefined && isObj(r.output) ? r.output : undefined, r];
+  const found: unknown[][] = [];
   for (const p of places) {
     if (p === undefined || p.inlinedResponses === undefined) continue;
     const box = p.inlinedResponses;
     need(isObj(box) && (box.inlinedResponses === undefined || Array.isArray(box.inlinedResponses)), null);
-    return ((box as Record<string, unknown>).inlinedResponses as unknown[] | undefined) ?? [];
+    found.push(((box as Record<string, unknown>).inlinedResponses as unknown[] | undefined) ?? []);
   }
-  return undefined;
+  if (found.length === 0) return undefined;
+  const first = JSON.stringify(found[0]);
+  need(found.every((f) => JSON.stringify(f) === first), null);
+  return found[0];
 }
 
 function parseResults(json: unknown): GeminiResults {
@@ -331,6 +346,9 @@ function parseResults(json: unknown): GeminiResults {
   const list = findInlined(json as Record<string, unknown>);
   // 成功で終わったのに結果がない（ファイルで返った場合を含む。この口はファイルの結果を読まない）
   if (list === undefined) return need(status.state !== "succeeded" || status.counts.requests === 0, { status, items: [] });
+  // 成功で終わったなら、結果の件数は依頼の件数と同じはず。違えば黙って結果を失わないよう、形が合わないとする
+  // （requestCount が省かれて 0 と読んだときも、結果があれば合わないので形が合わないとする。本物の API で確かめる）
+  need(status.state !== "succeeded" || list.length === status.counts.requests, null);
   const items = list.map((it, i): GeminiItemResult => {
     try {
       return parseItem(it);
@@ -342,18 +360,29 @@ function parseResults(json: unknown): GeminiResults {
   return { status, items };
 }
 
+/** 読めない項目から、決まりに合う name と metadata.displayName だけを取り出す */
+function unreadableOf(op: unknown): GeminiUnreadableBatch {
+  if (!isObj(op)) return {};
+  const name = op.name;
+  const displayName = isObj(op.metadata) ? op.metadata.displayName : undefined;
+  return {
+    ...(isStr(name) && /^batches\/[A-Za-z0-9_-]{1,128}$/.test(name) ? { id: name.slice("batches/".length) } : {}),
+    ...(isStr(displayName) && DISPLAY_NAME.test(displayName) ? { displayName } : {}),
+  };
+}
+
 function parseList(json: unknown): GeminiList {
   need(isObj(json) && (json.operations === undefined || Array.isArray(json.operations)), null);
   const j = json as Record<string, unknown>;
   const token = j.nextPageToken;
   need(token === undefined || token === null || isStr(token), null);
   const batches: GeminiBatchStatus[] = [];
-  let unreadable = 0;
+  const unreadable: GeminiUnreadableBatch[] = [];
   for (const op of (j.operations as unknown[] | undefined) ?? []) {
     try {
       batches.push(parseStatus(op));
     } catch {
-      unreadable += 1;
+      unreadable.push(unreadableOf(op));
     }
   }
   return { batches, unreadable, nextPageToken: isStr(token) && token !== "" ? token : null };
@@ -378,6 +407,7 @@ export interface ReconciledGeminiResults {
  */
 export function reconcileGeminiResults(requested: readonly string[], items: readonly GeminiItemResult[]): ReconciledGeminiResults {
   const wanted = new Set(requested);
+  if (wanted.size !== requested.length) throw new RangeError("requested customIds must be unique");
   const seen = new Map<string, GeminiItemResult[]>();
   let unexpected = 0;
   let malformed = 0;
@@ -405,7 +435,8 @@ export function reconcileGeminiResults(requested: readonly string[], items: read
 }
 
 function failureOf(status: number): BatchFailure {
-  if (status === 429) return { ok: false, errorCode: "rate_limited", reason: "http", status };
+  // 503 は混雑のことが多いので、429 と同じく rate_limited（Anthropic の 529、OpenAI の 503 とそろえる）
+  if (status === 429 || status === 503) return { ok: false, errorCode: "rate_limited", reason: "http", status };
   if (status === 408 || status === 504) return { ok: false, errorCode: "timeout", reason: "http", status };
   return { ok: false, errorCode: "provider_error", reason: "http", status };
 }
@@ -446,7 +477,10 @@ export interface GeminiBatchClientOptions {
   baseUrl?: string;
   /** 1回の HTTP の呼び出し（本文を読み終えるまで）の待ち時間の上限（ミリ秒）。超えたら timeout */
   timeoutMs?: number;
-  /** 結果の取り出し（results）だけの待ち時間の上限。結果は大きくなりうるので、ほかより長い既定にする */
+  /**
+   * 状態と結果の取り出し（retrieve・results）の待ち時間の上限。終わったバッチは状態の取得でも結果の全文が返り、
+   * 大きくなりうるので、ほかより長い既定にする
+   */
   resultsTimeoutMs?: number;
 }
 
@@ -471,11 +505,17 @@ export class GeminiBatchClient {
 
   /**
    * バッチを作る（依頼）。customId は重ならないこと。送った本文とそのハッシュを、結果と一緒に返す。
+   * 送るモデルと設定は、渡された model（記録する LlmModel）だけから決める（provider は "google" に限る）。
+   * 各1件の中身も model と messages から toGeminiRequest で作るので、記録と実際に送るものが食い違わない。
    * displayName は、この依頼だけの名前にする（例：依頼の本文のハッシュから作る）。作成は同じ依頼を2回送ると2つ作られる（資料）。
-   * 失敗に billingUnknown が付いたら、作られたか分からない。自動で再試行せず、list で displayName から突き合わせる。
+   * 失敗に billingUnknown が付いたら、作られたか分からない。自動で再試行せず、findGeminiBatchByDisplayName で突き合わせる。
+   * 費用の換算に使う「作った時刻」は、提供元の status.createdAt。それがない（失敗した）ときは、
+   * create を呼ぶ直前に呼び出し側が自分の時計で取った時刻を使う（gemini-pricing.ts の geminiBatchPrice）。
    */
-  async create(modelId: string, displayName: string, items: readonly GeminiBatchRequestItem[]): Promise<GeminiCreateResult> {
-    if (!MODEL_ID.test(modelId)) throw new RangeError("invalid model id");
+  async create(model: LlmModel, displayName: string, items: readonly GeminiBatchRequestItem[]): Promise<GeminiCreateResult> {
+    if (!isObj(model) || model.provider !== GEMINI_PROVIDER) throw new RangeError(`model.provider must be "${GEMINI_PROVIDER}"`);
+    const modelId = model.modelId;
+    if (!isStr(modelId) || !MODEL_ID.test(modelId)) throw new RangeError("invalid model id");
     if (!DISPLAY_NAME.test(displayName)) throw new RangeError("displayName must match ^[A-Za-z0-9_-]{1,128}$");
     if (items.length === 0) throw new RangeError("no requests");
     const ids = new Set<string>();
@@ -483,10 +523,10 @@ export class GeminiBatchClient {
       if (!CUSTOM_ID.test(it.customId) || ids.has(it.customId)) throw new RangeError("customId must be unique and match ^[A-Za-z0-9_-]{1,64}$");
       ids.add(it.customId);
     }
-    const requests = items.map((it) => ({ request: rebuildRequest(it.request), metadata: { key: it.customId } }));
+    const requests = items.map((it) => ({ request: toGeminiRequest(model, it.messages), metadata: { key: it.customId } }));
     const body = JSON.stringify({ batch: { model: `models/${modelId}`, displayName, inputConfig: { requests: { requests } } } });
     const bytes = new TextEncoder().encode(body);
-    if (bytes.length > GEMINI_MAX_BODY_BYTES) throw new RangeError("request body is too large for an inline batch");
+    if (bytes.length >= GEMINI_MAX_BODY_BYTES) throw new RangeError("request body is too large for an inline batch");
     const sent: SentBody = { body, sha256: await sha256Hex(bytes) };
     const r = await this.#call("POST", `/${GEMINI_API_VERSION}/models/${modelId}:batchGenerateContent`, body, parseStatus, this.#timeoutMs);
     if (!r.ok && uncertainOnCreate(r)) return { ...r, billingUnknown: true, sent };
@@ -511,16 +551,16 @@ export class GeminiBatchClient {
   /** バッチの状態 */
   async retrieve(batchId: string): Promise<BatchCall<GeminiBatchStatus>> {
     checkBatchId(batchId);
-    return this.#call("GET", `/${GEMINI_API_VERSION}/batches/${batchId}`, undefined, parseStatus, this.#timeoutMs);
+    return this.#call("GET", `/${GEMINI_API_VERSION}/batches/${batchId}`, undefined, parseStatus, this.#resultsTimeoutMs);
   }
 
   /**
-   * 取り消しを頼む。応答は空なので、状態は retrieve で確かめる（終わると cancelled）。
+   * 取り消しを頼む。応答は空（本文なし、または {}）なので、状態は retrieve で確かめる（終わると cancelled）。
    * 取り消しの前に処理した分の結果は残りうる（results で受け取り、課金されたものとして扱う）
    */
   async cancel(batchId: string): Promise<BatchCall<null>> {
     checkBatchId(batchId);
-    return this.#call("POST", `/${GEMINI_API_VERSION}/batches/${batchId}:cancel`, undefined, (json) => need(isObj(json), null), this.#timeoutMs);
+    return this.#call("POST", `/${GEMINI_API_VERSION}/batches/${batchId}:cancel`, undefined, (json) => need(json === EMPTY_BODY || isObj(json), null), this.#timeoutMs);
   }
 
   /**
@@ -548,7 +588,8 @@ export class GeminiBatchClient {
       }
       const text = await res.text();
       try {
-        return { ok: true, value: parse(JSON.parse(text)) };
+        // 本文が空なら EMPTY_BODY を渡す（受け付けるかは parse が決める。取り消しだけが受け付ける）
+        return { ok: true, value: parse(text === "" ? EMPTY_BODY : JSON.parse(text)) };
       } catch {
         // 形が合わない応答（JSON でない・欄が足りない）。中身は返さない
         return { ok: false, errorCode: "provider_error", reason: "malformed", status: res.status };
@@ -563,4 +604,63 @@ export class GeminiBatchClient {
       clearTimeout(timer);
     }
   }
+}
+
+/**
+ * 作成が billingUnknown で終わったあとの突き合わせの結果。
+ * - found：その displayName のバッチが1つだけあり、読めた
+ * - foundUnreadable：その displayName の項目が1つだけあるが、形が読めない（id は読めたときだけ）。作られたものとして扱う
+ *   どちらも、displayName の読めない項目があれば maybeDuplicated が true（同じ名前の2つ目かもしれない）
+ * - duplicated：その displayName の項目が2つ以上ある（二重に作られた）。ids は読めたものだけ
+ * - notFound：全ページを読み、読めない項目もすべて別の displayName だった。作られていないと決めてよい
+ * - unknown：一覧の失敗、displayName の読めない項目がある、ページが多すぎる・同じページが繰り返された。作られていないと決められない
+ */
+export type GeminiBatchLookup =
+  | { kind: "found"; batch: GeminiBatchStatus; maybeDuplicated: boolean }
+  | { kind: "foundUnreadable"; id?: string; maybeDuplicated: boolean }
+  | { kind: "duplicated"; ids: string[] }
+  | { kind: "notFound" }
+  | { kind: "unknown"; reason: "list_failed" | "unreadable" | "too_many_pages" };
+
+/** 一覧の最大ページ数（1ページ 1,000 件）。超えたら unknown */
+export const GEMINI_LOOKUP_MAX_PAGES = 100;
+
+/**
+ * displayName で、作られたバッチを探す。一覧を全ページ読む（途中で止めない）。
+ * 読めない項目は、displayName が読めて別の名前なら無関係として外し、displayName が読めなければ unknown にする
+ * （その項目が探しているバッチかもしれないので、「作られていない」と決めない。二重課金を避ける）。
+ */
+export async function findGeminiBatchByDisplayName(
+  client: Pick<GeminiBatchClient, "list">,
+  displayName: string,
+  maxPages: number = GEMINI_LOOKUP_MAX_PAGES,
+): Promise<GeminiBatchLookup> {
+  if (!DISPLAY_NAME.test(displayName)) throw new RangeError("displayName must match ^[A-Za-z0-9_-]{1,128}$");
+  if (!Number.isSafeInteger(maxPages) || maxPages < 1) throw new RangeError("maxPages must be a positive integer");
+  const readable: GeminiBatchStatus[] = [];
+  const unreadable: GeminiUnreadableBatch[] = [];
+  let nameless = false;
+  const tokens = new Set<string>();
+  let pageToken: string | undefined;
+  for (let page = 0; ; page += 1) {
+    if (page >= maxPages) return { kind: "unknown", reason: "too_many_pages" };
+    const r = await client.list({ pageSize: 1000, ...(pageToken === undefined ? {} : { pageToken }) });
+    if (!r.ok) return { kind: "unknown", reason: "list_failed" };
+    readable.push(...r.value.batches.filter((b) => b.displayName === displayName));
+    for (const u of r.value.unreadable) {
+      if (u.displayName === undefined) nameless = true;
+      else if (u.displayName === displayName) unreadable.push(u);
+    }
+    const next = r.value.nextPageToken;
+    if (next === null) break;
+    if (tokens.has(next)) return { kind: "unknown", reason: "too_many_pages" };
+    tokens.add(next);
+    pageToken = next;
+  }
+  const total = readable.length + unreadable.length;
+  if (total > 1) return { kind: "duplicated", ids: [...readable.map((b) => b.id), ...unreadable.flatMap((u) => (u.id === undefined ? [] : [u.id]))] };
+  if (readable.length === 1) return { kind: "found", batch: readable[0]!, maybeDuplicated: nameless };
+  if (unreadable.length === 1) return { kind: "foundUnreadable", ...(unreadable[0]!.id === undefined ? {} : { id: unreadable[0]!.id }), maybeDuplicated: nameless };
+  if (nameless) return { kind: "unknown", reason: "unreadable" };
+  return { kind: "notFound" };
 }

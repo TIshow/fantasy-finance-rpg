@@ -30,6 +30,10 @@ export const GEMINI_BATCH_MAX_LIFETIME_MS = 48 * 60 * 60 * 1000;
  * 出典：https://ai.google.dev/gemini-api/docs/pricing （2026-11-07 確認）。
  * Gemini 3.8 Flash のバッチ：入力 0.375ドル・出力 1.875ドル／100万トークン（2026-12-31 まで）、
  * 2027-01-01 から入力 0.75ドル・出力 3.75ドル。出力には考えた過程のトークン（thinking）を含む。
+ * 出力の上限（maxOutputTokens）も考えた過程を含む：考えた過程の資料（https://ai.google.dev/gemini-api/docs/thinking#token-limits 。
+ * 2026-11-07 確認）に「max_output_tokens は、考えた過程のトークンを含めた、応答が生成できるトークン数の上限」とある。
+ * ただしその節が欄の説明として指しているのは Interactions API の max_output_tokens で、この口が使う generateContent の
+ * maxOutputTokens も同じだとは、資料に明記されていない（本物の API で確かめるまでは未確認）。
  * キャッシュの単価（入力の1割）は使わず、キャッシュに当たった分も入力の単価で数える（高めに数える側）。
  * 料金が変わったら、ここを PR で直す。ここにないモデルは費用を出せない（呼び出し側が maxCost を費用とする）。
  */
@@ -42,6 +46,8 @@ export const GEMINI_BATCH_PRICES: Readonly<Record<string, readonly Readonly<Gemi
 
 /**
  * バッチを作った時刻（UTC のミリ秒）から、そのバッチに使う単価を選ぶ。作った時刻＋48時間の時点の単価にする。
+ * 「作った時刻」は、提供元が返したバッチの作成時刻（GeminiBatchStatus.createdAt）を使う。それがない
+ * （作成が失敗して状態が返らなかった）ときは、作成を頼む直前に自分の時計で取った時刻を使う。
  * ここにないモデルは undefined。時刻が有限の数でなければ RangeError。
  */
 export function geminiBatchPrice(modelId: string, batchCreatedAt: number): Readonly<GeminiPricePeriod> | undefined {
@@ -56,7 +62,8 @@ export function geminiBatchPrice(modelId: string, batchCreatedAt: number): Reado
 /**
  * Gemini から返ったトークン数を、cost.ts の TokenUsage に移す。
  * - 入力：promptTokenCount（キャッシュに当たった分を含む）＋ toolUsePromptTokenCount
- * - 出力：candidatesTokenCount ＋ thoughtsTokenCount（考えた過程も出力の単価で課金される）
+ * - 出力：candidatesTokenCount ＋ thoughtsTokenCount（考えた過程も出力の単価で課金される）。
+ *   gemini-batch.ts は、totalTokenCount がこれらの足し算より大きいとき、その差を candidatesTokens に足して渡す
  * - キャッシュの欄は 0（キャッシュに当たった分も入力の単価で数える）
  */
 export function geminiTokenUsage(u: { promptTokens: number; toolUsePromptTokens: number; candidatesTokens: number; thoughtsTokens: number }): TokenUsage {
