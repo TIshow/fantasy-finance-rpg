@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { EventLog, type Draft } from "../../src/events/append";
 import { sealEvent } from "../../src/events/chain";
+import { llmCostUsed, openLlmBatches } from "../../src/events/llm-cost";
 import { replay } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
 import type { HolidayTable } from "../../src/holidays/index";
@@ -402,5 +403,47 @@ describe("agent.run の元のバッチ（batchSeq）", () => {
       const { log, c } = await collected({ result });
       expect(await reason(log, llmRun(c.seq)), result).toBe("batchSeq must be a collected llm.batch.closed of the same agent");
     }
+  });
+});
+
+describe("記録を書く前に止まった依頼を、やり直しで見つけたとき（batchId を null にした組）", () => {
+  /** 11-09 16:35 に送ったあと、記録を書く前に止まった。やり直しで、記録にないバッチが見つかった（または分からなかった） */
+  const sent = jst("2026-11-09", 16, 35);
+  const nullPair = async (log: EventLog, at: number, tradingDate: string) => {
+    const s = await ok(log, submitted(at, { batchId: null, tradingDate }));
+    await ok(log, closed(at, s.seq, { result: "failed", cost: 150, costUnknown: true, inputTokens: 0, outputTokens: 0 }));
+    return s;
+  };
+
+  it("元の依頼の時刻を submittedAt にすると、1時間を過ぎていれば書けない", async () => {
+    const log = await setup();
+    expect(await reason(log, { ...submitted(sent, { batchId: null }), recordedAt: jst("2026-11-09", 21) })).toBe("submittedAt must be within an hour before recordedAt");
+  });
+
+  it("やり直しの時刻を submittedAt にすれば書けて、予約の費用がやり直した日に数えられる。その日の依頼はもう書けない", async () => {
+    const log = await setup();
+    const rerun = jst("2026-11-09", 21);
+    expect(await log.canAppend(submitted(rerun, { batchId: null, sentBodyHash: "0".repeat(64) }))).toBeNull();
+    const s = await nullPair(log, rerun, "2026-11-10");
+    expect(s.keys).toEqual(["llmbatch:alpha:2026-11-10"]);
+    expect(llmCostUsed(log.events, "2026-11-09")).toBe(150);
+    expect(openLlmBatches(log.events)).toEqual([]);
+    expect(await log.canAppend(submitted(jst("2026-11-09", 21, 5), { batchId: "msgbatch_02" }))).toMatch(/duplicate key llmbatch:alpha:2026-11-10/);
+    await expect(replay(log.events, { get: () => undefined }, CTX)).resolves.toBeDefined();
+  });
+
+  it("翌朝（締めの前）にやり直しても、取引日は同じ日。費用はやり直した日（翌日）に数える", async () => {
+    const log = await setup();
+    await nullPair(log, jst("2026-11-10", 6, 50), "2026-11-10");
+    expect(llmCostUsed(log.events, "2026-11-09")).toBe(0);
+    expect(llmCostUsed(log.events, "2026-11-10")).toBe(150);
+  });
+
+  it("締めのあとにやり直すと、取引日は次の営業日になる（元の取引日では書けない）", async () => {
+    const log = await setup();
+    const rerun = jst("2026-11-10", 9);
+    expect(await reason(log, submitted(rerun, { batchId: null, tradingDate: "2026-11-10" }))).toBe("tradingDate must be the next trading date");
+    const s = await nullPair(log, rerun, "2026-11-11");
+    expect(s.keys).toEqual(["llmbatch:alpha:2026-11-11"]);
   });
 });
