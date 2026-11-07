@@ -220,7 +220,7 @@ export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account
   const history = rows.sort((p, q) => (key(p.date) < key(q.date) ? 1 : key(p.date) > key(q.date) ? -1 : p.seq - q.seq || p.idx - q.idx)).map((r) => r.row);
 
   const suspended = suspensionOf(view, agentId);
-  const decisions = decisionsOf(mine, (n) => runModelOf(view, n));
+  const decisions = decisionsOf(mine, (n) => runModelOf(view, n, agentId));
 
   return {
     agentId, character, model: modelsOf(view).get(agentId) ?? null, loggedName: a.agentName, handle: handleOf(agentId), rank: settledDays.at(-1)?.rank ?? null, rankAsOf: settledDays.at(-1) ? formatMonthDay(settledDays.at(-1)!.date) : null, suspended, badges, latestPost: latestPost(view, agentId), chart, holdings, cash, history, decisions,

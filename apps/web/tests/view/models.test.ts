@@ -108,6 +108,15 @@ describe("その日の判断（投稿と注文票）", () => {
   });
 });
 
+describe("別のAIの判断の記録を指す項目", () => {
+  it("runSeq が別のAIの記録なら、モデルを出さない", () => {
+    const g1Run = view.runs.find((r) => r.agentId === "ai-g1")!;
+    const evs = [...events, ev("order_sheet.rejected", { agentId: "ai-c1", tradingDate: "2026-11-11", reason: "invalid_sheet", runSeq: g1Run.seq }, T("2026-11-10", 9))];
+    const items = buildAgentPage(buildView(evs, () => undefined), new Map(), "ai-c1")!.decisions.flatMap((d) => d.items);
+    expect(items.find((i) => i.kind === "rejected" && i.runSeq === g1Run.seq)!.model).toBeNull();
+  });
+});
+
 describe("判断ごとのモデル（版を途中で変えても、過去の判断に今のモデルを付けない）", () => {
   it("投稿・注文票の runSeq から、そのときの判断の記録のモデルを引く", () => {
     const page = buildAgentPage(view, new Map(), "ai-c1")!;

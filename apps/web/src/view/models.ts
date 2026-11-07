@@ -40,9 +40,9 @@ export function modelsOf(view: View): Map<string, ModelLabel> {
   return new Map(view.models.map((m) => [m.agentId, { ...labelModel(m.provider, m.modelId), lastText: `最後の判断（${formatMonthDay(formatJst(m.at).slice(0, 10))}）のモデル`, changed: m.changed }] as const));
 }
 
-/** 判断の記録の番号（runSeq）から、そのときのモデル。記録がなければ null */
-export function runModelOf(view: View, runSeq: number | null): ModelLabel | null {
+/** 判断の記録の番号（runSeq）から、そのときのモデル。記録がない、または別のAIの記録なら null */
+export function runModelOf(view: View, runSeq: number | null, agentId: string): ModelLabel | null {
   if (runSeq === null) return null;
   const r = view.runs.find((x) => x.seq === runSeq);
-  return r ? labelModel(r.provider, r.modelId) : null;
+  return r && r.agentId === agentId ? labelModel(r.provider, r.modelId) : null;
 }
