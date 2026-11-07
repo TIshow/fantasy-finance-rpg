@@ -27,10 +27,16 @@ function adminDb() {
 }
 
 /** 本文も消すときの、続きの手順（コマンドは本文を消さない。db/ops/erase_body.sql の手順2〜5） */
-const eraseSteps = (seq: number) =>
+const eraseSteps = (seq: number, pendingSeqs: readonly number[]) =>
   [
     "",
     "取り下げを記録しました（本文を消す印つき）。本文はまだ消えていません。続けて、表の持ち主の接続で次を行います：",
+    ...(pendingSeqs.length > 0
+      ? [
+          `  0. 先に、同じ本文を指すほかの投稿（seq ${pendingSeqs.join(", ")}）も --erase-body で取り下げる。全部そろうまで本文は消せない`,
+          "     （同じ本文を指す投稿が複数あるのは、偽の投稿の可能性がある。lead に知らせる）",
+        ]
+      : []),
     "  1. apps/web/db/ops/erase_body.sql の1つ目の文を流し、この投稿と、いま書いた取り下げの記録が出ることを確かめる",
     `  2. SELECT erase_withdrawn_body(${seq});   を流す（消した本文のハッシュが返る。消した本文は元に戻せない）`,
     "  3. 同じファイルの2つ目の文で、何も出ないことを確かめる。daily verify で照合が通ることを確かめる",
@@ -72,7 +78,7 @@ async function main(argv: string[]): Promise<number> {
       stderr.write(`daily: wrote content.withdrawn seq=${withdrawn.seq} targetSeq=${withdrawn.targetSeq} bodyErased=${withdrawn.bodyErased}; verifying...\n`);
       const verify = await verifyDatabase(db);
       stdout.write(`${JSON.stringify({ withdrawn, verify })}\n`);
-      if (eraseBody) stderr.write(eraseSteps(withdrawn.targetSeq));
+      if (eraseBody) stderr.write(eraseSteps(withdrawn.targetSeq, withdrawn.pendingSeqs));
       return 0;
     } finally {
       await db.close();

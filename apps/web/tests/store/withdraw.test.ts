@@ -140,6 +140,35 @@ describe("withdrawPost の追加の守り", { timeout: 60_000 }, () => {
     expect(await count()).toBe(before + 1);
   });
 
+  it("同じ本文を指す投稿が2つあるとき、順に本文を消す印つきで取り下げられ、残りの seq が返り、そろえば本文を消せる", async () => {
+    const { clock, posts } = await setUp();
+    const t = posts[0]!;
+    const hash = (t.payload as { bodyHash: string }).bodyHash;
+    // 同じ bodyHash の偽の投稿（アプリの接続でも書ける）
+    const twin = await (await openStore(clock)).append({ type: "post.published", actor: t.actor, refs: t.refs, payload: { ...(t.payload as Record<string, unknown>) } });
+    if (!twin.ok) return expect.unreachable(`could not write the twin: ${twin.reason}`);
+    const first = await withdrawPost(db, { targetSeq: twin.event.seq, reason: "偽の投稿", eraseBody: true }, { clock });
+    expect(first.pendingSeqs).toEqual([t.seq]);
+    await expect(db.query("SELECT erase_withdrawn_body($1)", [t.seq])).rejects.toThrow(); // まだそろっていない
+    const second = await withdrawPost(db, { targetSeq: t.seq, reason: "権利者からの申し出", eraseBody: true }, { clock });
+    expect(second.pendingSeqs).toEqual([]);
+    expect((await db.query<{ h: string }>("SELECT erase_withdrawn_body($1) AS h", [t.seq])).rows[0]!.h).toBe(hash);
+    await verifyDatabase(db);
+  });
+
+  it("本文を残す取り下げで本文の行がないときは、追記と同じトランザクションで断り、何も書かない", async () => {
+    const { clock, posts } = await setUp();
+    const t = posts[0]!;
+    await withdrawPost(db, { targetSeq: t.seq, reason: "一つ目", eraseBody: true }, { clock });
+    await db.query("SELECT erase_withdrawn_body($1)", [t.seq]);
+    const before = await readAllEvents(db);
+    await expect(withdrawPost(db, { targetSeq: t.seq, reason: "本文を残す", eraseBody: false }, { clock })).rejects.toThrow(/no stored row/);
+    expect(await readAllEvents(db)).toEqual(before);
+    // 断ったあとも、続けて書ける（取り消しの途中の状態が残らない）
+    const ok = await withdrawPost(db, { targetSeq: t.seq, reason: "二つ目", eraseBody: true }, { clock });
+    expect(ok.seq).toBe(before.length + 1);
+    await verifyDatabase(db);
+  });
   it("投稿の bodyHash が64文字の16進でなければ断る", async () => {
     const { clock, posts } = await setUp();
     const src = posts[0]!;
@@ -180,6 +209,12 @@ describe("withdrawReasonProblem", () => {
     expect(withdrawReasonProblem("2026年11月9日の投稿の誤り（seq 12345）")).toBeNull();
   });
 
+  it("行・段落の区切り、向きを変える印、見えない文字だけの理由を断る", () => {
+    expect(withdrawReasonProblem("事実と\u2028異なる")).toMatch(/control/); // 行の区切り
+    expect(withdrawReasonProblem("事実と\u2029異なる")).toMatch(/control/); // 段落の区切り
+    for (const c of ["\u200E", "\u200F", "\u061C"]) expect(withdrawReasonProblem(`seq 12${c}34 の誤り`)).toMatch(/invisible formatting/);
+    for (const r of ["\u200B", "\u2060\u2060", "\u3164", " \u200B ", "\u3000\uFFA0"]) expect(withdrawReasonProblem(r), JSON.stringify(r)).toMatch(/required/);
+  });
   it("長さは文字の数で数え、ちょうど200文字は通り、201文字は断る", () => {
     expect(withdrawReasonProblem("あ".repeat(200))).toBeNull();
     expect(withdrawReasonProblem("😀".repeat(200))).toBeNull(); // UTF-16 では400単位だが、200文字
