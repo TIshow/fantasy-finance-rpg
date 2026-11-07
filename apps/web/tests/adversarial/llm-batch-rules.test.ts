@@ -251,25 +251,33 @@ describe("実際の費用は、トークン数と料金から出した値ちょ�
     await ok(log, close(jst(DAY, 17), s, want, { ...tokens, ...SONNET }));
   });
 
-  // 【低・記録からは見分けられない】閉じた記録の料金は「予約の料金以下」しか縛られない。料金を0と書けば、同じトークン数で費用0になる。
-  // 予約の料金も0にできるので、maxCost は1でよい。料金が本物かは、提供元の料金表との突き合わせでしか分からない
-  it("閉じた記録の料金を下げれば（0まで）、同じトークン数でも費用を小さく書ける", async () => {
+  it("閉じた記録の料金を予約より下げて（0まで）費用を小さく書くことはできない（d4bb3e4 で直った）", async () => {
     const log = await setup();
     const s = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000, { ...SONNET }));
-    await ok(log, close(jst(DAY, 17), s, 0, { inputTokens: 5_000_000, outputTokens: 1_000_000, inputCentsPer10MTok: 0, outputCentsPer10MTok: 0 }));
-    expect(llmCostUsed(log.events, DAY)).toBe(0);
-    const t = await ok(log, sub(jst(DAY, 17, 1), "beta", "2026-11-10", 1, { inputCentsPer10MTok: 0, outputCentsPer10MTok: 0, maxInputTokens: 10_000_000, maxOutputTokens: 10_000_000 }));
-    await ok(log, close(jst(DAY, 17, 2), t, 0, { inputTokens: 10_000_000, outputTokens: 10_000_000, inputCentsPer10MTok: 0, outputCentsPer10MTok: 0 }));
+    for (const price of [{ inputCentsPer10MTok: 0, outputCentsPer10MTok: 0 }, { inputCentsPer10MTok: 999, outputCentsPer10MTok: 5_000 }, { inputCentsPer10MTok: 1_000, outputCentsPer10MTok: 4_999 }]) {
+      const want = llmTokenCost({ inputTokens: 5_000_000, outputTokens: 1_000_000 }, { yenPerUsd: 160, ...price })!;
+      expect(await reason(log, close(jst(DAY, 17), s, want, { inputTokens: 5_000_000, outputTokens: 1_000_000, ...price })), JSON.stringify(price)).toBe("the price must equal the reserved price");
+    }
+  });
+
+  // 【低・記録からは見分けられない】予約の料金そのものは、記録の検査では本物の料金表と突き合わせない。予約の料金を0にすれば、
+  // maxCost は1でよく、閉じた記録の費用も0になる。料金が本物かは、runner が料金表（src/llm/cost.ts など）から入れることに頼る
+  it("予約の料金を0にすれば、どれだけトークンを使っても使用済みは1（予約）から0（閉じたあと）になる", async () => {
+    const log = await setup();
+    const zero = { inputCentsPer10MTok: 0, outputCentsPer10MTok: 0 };
+    const t = await ok(log, sub(jst(DAY, 16, 35), "beta", "2026-11-10", 1, { ...zero, maxInputTokens: 10_000_000, maxOutputTokens: 10_000_000 }));
+    expect(llmCostUsed(log.events, DAY)).toBe(1);
+    await ok(log, close(jst(DAY, 17), t, 0, { inputTokens: 10_000_000, outputTokens: 10_000_000, ...zero }));
     expect(llmCostUsed(log.events, DAY)).toBe(0);
   });
 
-  it("予約の料金より高い料金・料金の欠け・悪い値は断る。費用が分からない記録に料金があれば断る。閉じた記録に yenPerUsd は書けない", async () => {
+  it("予約と違う料金・料金の欠け・悪い値は断る。費用が分からない記録に料金があれば断る。閉じた記録に yenPerUsd は書けない", async () => {
     const log = await setup();
     const s = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000));
-    const bad = "the price must be non-negative integers not above the reserved price";
+    const bad = "the price must equal the reserved price";
     expect(await reason(log, close(jst(DAY, 17), s, 1, { inputCentsPer10MTok: 625_001 }))).toBe(bad);
     expect(await reason(log, close(jst(DAY, 17), s, 1, { outputCentsPer10MTok: 625_001 }))).toBe(bad);
-    for (const v of [-1, 0.5, "1", null, undefined]) {
+    for (const v of [-1, 0.5, "625000", null, undefined, 625_000.0000001]) {
       expect(await reason(log, close(jst(DAY, 17), s, 1, { inputCentsPer10MTok: v })), String(v)).toBe(bad);
     }
     expect(await reason(log, close(jst(DAY, 17), s, 1000, { result: "expired", costUnknown: true, ...PRICE }))).toBe("an unknown cost has no price");
@@ -277,10 +285,10 @@ describe("実際の費用は、トークン数と料金から出した値ちょ�
     expect(await reason(log, close(jst(DAY, 17), s, 1, { yenPerUsd: 1 }))).toBe("unknown field in a batch closing");
   });
 
-  // 【低・宛先 platform】Gemini の料金は 2027-01-01（UTC+14。2026-12-31T10:00Z）から倍になり、src/llm/gemini-pricing.ts は
-  // 「バッチを作った時刻＋48時間」で料金を選ぶ。予約の料金を submittedAt で選ぶと、境目の直前に決めて直後に作られたバッチは、
-  // 予約が古い料金・本当の料金が倍になる。閉じた記録は予約より高い料金を断るので、costUnknown（予約の費用）で閉じるほかなく、本当の費用より少なく残る
-  it("Gemini の料金が倍になる境目：予約の料金が古いと、倍の料金の閉じた記録は書けず、費用は予約の額のまま少なく残る", async () => {
+  // 【低・宛先 platform】Gemini の料金は 2027-01-01（UTC+14。2026-12-31T10:00Z）から倍になり、src/llm/gemini-pricing.ts の geminiBatchPrice は
+  // 「時刻＋48時間」で料金を選ぶ。契約（d4bb3e4）は「予約の料金を submittedAt の時点で一度だけ決め、閉じたときも同じ料金」とした。
+  // そのため、境目の直前に決めて直後に作られたバッチは、提供元は倍の料金で請求するのに、記録は古い料金のまま少なく残る（数ミリ秒の幅で一度だけ起きうる）
+  it("Gemini の料金が倍になる境目：予約が古い料金なら、閉じた記録も古い料金でしか書けず、費用は本当の請求より少なく残る", async () => {
     const model = "gemini-3.8-flash";
     const created = GEMINI_PRICE_SWITCH_AT - 48 * 3_600_000; // これ以後に作ったバッチは倍の料金
     const decided = created - 1;
@@ -295,11 +303,10 @@ describe("実際の費用は、トークン数と料金から出した値ちょ�
     const s = await ok(log, sub(decided + 500, "alpha", "2026-12-30", maxCost, { provider: "gemini", modelId: model, submittedAt: decided, ...oldPrice, maxInputTokens: maxTok.inputTokens, maxOutputTokens: maxTok.outputTokens }));
     const real = geminiBatchCostDeciyen({ ...maxTok, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, model, created, 160)!;
     expect(real).toBe(llmTokenCost(maxTok, { yenPerUsd: 160, ...newPrice }));
-    expect(real).toBeGreaterThan(maxCost);
-    expect(await reason(log, close(decided + 60_000, s, real, { ...maxTok, ...newPrice }))).toBe("the price must be non-negative integers not above the reserved price");
-    await ok(log, close(decided + 60_000, s, maxCost, { ...maxTok, result: "collected", costUnknown: true }));
+    expect(await reason(log, close(decided + 60_000, s, real, { ...maxTok, ...newPrice }))).toBe("the price must equal the reserved price");
+    await ok(log, close(decided + 60_000, s, maxCost, { ...maxTok, ...oldPrice }));
     expect(llmCostUsed(log.events, jstDayOf(decided))).toBe(maxCost);
-    expect(llmCostUsed(log.events, jstDayOf(decided))).toBeLessThan(real);
+    expect(real).toBe(maxCost * 2);
   });
 
   it("Gemini の半セントの料金でも、費用は gemini-pricing.ts の計算と同じ（無作為の100組、シード固定）", () => {
