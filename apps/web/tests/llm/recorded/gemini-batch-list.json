@@ -1,0 +1,27 @@
+{
+  "operations": [
+    {
+      "name": "batches/k7qpd2x1v9m3abcd",
+      "metadata": {
+        "@type": "type.googleapis.com/google.ai.generativelanguage.v1.GenerateContentBatch",
+        "model": "models/gemini-3.8-flash",
+        "displayName": "ffr-2026-11-09-a1b2c3",
+        "createTime": "2026-11-09T07:35:24.100435Z",
+        "batchStats": { "requestCount": "3", "pendingRequestCount": "3" },
+        "state": "BATCH_STATE_RUNNING"
+      }
+    },
+    {
+      "name": "batches/embed0001",
+      "metadata": {
+        "@type": "type.googleapis.com/google.ai.generativelanguage.v1.EmbedContentBatch",
+        "model": "models/gemini-embedding-2",
+        "displayName": "someone-else",
+        "createTime": "2026-11-08T01:00:00Z",
+        "state": "BATCH_STATE_SUCCEEDED"
+      },
+      "done": true
+    }
+  ],
+  "nextPageToken": "CiAKGjBpNDd2Nmp2Zml2cXRwYjBpOXA"
+}

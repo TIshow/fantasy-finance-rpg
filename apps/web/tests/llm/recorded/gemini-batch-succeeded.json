@@ -1,0 +1,66 @@
+{
+  "name": "batches/k7qpd2x1v9m3abcd",
+  "metadata": {
+    "@type": "type.googleapis.com/google.ai.generativelanguage.v1.GenerateContentBatch",
+    "model": "models/gemini-3.8-flash",
+    "displayName": "ffr-2026-11-09-a1b2c3",
+    "createTime": "2026-11-09T07:35:24.100435Z",
+    "endTime": "2026-11-09T08:02:11Z",
+    "updateTime": "2026-11-09T08:02:11Z",
+    "batchStats": { "requestCount": "4", "successfulRequestCount": "2", "failedRequestCount": "2" },
+    "state": "BATCH_STATE_SUCCEEDED",
+    "name": "batches/k7qpd2x1v9m3abcd"
+  },
+  "done": true,
+  "response": {
+    "@type": "type.googleapis.com/google.ai.generativelanguage.v1.GenerateContentBatchOutput",
+    "inlinedResponses": {
+      "inlinedResponses": [
+        {
+          "response": {
+            "candidates": [
+              {
+                "content": {
+                  "role": "model",
+                  "parts": [
+                    { "text": "考えた過程の要約", "thought": true },
+                    { "text": "{\"post\":null," },
+                    { "text": "\"orders\":[]}", "thoughtSignature": "c2lnbmF0dXJl" }
+                  ]
+                },
+                "finishReason": "STOP",
+                "index": 0
+              }
+            ],
+            "usageMetadata": {
+              "promptTokenCount": 20000,
+              "cachedContentTokenCount": 4000,
+              "candidatesTokenCount": 1500,
+              "thoughtsTokenCount": 3000,
+              "totalTokenCount": 24500
+            },
+            "modelVersion": "gemini-3.8-flash",
+            "responseId": "resp_secret123"
+          },
+          "metadata": { "key": "run-a" }
+        },
+        {
+          "error": { "code": 3, "message": "request-id=req_secret123 maxOutputTokens too large", "details": [{ "reason": "req_secret123" }] },
+          "metadata": { "key": "run-b" }
+        },
+        {
+          "response": {
+            "promptFeedback": { "blockReason": "SAFETY" },
+            "usageMetadata": { "promptTokenCount": 120, "totalTokenCount": 120 },
+            "modelVersion": "gemini-3.8-flash"
+          },
+          "metadata": { "key": "run-c" }
+        },
+        {
+          "error": { "code": 999, "message": "made up req_secret123" },
+          "metadata": { "key": "run-d" }
+        }
+      ]
+    }
+  }
+}
