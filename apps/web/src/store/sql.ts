@@ -31,6 +31,5 @@ export async function migrate(db: SqlDb): Promise<void> {
   });
 }
 
-/** jsonb は U+0000 を持てない（書き込みで失敗する）。書く前に見つけて断るために使う */
-export const hasNul = (v: unknown): boolean =>
-  typeof v === "string" ? v.includes("\u0000") : Array.isArray(v) ? v.some(hasNul) : typeof v === "object" && v !== null ? Object.entries(v).some(([k, x]) => hasNul(k) || hasNul(x)) : false;
+/** jsonb は U+0000 を持てない。本体は text.ts（画面のビルドからも読み込めるように、db/ を読むこのファイルから分けた） */
+export { hasNul } from "./text";
