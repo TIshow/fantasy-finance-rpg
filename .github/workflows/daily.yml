@@ -1,0 +1,105 @@
+name: daily
+
+# 架空の市場の毎日の実行（#30）。apps/web/scripts/daily.ts を、DATABASE_URL の保管に対して回す。
+# 定期の実行は、リポジトリの変数 DAILY_ENABLED が "true" のときだけ動く（止めたいときは、変数を消すか false にする）。
+# 手で動かす口（workflow_dispatch）は、変数に関係なく動く。
+on:
+  schedule:
+    # 日本時間の月〜金。cron は UTC で書く。毎時ちょうどは混むので避ける。
+    # 下の照合の条件は、16:35 の行の文字列と同じであることに頼る（変えるときは両方を変える）
+    - cron: "50 21 * * 0-4" # 06:50 判断
+    - cron: "20 22 * * 0-4" # 07:20 判断のやり直し（1回目が済んでいれば何も書かない）
+    - cron: "35 0 * * 1-5" # 09:35 板寄せ・約定・その日の評価と引け後の処理
+    - cron: "35 7 * * 1-5" # 16:35 残りの補い（ふだんは何も書かない）と照合
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "取引日（YYYY-MM-DD）。空なら日本時間の今日。今日より先の日は受け付けない"
+        required: false
+        default: ""
+        type: string
+      verify:
+        description: "実行のあとに照合（daily verify）もする"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+# 同時に2つ動かさない。先に動いているものは止めない（コードの側でも DB の鍵で同時に2つは動かない）
+concurrency:
+  group: daily
+  cancel-in-progress: false
+
+jobs:
+  run:
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.DAILY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .tool-versions
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      # DATABASE_URL は、npm ci には渡さない（依存の導入の処理から読めないように）
+      - run: npm ci
+      - name: daily run
+        id: daily
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # 入力は環境変数で渡し、シェルの文に直接埋め込まない
+          INPUT_DATE: ${{ inputs.date }}
+        run: |
+          set +e
+          args=(run)
+          if [ -n "$INPUT_DATE" ]; then
+            if [[ ! "$INPUT_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || [[ "$INPUT_DATE" > "$(TZ=Asia/Tokyo date +%F)" ]]; then
+              echo "::error::date must be YYYY-MM-DD and must not be after today (JST)"
+              echo "code=2" >> "$GITHUB_OUTPUT"
+              exit 2
+            fi
+            args+=(--date "$INPUT_DATE")
+          fi
+          npm run --silent daily -- "${args[@]}" | tee "$RUNNER_TEMP/run.json"
+          code=${PIPESTATUS[0]}
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+      # 引けのあとの回と、手で動かして照合を選んだときに、記録だけから台帳を作り直して照合する。
+      # 締めに間に合わなかった（終了コード3）ときも照合する
+      - name: daily verify
+        if: ${{ !cancelled() && steps.daily.outputs.code != '' && steps.daily.outputs.code != '2' && (github.event.schedule == '35 7 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.verify)) }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run --silent daily -- verify | tee "$RUNNER_TEMP/verify.json"
+      # 実行の結果を、実行のページの「Summary」に残す（終了コードの意味、照合の件数と最後のハッシュ）
+      - name: summary
+        if: ${{ always() }}
+        env:
+          CODE: ${{ steps.daily.outputs.code }}
+        run: |
+          case "$CODE" in
+            0) msg="成功" ;;
+            2) msg="使い方の誤り（日付の入力など）" ;;
+            3) msg="判断が締め（8:30）に間に合わず、その日の判断がなくなった AI がいる" ;;
+            "") msg="実行の前に止まった（npm ci など）" ;;
+            *) msg="失敗（DB の接続、保管の異常、同時の実行など。ログを見る）" ;;
+          esac
+          {
+            echo "### daily run: exit ${CODE:-none}"
+            echo "$msg"
+            if [ -s "$RUNNER_TEMP/verify.json" ]; then
+              echo
+              echo "照合（daily verify）："
+              echo '```'
+              cat "$RUNNER_TEMP/verify.json"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
