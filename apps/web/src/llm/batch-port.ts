@@ -7,6 +7,7 @@
 import type { Clock, LlmBatchClosed, LlmBatchPort, LlmBatchPrice, LlmBatchRequest, LlmBatchTicket, LlmCollectResult, LlmPolicy, LlmSubmitResult } from "../contracts";
 import { sha256Hex } from "../events/hash";
 import { jstDayOf, llmCostUsed, llmTokenCost } from "../events/llm-cost";
+import type { Draft } from "../events/append";
 import type { LogEvent } from "../events/types";
 import type { Deciyen } from "../ledger/types";
 import type { BatchErrorCode } from "./batch-types";
@@ -45,7 +46,24 @@ export function batchSpendOf(events: readonly Pick<LogEvent, "seq" | "type" | "r
   return { used: llmCostUsed(events, day), recordedKeys: keys };
 }
 
+/** submittedAt と、この口の時計の今とのずれの許し（5分）。外れたら RangeError */
+export const SUBMITTED_AT_SKEW_MS = 300_000;
+
+/**
+ * 課金されたか分からない依頼の2つの記録：llm.batch.submitted（batchId: null）と、すぐ閉じる llm.batch.closed（failed・costUnknown・費用 maxCost）。
+ * submit が billingUnknown を返したとき（sentBodyHash はその値）と、やり直す前の findUnrecorded が found・unknown のとき
+ * （BatchPort.unrecordedDrafts）に使う。closedFor には書けた llm.batch.submitted の seq を渡す
+ */
+export async function unknownCostDrafts(r: LlmBatchRequest, sentBodyHash: string, recordedAt: number): Promise<{ submitted: Draft; closedFor(batchSeq: number): Draft }> {
+  const { yenPerUsd, inputCentsPer10MTok, outputCentsPer10MTok } = r.reservePrice;
+  const customId = await batchCustomIdOf(r.agentId, r.tradingDate);
+  const payload = { agentId: r.agentId, provider: r.model.provider, modelId: r.model.modelId, promptVersion: r.prompt.version, sentBodyHash, batchId: null, customId, maxCost: r.maxCost, tradingDate: r.tradingDate, submittedAt: r.submittedAt, yenPerUsd, inputCentsPer10MTok, outputCentsPer10MTok, maxInputTokens: r.maxInputTokens, maxOutputTokens: r.maxOutputTokens };
+  const closed = { agentId: r.agentId, result: "failed", cost: r.maxCost, costUnknown: true, inputTokens: 0, outputTokens: 0 };
+  return { submitted: { type: "llm.batch.submitted", recordedAt, actor: "system", refs: [], payload }, closedFor: (batchSeq) => ({ type: "llm.batch.closed", recordedAt, actor: "system", refs: [batchSeq], payload: { batchSeq, ...closed } }) };
+}
+
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
+const ROLES: readonly unknown[] = ["system", "user", "assistant"];
 const CUSTOM_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isStr = (v: unknown): v is string => typeof v === "string";
@@ -239,9 +257,16 @@ export class BatchPort implements LlmBatchPort {
     return this.#closed(o === "pending" ? UNKNOWN_PENDING : o, t, true);
   }
 
+  /** findUnrecorded が found・unknown のとき送らずに書く2つの記録。r はやり直すはずだった依頼で、ハッシュはその本文のもの */
+  async unrecordedDrafts(r: LlmBatchRequest, recordedAt: number): Promise<{ submitted: Draft; closedFor(batchSeq: number): Draft }> {
+    this.#check(r);
+    const body = this.#driver.prepare(r, await batchCustomIdOf(r.agentId, r.tradingDate)).body;
+    return unknownCostDrafts(r, await sha256Hex(new TextEncoder().encode(body)), recordedAt);
+  }
+
   /**
    * 記録にないバッチを探す（runner の義務：同じ AI・同じ取引日の依頼をやり直す前に確かめる）。
-   * found なら cancelBatch で取り消しを頼み、やり直さない。unknown でもやり直さない
+   * found なら cancelBatch で取り消しを頼む。どちらでもやり直さず、unrecordedDrafts の記録で費用を maxCost で数える
    */
   async findUnrecorded(q: { agentId: string; tradingDate: string } & Omit<BatchLookupQuery, "customId">): Promise<BatchLookup> {
     if (!Number.isFinite(q.since) || !Number.isFinite(q.now)) throw new RangeError("since and now must be finite numbers");
@@ -277,7 +302,8 @@ export class BatchPort implements LlmBatchPort {
     if (!isObj(r)) throw new RangeError("request must be an object");
     if (!Number.isSafeInteger(r.maxCost) || r.maxCost < 1) throw new RangeError("maxCost must be a positive safe integer");
     if (!isStr(r.agentId) || r.agentId === "" || !isStr(r.tradingDate) || !DAY.test(r.tradingDate)) throw new RangeError("agentId and tradingDate (YYYY-MM-DD) are required");
-    if (!isCount(r.submittedAt)) throw new RangeError("submittedAt must be a non-negative safe integer");
+    if (!isCount(r.submittedAt) || Math.abs(r.submittedAt - this.#clock.now()) > SUBMITTED_AT_SKEW_MS) throw new RangeError("submittedAt must be a safe integer within 5 minutes of now");
+    if (!Array.isArray(r.messages) || !r.messages.every((x: unknown) => isObj(x) && ROLES.includes(x.role) && isStr(x.content))) throw new RangeError("messages must be an array of { role, content: string }");
     const m = r.model;
     if (!isObj(m) || m.provider !== this.#driver.provider || !isStr(m.modelId) || !isObj(m.settings)) throw new RangeError(`model.provider must be ${this.#driver.provider}`);
     const extra = Object.keys(m.settings).filter((k) => !this.#driver.settingKeys.includes(k));
