@@ -25,11 +25,13 @@
 --   not_daily_run        ：毎日の実行が書く形と違う。毎日の実行は、投稿用の run（書き手 system）・投稿（書き手 agent:<AI>）・注文用の run
 --                          （書き手 system）を、間にほかの記録を挟まずに続けて書き、2つの run の出力の全文は同じで、投稿の本文と掲示板は
 --                          出力の post の text と board そのもの。投稿の停止中には投稿しない。このどれかが外れる
+--                          （投稿の停止は、その AI のものと agentId が "*" のもの。出力が JSON として読めないときも当たる）
 --                          （判断を受け取ってから注文用の run を書くまでの間に、アプリの接続で偽の投稿用の run と投稿を足す手を止める。
 --                          #179 の verifier の中。毎日の実行が落ちて回し直したときに間に別の記録が入ると、本物でも当たり、出力は残る）
 --   text_outside_decision：同じ AI の、同じ判断の外の出力が本文を持つ（入力の一覧が違うなどで、判断の外に同じ文が残る）
 --   output_not_erasable  ：（withdrawn_post_skip だけが出す）上に当たらないが、消す出力のどれかが下の「消してよい出力」に合わない
 --                          （出力のハッシュをほかの記録が指している、別の判断の run にも指されているなど）
+--   check_failed         ：（withdrawn_post_skip だけが出す）確かめの途中で思わぬエラーになった。出力は残し、本文は消す。運営者が個別に確かめる
 -- 確かめられない状態（手順書の2つ目の文に出る）
 --   output_unverifiable  ：本文の行がもうないのに、元の run の出力の行が残っている。出力を消すときは元の run の出力も必ず一緒に消すので、
 --                          これは、本文を消したときに出力を残した（上の確かめに当たった）か、本文だけを別のやり方で消した印。
@@ -116,7 +118,8 @@ BEGIN
   IF settled IS NOT TRUE THEN
     RETURN 'post_after_order';
   END IF;
-  -- 毎日の実行が書く形か（上の not_daily_run）。出力が JSON でなければ当たる
+  -- 毎日の実行が書く形か（上の not_daily_run）。出力が JSON として読めなければ当たる。投稿の停止は day.ts の suspended() と同じく、
+  -- その AI の停止と、agentId が "*"（すべての AI）の停止の、どちらかが投稿のときに効いていれば当たる
   -- 注文用の run の出力の行がもうなければ、全文は比べない（関数は元の run の出力を最後に消すので、その削除を見張りが確かめるとき。
   -- 残るのは元の run の出力だけで、消して守るものはない）
   BEGIN
@@ -131,12 +134,15 @@ BEGIN
           AND o.type = 'agent.run' AND o.actor = 'system' AND o.payload->>'purpose' = 'order' AND o.payload->'ok' = 'true'::jsonb
           AND o.payload->'agentId' = $2 AND o.payload->'inputSeqs' = $3 AND coalesce((SELECT v.content #>> '{}' FROM %1$I.stored_values v WHERE v.hash = o.payload->>'outputHash' AND v.kind = 'body') = $4, true)
           AND jsonb_typeof($4::jsonb->'post') = 'object' AND $4::jsonb->'post'->>'text' = $5 AND $4::jsonb->'post'->'board' = p.payload->'board'
-          AND (SELECT s.type FROM %1$I.events s
-               WHERE s.type IN ('agent.suspended', 'agent.resumed') AND s.seq < p.seq AND s.payload->'agentId' = $2
-                 AND s.payload->>'scope' IN ('posts', 'both')
-               ORDER BY s.seq DESC LIMIT 1) IS DISTINCT FROM 'agent.suspended')$q$, sch)
+          AND NOT EXISTS (
+            SELECT 1 FROM (VALUES ($2), ('"*"'::jsonb)) AS a(id)
+            WHERE (SELECT s.type FROM %1$I.events s
+                   WHERE s.type IN ('agent.suspended', 'agent.resumed') AND s.seq < p.seq AND s.payload->'agentId' = a.id
+                     AND s.payload->>'scope' IN ('posts', 'both')
+                   ORDER BY s.seq DESC LIMIT 1) = 'agent.suspended'))$q$, sch)
       INTO settled USING s.run_seq, s.agent, s.inputs, s.out_text, s.body;
-  EXCEPTION WHEN invalid_text_representation THEN
+  -- 出力を JSON として読めないとき（形が崩れている・\u0000 を含む・入れ子が深すぎるなど）は、毎日の実行の形でないとして出力を残す
+  EXCEPTION WHEN data_exception OR program_limit_exceeded THEN
     settled := false;
   END;
   IF settled IS NOT TRUE THEN
@@ -215,6 +221,7 @@ DECLARE
   h text;
   ok boolean;
 BEGIN
+  -- 1行の思わぬエラーで、本文の削除と手順書の文が止まらないよう、エラーは check_failed として返す（OTHERS は取り消し（query_canceled）を含まない）
   EXECUTE format('SELECT %I.withdrawn_post_problem($1, $2)', sch) INTO problem USING sch, target_seq;
   IF problem IS NOT NULL THEN
     RETURN problem;
@@ -230,6 +237,8 @@ BEGIN
   END IF;
   EXECUTE format('SELECT bool_and(%1$I.stored_values_output_erasable($1, o)) FROM %1$I.withdrawn_post_outputs($1, $2) AS o', sch) INTO ok USING sch, target_seq;
   RETURN CASE WHEN ok IS FALSE THEN 'output_not_erasable' END;
+EXCEPTION WHEN OTHERS THEN
+  RETURN 'check_failed';
 END $$;
 
 -- 削除の見張りを差し替える：消す行のハッシュがこのトランザクションだけの設定（ffr.erase_body）に入っていて、
@@ -311,6 +320,7 @@ DECLARE
   sch text := current_schema();
   h text;
   gone text;
+  skip text;
 BEGIN
   EXECUTE format('SELECT payload->>''bodyHash'' FROM %I.events WHERE seq = $1 AND type = ''post.published''', sch) INTO h USING target_seq;
   IF h IS NULL THEN
@@ -325,10 +335,16 @@ BEGIN
   END IF;
   -- 出力を先に消す（出力を選ぶのに、本文の文を使うため）。確かめに当たれば、出力は残して本文だけを消す（案A）。
   -- erase_withdrawn_outputs の確かめは上と同じなので例外は起きないはずだが、起きても出力の削除だけを取り消し、本文は消す
-  IF withdrawn_post_skip(sch, target_seq) IS NULL THEN
+  -- 確かめそのものがエラーになっても、出力を残すとして本文は消す（OTHERS は取り消し（query_canceled）を含まない）
+  BEGIN
+    skip := withdrawn_post_skip(sch, target_seq);
+  EXCEPTION WHEN OTHERS THEN
+    skip := 'check_failed';
+  END;
+  IF skip IS NULL THEN
     BEGIN
       PERFORM erase_withdrawn_outputs(target_seq);
-    EXCEPTION WHEN raise_exception OR insufficient_privilege THEN
+    EXCEPTION WHEN OTHERS THEN
       NULL;
     END;
   END IF;

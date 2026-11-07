@@ -617,6 +617,65 @@ describe("erase_withdrawn_body と判断の出力（db/004_erase_outputs.sql。#
     for (const h of [d.body, ...d.outputs]) expect(await has(h)).toBe(false);
     expect(await problemsOf(d.post)).toEqual([]);
   }, 60_000);
+
+  it("投稿の停止は、agentId が \"*\"（すべての AI）のものも数える（day.ts の suspended() と同じ）", async () => {
+    await setUp();
+    await insertRaw("agent.suspended", "operator:owner", { agentId: "*", scope: "posts", reason: "全体の停止" });
+    const d = await decision({ text: "全体の停止中" });
+    expect(await problemOf(d.post)).toBe("not_daily_run");
+    expect(await erase(d.post)).toBe(d.body);
+    for (const h of d.outputs) expect(await has(h)).toBe(true);
+    // 全体の停止を解いたあとはふつうに消せる。その AI だけの停止は、全体の再開では解けない
+    await setUp();
+    await insertRaw("agent.suspended", "operator:owner", { agentId: "*", scope: "both", reason: "全体の停止" });
+    await insertRaw("agent.resumed", "operator:owner", { agentId: "*", scope: "both", reason: "全体の再開" });
+    expect(await problemOf((await decision({ text: "全体の再開後" })).post)).toBeNull();
+    await insertRaw("agent.suspended", "operator:owner", { agentId: "ai-x", scope: "posts", reason: "停止" });
+    await insertRaw("agent.resumed", "operator:owner", { agentId: "*", scope: "posts", reason: "全体の再開" });
+    expect(await problemOf((await decision({ inputSeqs: [1, 3], text: "その AI は停止中" })).post)).toBe("not_daily_run");
+  }, 60_000);
+
+  it("アプリの接続で、JSON として読めない出力（\\u0000 を含む）の判断を足しても、本文は消え、出力は残り、手順書の文も動く", async () => {
+    await setUp();
+    const text = "読めない出力";
+    // 毎日の実行は U+0000 を書けない（canonicalize が断る）が、アプリの接続なら書ける。Postgres の jsonb は \u0000 を読めない（22P05）
+    const output = `{"note":"\\u0000","orders":[],"post":{"board":"TSTA","text":${JSON.stringify(text)}}}`;
+    await expect(db.query("SELECT $1::jsonb", [output])).rejects.toMatchObject({ code: "22P05" });
+    const d = await as("ffr_app", async () => {
+      const a = await putBodyRow(output);
+      await insertRaw("agent.run", "system", { agentId: "ai-x", purpose: "post", inputSeqs: [1, 2], outputHash: a, ok: true });
+      const run = await lastSeq();
+      const body = await putBodyRow(text);
+      await insertRaw("post.published", "agent:ai-x", { agentId: "ai-x", board: "TSTA", bodyHash: body, runSeq: run });
+      const post = await lastSeq();
+      const b = await putBodyRow(output);
+      await insertRaw("agent.run", "system", { agentId: "ai-x", purpose: "order", inputSeqs: [1, 2], outputHash: b, ok: true });
+      await insertRaw("order_sheet.committed", "system", { agentId: "ai-x", tradingDate: "2026-11-10", orders: [], runSeq: await lastSeq(), inputSeqs: [1, 2] });
+      return { post, body, outputs: [a, b] };
+    });
+    await insertRaw("content.withdrawn", "operator:owner", { targetSeq: d.post, reason: "申し出", bodyErased: true });
+    expect(await problemOf(d.post)).toBe("not_daily_run");
+    const [list] = opsStatements() as [string];
+    const listed = async () => (await db.query<{ seq: number; outputs_kept_because: string | null }>(list)).rows.filter((r) => Number(r.seq) === d.post).map((r) => r.outputs_kept_because);
+    expect(await listed()).toEqual(["not_daily_run"]);
+    expect(await problemsOf(d.post)).toEqual(["not_daily_run", "not_erased", "output_not_erased"]);
+    expect(await erase(d.post)).toBe(d.body);
+    for (const h of d.outputs) expect(await has(h)).toBe(true);
+    expect(await listed()).toEqual([]);
+    expect(await problemsOf(d.post)).toEqual(["output_unverifiable"]);
+  }, 60_000);
+
+  it("確かめそのものが思わぬエラーになっても、本文は消し、出力は残す。手順書の文は check_failed として出す", async () => {
+    await setUp();
+    const d = await decision({ text: "確かめが落ちる" });
+    // 確かめの関数を、必ずエラーになるものに差し替える（setUp がスキーマを作り直すので、ほかの試験には残らない）
+    await pg.exec("CREATE OR REPLACE FUNCTION withdrawn_post_problem(sch text, target_seq bigint) RETURNS text LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN (1 / 0)::text; END $$");
+    const [list] = opsStatements() as [string];
+    expect((await db.query<{ seq: number; outputs_kept_because: string | null }>(list)).rows.filter((r) => Number(r.seq) === d.post).map((r) => r.outputs_kept_because)).toEqual(["check_failed"]);
+    expect(await problemsOf(d.post)).toContain("check_failed");
+    expect(await erase(d.post)).toBe(d.body);
+    for (const h of d.outputs) expect(await has(h)).toBe(true);
+  }, 60_000);
 });
 
 /** 毎日の実行と同じ形の判断だが、投稿と注文用の run の間に別の記録が1件ある */

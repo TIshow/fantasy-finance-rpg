@@ -363,7 +363,12 @@ class Day {
         };
         output = textOf(source);
         const other = runs.find((r) => textOf(r) !== output || canonicalize(pl(r).inputSeqs) !== canonicalize(pl(source).inputSeqs));
-        if (other) throw new Error(`run ${other.seq} does not match the decision of run ${source.seq} (output or inputs differ)`);
+        // 運営者への案内：記録は消せないので、2つの run を確かめて lead に知らせる。その日の締めを過ぎてから回し直すと、このAIは間に合わなかった扱いで飛ばされ、ほかのAIは進む
+        if (other)
+          throw new Error(
+            `run ${other.seq} does not match the decision of run ${source.seq} (output or inputs differ; another writer may have added records). ` +
+              `Do not edit the log: check both agent.run records and report to lead. After the cutoff of ${date}, a rerun skips this AI as late and the other AIs go on`,
+          );
         decision = JSON.parse(output) as Decision;
         inputSeqs = pl(source).inputSeqs as number[];
       } else {
