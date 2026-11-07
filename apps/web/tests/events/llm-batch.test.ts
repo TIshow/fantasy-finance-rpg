@@ -370,6 +370,33 @@ describe("agent.run の元のバッチ（batchSeq）", () => {
     expect(await admitForged(log.events, e.seq, { ...(e.payload as object), sentBodyHash: "d".repeat(64) })).toBe(`seq ${e.seq} (agent.run): sentBodyHash must match the batch submission`);
   });
 
+  it("入力は、依頼の記録より前に記録したものだけ。依頼そのものと、そのあとの記録は入れられない（照合でも同じ）", async () => {
+    const { log, s, c } = await collected();
+    const target = "inputSeqs must be recorded before the batch submission";
+    const withInputs = (inputSeqs: unknown[]): Draft => ({ ...llmRun(c.seq, { inputSeqs }), refs: [...new Set([c.seq, ...inputSeqs.filter((x) => typeof x === "number")])] });
+    // 依頼のあと（20:00）に取り込んだ記録の代わりに、閉じた記録（依頼より後）を入力に入れる
+    expect(await reason(log, withInputs([2, c.seq]))).toBe(target);
+    expect(await reason(log, withInputs([s.seq]))).toBe(target);
+    const e = await ok(log, withInputs([2, s.seq - 1]));
+    expect(await admitForged(log.events, e.seq, { ...(e.payload as object), inputSeqs: [2, c.seq] })).toBe(`seq ${e.seq} (agent.run): ${target}`);
+  });
+
+  it("1つの答えから書ける実行は、目的（投稿・注文）ごとに1回だけ", async () => {
+    const { log, c } = await collected();
+    await ok(log, llmRun(c.seq));
+    // 同じ目的の2つ目は、成功でも失敗でも断る
+    const dup = (purpose: string) => `invalid event: duplicate key llmrun:${c.seq}:${purpose}`;
+    expect(await reason(log, llmRun(c.seq))).toBe(dup("order"));
+    expect(await reason(log, llmRun(c.seq, { ok: false, errorCode: "invalid_output" }))).toBe(dup("order"));
+    // 別の目的（投稿）は1回書ける。その2つ目は断る
+    await ok(log, llmRun(c.seq, { purpose: "post" }));
+    expect(await reason(log, llmRun(c.seq, { purpose: "post" }))).toBe(dup("post"));
+    // batchSeq が数でなければ断る。batchSeq のない実行は何度でも書ける
+    expect(await reason(log, llmRun(c.seq, { batchSeq: "3" }))).toBe("invalid batchSeq");
+    await ok(log, run({}));
+    await ok(log, run({}));
+  });
+
   it("打ち切った（expired）・失敗した（failed）バッチは指せない", async () => {
     for (const result of ["expired", "failed"]) {
       const { log, c } = await collected({ result });

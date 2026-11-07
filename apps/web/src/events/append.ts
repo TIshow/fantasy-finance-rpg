@@ -744,6 +744,8 @@ export class EventLog {
     if (c?.type !== "llm.batch.closed" || cp?.agentId !== agentId || cp.result !== "collected") return "batchSeq must be a collected llm.batch.closed of the same agent";
     const sp = this.events[(cp.batchSeq as number) - 1]!.payload as Record<string, unknown>;
     if (p.sentBodyHash !== sp.sentBodyHash) return "sentBodyHash must match the batch submission";
+    // 入力は、依頼を送る前に記録した情報だけ（送った本文に入っていない情報を、判断に使ったと書けないように）
+    if (Array.isArray(p.inputSeqs) && !p.inputSeqs.every((s) => typeof s === "number" && s < (cp.batchSeq as number))) return "inputSeqs must be recorded before the batch submission";
     try {
       return tradingDateFor(d.recordedAt, H) === sp.tradingDate ? null : "the run must be recorded before the cutoff of the batch's trading date";
     } catch {
@@ -821,6 +823,11 @@ function keysOf(type: EventType, p: Record<string, unknown>): string[] | string 
       return k(["agentId", "tradingDate"], () => [`sheet:${String(id)}:${String(p.tradingDate)}`]);
     case "fills.executed":
       return k(["agentId", "tradingDate"], () => [`fills:${String(id)}:${String(p.tradingDate)}`]);
+    case "agent.run":
+      // バッチの1つの答えから書ける実行は、目的（投稿・注文）ごとに1回だけ
+      if (p.batchSeq === undefined) return [];
+      if (!Number.isSafeInteger(p.batchSeq)) return "invalid batchSeq";
+      return [`llmrun:${String(p.batchSeq)}:${String(p.purpose)}`];
     case "llm.batch.submitted":
       return k(["agentId", "tradingDate"], () => [`llmbatch:${String(id)}:${String(p.tradingDate)}`]);
     case "llm.batch.closed":
