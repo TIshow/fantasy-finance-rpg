@@ -11,6 +11,7 @@
 --   run_has_many_posts（投稿の元の run を、別の本文の投稿も指している）、output_missing・output_without_body（元の run の出力がない・本文を含まない）、
 --   decision_unclear（同じ判断の run の数が合わない）、sheet_not_settled（その日の注文票がまだ確定していない）、
 --   post_after_order（投稿か元の run が、その日の注文用の run より後に書かれている。あとから足した記録の印）、
+--   not_daily_run（投稿用の run・投稿・注文用の run が、毎日の実行の書き方どおりに続いていない。足した記録の印）、
 --   text_outside_decision（同じ AI の別の判断の出力にも同じ文がある）、output_not_erasable（出力のハッシュをほかの記録も指している など）
 -- 本文を消したあとは、出力が本文を含むかを確かめられないので、関数は出力を消さない。元の run の出力が残っていれば、2つ目の文に
 -- output_unverifiable として出続ける（確かめに当たって出力を残した投稿や、003 の版で本文だけを消した投稿）。

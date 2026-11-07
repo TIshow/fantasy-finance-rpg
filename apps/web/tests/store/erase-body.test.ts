@@ -80,10 +80,10 @@ describe("erase_withdrawn_body", () => {
     const values = (await db.query<{ n: number }>("SELECT count(*)::int AS n FROM stored_values")).rows[0]!.n;
     expect(await erase(erased)).toBe(bodyOf(erased));
     expect(await has(bodyOf(erased))).toBe(false);
-    // 投稿の元になった判断の出力（固定データでは本文と同じ文）も消える。同じ判断の注文の出力は、同じ文を持たないので残る
-    expect(await has(outputOf(erased))).toBe(false);
+    // 固定データの判断の出力（本文と同じ文）は、毎日の実行の書く形（出力の JSON の post が投稿と同じ）でないので残る（not_daily_run。#179）
+    expect(await has(outputOf(erased))).toBe(true);
     expect(await has(orderOutputOf(erased))).toBe(true);
-    expect((await db.query<{ n: number }>("SELECT count(*)::int AS n FROM stored_values")).rows[0]!.n).toBe(values - 2);
+    expect((await db.query<{ n: number }>("SELECT count(*)::int AS n FROM stored_values")).rows[0]!.n).toBe(values - 1);
     // イベントは1行も変わらず、本文のハッシュはイベントに残る
     const after = await readAllEvents(db);
     expect(after).toEqual(before);
@@ -218,15 +218,15 @@ describe("erase_withdrawn_body", () => {
     const problems = async () => (await db.query<{ seq: number; problem: string }>(mismatch)).rows.map((r) => [Number(r.seq), r.problem]);
     const rows = (await db.query<{ seq: number; actor: string; reason: string }>(list)).rows;
     expect(rows.map((r) => [Number(r.seq), r.actor, r.reason])).toEqual([[erased, "operator:owner", "権利者からの申し出"]]);
-    expect(await problems()).toEqual([[erased, "not_erased"], [erased, "output_not_erased"]]);
+    expect(await problems()).toEqual([[erased, "not_daily_run"], [erased, "not_erased"], [erased, "output_not_erased"]]);
     await db.query(run.replace("<seq>", String(erased)));
     expect((await db.query(list)).rows).toEqual([]);
-    // 固定データの注文用の出力は本文を含まないので残るが、元の run の出力は一緒に消えたので、食い違いには出ない
-    expect(await problems()).toEqual([]);
+    // 固定データの判断は毎日の実行の書く形でないので、元の run の出力は残り、食い違いに出続ける
+    expect(await problems()).toEqual([[erased, "output_unverifiable"]]);
     // 本文がないのに、最後の記録が真でない（持ち主がトリガを外して消した場合など）
     await pg.exec("ALTER TABLE stored_values DISABLE TRIGGER USER");
     await db.query("DELETE FROM stored_values WHERE hash = $1", [bodyOf(kept)]);
-    expect(await problems()).toEqual([[kept, "missing"]]);
+    expect(await problems()).toEqual([[erased, "output_unverifiable"], [kept, "missing"]]);
   }, 60_000);
 });
 
@@ -316,13 +316,14 @@ describe("erase_withdrawn_body と判断の出力（db/004_erase_outputs.sql。#
       [canonicalize({ note: `${text} です` }), false],
       ["[]", false],
     ];
-    const ds = [];
-    for (const [i, [orderOutput]] of cases.entries()) ds.push(await decision({ agentId: `ai-c${i}`, text, orderOutput }));
-    for (const [i, [, erased]] of cases.entries()) {
-      expect(await erase(ds[i]!.post)).toBe(ds[i]!.body);
-      expect(await has(ds[i]!.outputs[0]!)).toBe(false);
-      expect(await has(ds[i]!.outputs[1]!), `case ${i}`).toBe(!erased);
+    for (const [i, [output, want]] of cases.entries()) {
+      expect((await db.query<{ ok: boolean }>("SELECT output_has_body($1, $2) AS ok", [output, text])).rows[0]!.ok, `case ${i}`).toBe(want);
     }
+    // 投稿用と注文用の出力の全文が違えば、毎日の実行の書く形でないので、どちらの出力も消さない（本文は消す。not_daily_run）
+    const d = await decision({ text, orderOutput: canonicalize([{ text }]) });
+    expect(await problemOf(d.post)).toBe("not_daily_run");
+    expect(await erase(d.post)).toBe(d.body);
+    for (const h of d.outputs) expect(await has(h)).toBe(true);
   }, 60_000);
 
   it("【高1】アプリの接続（ffr_app）で、本物の判断の run を指す偽の投稿を足し、運営者が取り下げて消しても、本物の出力も本文も消えない", async () => {
@@ -543,6 +544,70 @@ describe("erase_withdrawn_body と判断の出力（db/004_erase_outputs.sql。#
     for (const h of [orderOut, ...crashed.outputs]) expect(await has(h)).toBe(true);
   }, 60_000);
 
+  it("【verifier の中】判断を受け取ってから注文用の run を書くまでの間に、偽の投稿用の run と投稿を足しても、本物の注文用の出力は消えない（not_daily_run）", async () => {
+    const text = "注文用の出力にある文";
+    const silent = canonicalize({ note: text, orders: [], post: null });
+    // 偽の投稿用の run の出力：本物と同じ全文（投稿なし）／投稿つきに書き換えたもの
+    for (const forgedOutput of [silent, canonicalize({ note: text, orders: [], post: { board: "TSTA", text } })]) {
+      await setUp();
+      const forged = await as("ffr_app", async () => {
+        await insertRaw("agent.run", "system", { agentId: "ai-x", purpose: "post", inputSeqs: [1, 2], outputHash: await putBodyRow(forgedOutput), ok: true });
+        const run = await lastSeq();
+        await insertRaw("post.published", "agent:ai-x", { agentId: "ai-x", board: "TSTA", bodyHash: await putBodyRow(text), runSeq: run });
+        return lastSeq();
+      });
+      // そのあと毎日の実行が、本物の注文用の run と注文票の確定を書く
+      const orderOut = await putBodyRow(silent);
+      await insertRaw("agent.run", "system", { agentId: "ai-x", purpose: "order", inputSeqs: [1, 2], outputHash: orderOut, ok: true });
+      await insertRaw("order_sheet.committed", "system", { agentId: "ai-x", tradingDate: "2026-11-10", orders: [], runSeq: await lastSeq(), inputSeqs: [1, 2] });
+      await insertRaw("content.withdrawn", "operator:owner", { targetSeq: forged, reason: "偽", bodyErased: true });
+      expect(await problemOf(forged)).toBe("not_daily_run");
+      await expect(erasedOutputs(forged)).rejects.toThrow("not_daily_run");
+      expect(await erase(forged)).not.toBeNull();
+      expect(await has(orderOut)).toBe(true);
+      expect(await problemsOf(forged)).toEqual(["output_unverifiable"]);
+    }
+  }, 60_000);
+
+  it("not_daily_run：間に別の記録がある・書き手が違う・掲示板が違う・投稿の停止中の投稿は、出力を消さない（本文は消す）", async () => {
+    const suspend = (scope: string) => insertRaw("agent.suspended", "operator:owner", { agentId: "ai-x", scope, reason: "停止" });
+    const cases: [string, () => Promise<{ post: number; body: string; outputs: string[] }>][] = [
+      ["間に別の記録", () => decisionWithGap()],
+      ["投稿の停止中", async () => (await suspend("posts"), decision({ text: "投稿の停止中" }))],
+      ["両方の停止中", async () => (await suspend("both"), decision({ text: "両方の停止中" }))],
+    ];
+    for (const [name, make] of cases) {
+      await setUp();
+      const d = await make();
+      expect(await problemOf(d.post), name).toBe("not_daily_run");
+      expect(await erase(d.post)).toBe(d.body);
+      for (const h of d.outputs) expect(await has(h), name).toBe(true);
+    }
+    // 停止を解いたあとの投稿は、ふつうに消せる
+    await setUp();
+    await insertRaw("agent.suspended", "operator:owner", { agentId: "ai-x", scope: "posts", reason: "停止" });
+    await insertRaw("agent.resumed", "operator:owner", { agentId: "ai-x", scope: "posts", reason: "再開" });
+    const ok = await decision({ text: "再開後" });
+    expect(await problemOf(ok.post)).toBeNull();
+    // 書き手・掲示板が違う投稿
+    for (const [actor, board] of [["agent:ai-y", "TSTA"], ["agent:ai-x", "全体"]] as const) {
+      await setUp();
+      const output = canonicalize({ note: "n", orders: [], post: { board: "TSTA", text: "形が違う" } });
+      const runOut = await putBodyRow(output);
+      await insertRaw("agent.run", "system", { agentId: "ai-x", purpose: "post", inputSeqs: [1, 2], outputHash: runOut, ok: true });
+      const run = await lastSeq();
+      const body = await putBodyRow("形が違う");
+      await insertRaw("post.published", actor, { agentId: "ai-x", board, bodyHash: body, runSeq: run });
+      const post = await lastSeq();
+      await insertRaw("agent.run", "system", { agentId: "ai-x", purpose: "order", inputSeqs: [1, 2], outputHash: await putBodyRow(output), ok: true });
+      await insertRaw("order_sheet.committed", "system", { agentId: "ai-x", tradingDate: "2026-11-10", orders: [], runSeq: await lastSeq(), inputSeqs: [1, 2] });
+      await insertRaw("content.withdrawn", "operator:owner", { targetSeq: post, reason: "申し出", bodyErased: true });
+      expect(await problemOf(post), `${actor} ${board}`).toBe("not_daily_run");
+      expect(await erase(post)).toBe(body);
+      expect(await has(runOut)).toBe(true);
+    }
+  }, 60_000);
+
   it("出力だけを先に消したあとでも、本文は消せる（出力の確かめに当たっても、本文は止めない）", async () => {
     await setUp();
     const d = await decision({ text: "出力を先に消した" });
@@ -553,3 +618,20 @@ describe("erase_withdrawn_body と判断の出力（db/004_erase_outputs.sql。#
     expect(await problemsOf(d.post)).toEqual([]);
   }, 60_000);
 });
+
+/** 毎日の実行と同じ形の判断だが、投稿と注文用の run の間に別の記録が1件ある */
+async function decisionWithGap() {
+  const output = canonicalize({ note: "n", orders: [], post: { board: "TSTA", text: "間がある" } });
+  const a = await putBodyRow(output);
+  await insertRaw("agent.run", "system", { agentId: "ai-x", purpose: "post", inputSeqs: [1, 2], outputHash: a, ok: true });
+  const run = await lastSeq();
+  const body = await putBodyRow("間がある");
+  await insertRaw("post.published", "agent:ai-x", { agentId: "ai-x", board: "TSTA", bodyHash: body, runSeq: run });
+  const post = await lastSeq();
+  await insertRaw("source.captured", "system", { source: "x" });
+  const b = await putBodyRow(output);
+  await insertRaw("agent.run", "system", { agentId: "ai-x", purpose: "order", inputSeqs: [1, 2], outputHash: b, ok: true });
+  await insertRaw("order_sheet.committed", "system", { agentId: "ai-x", tradingDate: "2026-11-10", orders: [], runSeq: await lastSeq(), inputSeqs: [1, 2] });
+  await insertRaw("content.withdrawn", "operator:owner", { targetSeq: post, reason: "申し出", bodyErased: true });
+  return { post, body, outputs: [a, b] };
+}

@@ -352,11 +352,20 @@ class Day {
       /** 記録の形（正規化した JSON）にした出力。記録した run から作り直すときは、その本文 */
       let output: string;
       if (runs.length > 0) {
-        const body = this.deps.values.body(pl(runs[0]!).outputHash as string);
-        if (!body) throw new Error(`output of run ${runs[0]!.seq} is not available`);
-        output = body.value;
+        // 判断は、注文用の run があればその出力（注文票が指すもの）。この日の run の出力がすべて同じでなければ止める
+        // （毎日の実行は1つの判断から同じ出力を書くので、違えばほかの書き手が足した記録がある。#179 の verifier の低）
+        // （出力は run ごとに別の乱数で置くので、ハッシュではなく全文で比べる）
+        const source = orderDone ?? runs[0]!;
+        const textOf = (r: LogEvent) => {
+          const body = this.deps.values.body(pl(r).outputHash as string);
+          if (!body) throw new Error(`output of run ${r.seq} is not available`);
+          return body.value;
+        };
+        output = textOf(source);
+        const other = runs.find((r) => textOf(r) !== output || canonicalize(pl(r).inputSeqs) !== canonicalize(pl(source).inputSeqs));
+        if (other) throw new Error(`run ${other.seq} does not match the decision of run ${source.seq} (output or inputs differ)`);
         decision = JSON.parse(output) as Decision;
-        inputSeqs = pl(runs[0]!).inputSeqs as number[];
+        inputSeqs = pl(source).inputSeqs as number[];
       } else {
         // 口座の根拠：最後の引け後の処理（まだなければ登録）
         const basis = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id).at(-1) ?? registered;

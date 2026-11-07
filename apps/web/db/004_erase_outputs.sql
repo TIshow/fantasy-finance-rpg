@@ -22,6 +22,11 @@
 --   post_after_order     ：元の run か、それを指す投稿のうち最初のものが、同じ判断の注文用の run より後に書かれている（seq が大きい）。
 --                          毎日の実行は投稿用の run と投稿を注文用の run より前に書くので、あとからアプリの接続で足した投稿用の run や投稿は、
 --                          必ずこれに当たる（投稿しない判断に偽の投稿を足して、本物の注文用の出力を消させる手を止める。#179 の verifier の高）
+--   not_daily_run        ：毎日の実行が書く形と違う。毎日の実行は、投稿用の run（書き手 system）・投稿（書き手 agent:<AI>）・注文用の run
+--                          （書き手 system）を、間にほかの記録を挟まずに続けて書き、2つの run の出力の全文は同じで、投稿の本文と掲示板は
+--                          出力の post の text と board そのもの。投稿の停止中には投稿しない。このどれかが外れる
+--                          （判断を受け取ってから注文用の run を書くまでの間に、アプリの接続で偽の投稿用の run と投稿を足す手を止める。
+--                          #179 の verifier の中。毎日の実行が落ちて回し直したときに間に別の記録が入ると、本物でも当たり、出力は残る）
 --   text_outside_decision：同じ AI の、同じ判断の外の出力が本文を持つ（入力の一覧が違うなどで、判断の外に同じ文が残る）
 --   output_not_erasable  ：（withdrawn_post_skip だけが出す）上に当たらないが、消す出力のどれかが下の「消してよい出力」に合わない
 --                          （出力のハッシュをほかの記録が指している、別の判断の run にも指されているなど）
@@ -110,6 +115,32 @@ BEGIN
     INTO settled USING s.agent, s.inputs, s.run_seq;
   IF settled IS NOT TRUE THEN
     RETURN 'post_after_order';
+  END IF;
+  -- 毎日の実行が書く形か（上の not_daily_run）。出力が JSON でなければ当たる
+  -- 注文用の run の出力の行がもうなければ、全文は比べない（関数は元の run の出力を最後に消すので、その削除を見張りが確かめるとき。
+  -- 残るのは元の run の出力だけで、消して守るものはない）
+  BEGIN
+    EXECUTE format($q$
+      SELECT EXISTS (
+        SELECT 1 FROM %1$I.events r
+          JOIN %1$I.events p ON p.seq = r.seq + 1
+          JOIN %1$I.events o ON o.seq = r.seq + 2
+        WHERE r.seq = $1
+          AND r.actor = 'system' AND r.payload->'ok' = 'true'::jsonb
+          AND p.type = 'post.published' AND p.payload->'runSeq' = to_jsonb(r.seq) AND p.actor = 'agent:' || ($2 #>> '{}')
+          AND o.type = 'agent.run' AND o.actor = 'system' AND o.payload->>'purpose' = 'order' AND o.payload->'ok' = 'true'::jsonb
+          AND o.payload->'agentId' = $2 AND o.payload->'inputSeqs' = $3 AND coalesce((SELECT v.content #>> '{}' FROM %1$I.stored_values v WHERE v.hash = o.payload->>'outputHash' AND v.kind = 'body') = $4, true)
+          AND jsonb_typeof($4::jsonb->'post') = 'object' AND $4::jsonb->'post'->>'text' = $5 AND $4::jsonb->'post'->'board' = p.payload->'board'
+          AND (SELECT s.type FROM %1$I.events s
+               WHERE s.type IN ('agent.suspended', 'agent.resumed') AND s.seq < p.seq AND s.payload->'agentId' = $2
+                 AND s.payload->>'scope' IN ('posts', 'both')
+               ORDER BY s.seq DESC LIMIT 1) IS DISTINCT FROM 'agent.suspended')$q$, sch)
+      INTO settled USING s.run_seq, s.agent, s.inputs, s.out_text, s.body;
+  EXCEPTION WHEN invalid_text_representation THEN
+    settled := false;
+  END;
+  IF settled IS NOT TRUE THEN
+    RETURN 'not_daily_run';
   END IF;
   EXECUTE format($q$
     SELECT EXISTS (SELECT 1 FROM %1$I.events r JOIN %1$I.stored_values v ON v.hash = r.payload->>'outputHash' AND v.kind = 'body'
