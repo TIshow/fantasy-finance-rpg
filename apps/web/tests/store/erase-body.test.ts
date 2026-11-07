@@ -47,10 +47,10 @@ async function setUp() {
 }
 
 /** 検査を通さずに、連鎖だけが続く行を直接入れる（ffr_app でもできること。ハッシュは正しくない） */
-async function insertRaw(type: string, actor: string, payload: unknown) {
+async function insertRaw(type: string, actor: string, payload: unknown, keys: unknown[] = []) {
   const last = (await db.query<{ seq: string; hash: string; recorded_at: string }>("SELECT seq, hash, recorded_at FROM events ORDER BY seq DESC LIMIT 1")).rows[0]!;
   const seq = Number(last.seq) + 1;
-  await db.query("INSERT INTO events (seq, schema_ver, type, recorded_at, actor, keys, refs, payload, prev_hash, hash) VALUES ($1, 1, $2, $3, $4, '[]'::jsonb, '[]'::jsonb, $5::jsonb, $6, $7)", [seq, type, Number(last.recorded_at), actor, JSON.stringify(payload), last.hash, seq.toString(16).padStart(64, "f")]);
+  await db.query("INSERT INTO events (seq, schema_ver, type, recorded_at, actor, keys, refs, payload, prev_hash, hash) VALUES ($1, 1, $2, $3, $4, $8::jsonb, '[]'::jsonb, $5::jsonb, $6, $7)", [seq, type, Number(last.recorded_at), actor, JSON.stringify(payload), last.hash, seq.toString(16).padStart(64, "f"), JSON.stringify(keys)]);
 }
 
 /** 運営者の手順の SQL の文（コメントの行を除き、; で分ける） */
@@ -137,6 +137,52 @@ describe("erase_withdrawn_body", () => {
     await expect(erase(erased)).rejects.toThrow("may not be erased");
     expect(await has(bodyOf(erased))).toBe(true);
     expect(await has(bodyOf(kept))).toBe(true);
+  }, 60_000);
+
+  it("投稿の本文の項目のほかに、そのハッシュを指す記録があれば断る（判断の出力・訂正の新しい本文など）", async () => {
+    const { erased } = await setUp();
+    const run = g.events.find((e) => e.type === "agent.run" && typeof (e.payload as { outputHash?: unknown }).outputHash === "string")!;
+    const output = (run.payload as { outputHash: string }).outputHash;
+    // 判断の出力のハッシュを本文に持つ投稿を足し、本文ごと非表示にしても、出力の行は消えない
+    await insertRaw("post.published", "agent:alpha", { bodyHash: output });
+    const forged = g.events.length + 3;
+    await insertRaw("content.withdrawn", "operator:owner", { targetSeq: forged, reason: "偽", bodyErased: true });
+    await expect(erase(forged)).rejects.toThrow("may not be erased");
+    await expect(db.transaction(async (tx) => {
+      await tx.query("SELECT set_config('ffr.erase_body', $1, true)", [output]);
+      await tx.query("DELETE FROM stored_values WHERE hash = $1", [output]);
+    })).rejects.toThrow(/stored_values is append-only/);
+    expect(await has(output)).toBe(true);
+    // 消してよい本文でも、別の記録（ここでは訂正）が同じハッシュを指せば断る
+    await insertRaw("correction.issued", "operator:owner", { refSeq: erased, kind: "post", newBodyHash: bodyOf(erased) });
+    await expect(erase(erased)).rejects.toThrow("may not be erased");
+    expect(await has(bodyOf(erased))).toBe(true);
+  }, 60_000);
+
+  it("ほかの記録が指していれば、どこに・どう書かれていても断る（投稿の別の項目・入れ子・接頭辞つき・keys）", async () => {
+    const cases: [string, (h: string) => unknown, (h: string) => unknown[]][] = [
+      ["post.published", (h) => ({ bodyHash: "0".repeat(64), quote: h }), () => []],
+      ["source.captured", (h) => ({ a: { b: [`sha256:${h}`] } }), () => []],
+      ["source.captured", () => ({}), (h) => [`ref:${h}`]],
+    ];
+    for (const [type, payload, keys] of cases) {
+      const { erased } = await setUp();
+      const h = bodyOf(erased);
+      await insertRaw(type, "system", payload(h), keys(h));
+      await expect(erase(erased)).rejects.toThrow("may not be erased");
+      expect(await has(h)).toBe(true);
+    }
+  }, 60_000);
+
+  it("中身がオブジェクトでない投稿の行（値1つ・配列）があっても、関数と手順書の文は動く", async () => {
+    const { erased } = await setUp();
+    for (const payload of ["just a string", 42, [1, "x"], null]) await insertRaw("post.published", "agent:alpha", payload);
+    await insertRaw("content.withdrawn", "operator:owner", "just a string");
+    const [list, mismatch] = opsStatements() as [string, string, string];
+    expect((await db.query<{ seq: number }>(list)).rows.map((r) => Number(r.seq))).toEqual([erased]);
+    await db.query(mismatch);
+    expect(await erase(erased)).toBe(bodyOf(erased));
+    await expect(erase(g.events.length + 3)).rejects.toThrow("is not a post.published"); // 本文のハッシュがない投稿
   }, 60_000);
 
   it("アプリの役割（ffr_app）は関数を呼べず、表から削除もできない", async () => {
