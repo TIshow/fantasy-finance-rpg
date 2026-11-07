@@ -40,9 +40,19 @@ async function as<T>(role: string, fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } finally {
-    await pg.exec("RESET ROLE; RESET search_path");
+    // 一時テーブルを作った試験が途中で落ちても、次の試験に残さない
+    await pg.exec("RESET ROLE; RESET search_path; DISCARD TEMP");
   }
 }
+/** 断られても先へ進める手順（欠陥の試験では、どこで直しても結果だけで判定するため） */
+const attempt = async <T>(fn: () => Promise<T>): Promise<T | undefined> => {
+  try {
+    return await fn();
+  } catch {
+    return undefined;
+  }
+};
+const bodyRows = async () => (await db.query<{ n: number }>("SELECT count(*)::int AS n FROM stored_values WHERE kind = 'body'")).rows[0]!.n;
 const grantReader = () => pg.exec("GRANT USAGE ON SCHEMA public TO ffr_reader; GRANT SELECT ON events, stored_values TO ffr_reader");
 
 // ---------------------------------------------------------------------------------------------
@@ -72,18 +82,32 @@ async function golden() {
 }
 
 describe("消せる行の範囲（ゴールデンログ）", { timeout: 60_000 }, () => {
-  it.fails("【欠陥】判断の出力（agent.run の outputHash）を本文に指す投稿を、検査を通る形で足して非表示にすると、出力の行が消える", async () => {
+  // 欠陥の試験は2つに分ける。前半（通常の it）が前提を確かめて手順を進め、結果を残す。後半（it.fails）は結果だけを見る。
+  // 前提が崩れれば前半が赤になる。直れば（関数の側でも保管の側でも）後半が成功に変わり、it.fails が赤になって気づける
+  const forgedOutput: { output?: string; kept?: boolean; rowsBefore?: number; rowsAfter?: number } = {};
+  it("【欠陥の前提】判断の出力を本文に指す投稿を足して非表示にし、関数を呼ぶ（手順は断られても先へ進む）", async () => {
     const { append, withdraw } = await golden();
-    // ai-a の投稿用の run（seq 8）を runSeq にし、本文のハッシュに、ai-a の注文用の run（seq 10）の出力のハッシュを書く
-    const postRun = goldenRuns.find((r) => p(r).agentId === "ai-a" && p(r).purpose === "post")!;
-    const orderRun = goldenRuns.find((r) => p(r).agentId === "ai-a" && p(r).purpose === "order")!;
-    const output = p(orderRun).outputHash as string;
-    const forged = await append("post.published", "agent:ai-a", [postRun.seq], { agentId: "ai-a", board: "TSTB", bodyHash: output, citeSeqs: [], runSeq: postRun.seq });
-    await withdraw(forged);
-    // 記録はすべて検査を通っている（daily verify も通る）。そのうえで、関数は出力の行を消してしまう
+    // ai-a の投稿用の run を runSeq にし、本文のハッシュに、ai-a の注文用の run の出力のハッシュを書く
+    const postRun = goldenRuns.find((r) => p(r).agentId === "ai-a" && p(r).purpose === "post");
+    const orderRun = goldenRuns.find((r) => p(r).agentId === "ai-a" && p(r).purpose === "order");
+    expect(postRun && orderRun, "ゴールデンログに ai-a の run がない").toBeTruthy();
+    const output = p(orderRun!).outputHash as string;
+    expect(await has(output), "出力の行が最初からない").toBe(true);
     await verifyDatabase(db, FIXTURE_HOLIDAYS);
-    await expect(erase(forged)).rejects.toThrow();
-    expect(await has(output)).toBe(true);
+    forgedOutput.output = output;
+    forgedOutput.rowsBefore = await bodyRows();
+    const forged = await attempt(() => append("post.published", "agent:ai-a", [postRun!.seq], { agentId: "ai-a", board: "TSTB", bodyHash: output, citeSeqs: [], runSeq: postRun!.seq }));
+    if (forged !== undefined) {
+      await attempt(() => withdraw(forged));
+      await attempt(() => erase(forged));
+    }
+    forgedOutput.kept = await has(output);
+    forgedOutput.rowsAfter = await bodyRows();
+  });
+  it.fails("【欠陥】判断の出力（agent.run の outputHash）を本文に指す投稿を足して非表示にすると、関数が出力の行を消す（直れば行が残る）", () => {
+    expect(forgedOutput.output, "前提の試験が動いていない").toBeDefined();
+    expect(forgedOutput.kept).toBe(true);
+    expect(forgedOutput.rowsAfter).toBe(forgedOutput.rowsBefore);
   });
 
   it("価格などの値のハッシュを本文に指す投稿を作って非表示にしても、値の行は消えない（関数は本文の行だけを消す）", async () => {
@@ -91,10 +115,13 @@ describe("消せる行の範囲（ゴールデンログ）", { timeout: 60_000 }
     const postRun = goldenRuns.find((r) => p(r).agentId === "ai-a" && p(r).purpose === "post")!;
     const close = g.events.find((e) => e.type === "prices.close")!;
     const valuesHash = p(close).valuesHash as string;
-    const forged = await append("post.published", "agent:ai-a", [postRun.seq], { agentId: "ai-a", board: "TSTB", bodyHash: valuesHash, citeSeqs: [], runSeq: postRun.seq });
-    await withdraw(forged);
     const before = await valueRows();
-    expect(await erase(forged)).toBeNull();
+    // 投稿・非表示・関数の呼び出しが受け付けられるかは問わない（どの段で断っても、値が残ればよい）
+    const forged = await attempt(() => append("post.published", "agent:ai-a", [postRun.seq], { agentId: "ai-a", board: "TSTB", bodyHash: valuesHash, citeSeqs: [], runSeq: postRun.seq }));
+    if (forged !== undefined) {
+      await attempt(() => withdraw(forged));
+      await attempt(() => erase(forged));
+    }
     expect(await has(valuesHash)).toBe(true);
     expect(await valueRows()).toBe(before);
     // 持ち主が印を自分で入れても、値の行は消せない
@@ -153,8 +180,7 @@ describe("ffr_app からの細工", { timeout: 60_000 }, () => {
       await expect(pg.exec("CREATE FUNCTION public.stored_values_erasable(sch text, h text) RETURNS boolean LANGUAGE sql AS 'SELECT true'")).rejects.toThrow(/permission denied/);
       await expect(pg.exec("CREATE SCHEMA ffr_app")).rejects.toThrow(/permission denied/);
       await expect(pg.exec("ALTER TABLE public.stored_values DISABLE TRIGGER USER")).rejects.toThrow(/must be owner/);
-      await pg.exec("DROP TABLE pg_temp.stored_values, pg_temp.events");
-    });
+    }); // 一時テーブルは as の finally（DISCARD TEMP）で消える
     expect(await has(h)).toBe(true);
   });
 
@@ -166,7 +192,7 @@ describe("ffr_app からの細工", { timeout: 60_000 }, () => {
     try {
       await expect(erase(kept.seq)).rejects.toThrow("may not be erased");
     } finally {
-      await pg.exec("DROP TABLE pg_temp.events");
+      await pg.exec("DISCARD TEMP");
     }
     expect(await has(p(kept).bodyHash as string)).toBe(true);
   });
@@ -288,35 +314,58 @@ describe("消したあとも毎日の実行を続けられる", { timeout: 120_0
     await verifyDatabase(db, holidayTable);
   });
 
-  it.fails("【欠陥の影響】注文票の確定の前に落ち、その間にその日の判断の出力（runner が回し直しで読み直す、最初の run の出力）を偽の投稿を通して消されると、同じ日の回し直しが止まる", async () => {
+  // 前半（通常の it）が前提を確かめて手順を進め、回し直しの結果を残す。後半（it.fails）は結果だけを見る
+  const rerun: { ran?: boolean; error?: string; finished?: boolean } = {};
+  it("【欠陥の影響の前提】注文票の確定の前に落とし、その日の最初の run の出力を指す偽の投稿を非表示にして関数を呼び、回し直す", async () => {
     // 1回目：投稿がある最初の日と、その日に投稿する AI を探す（規則の AI なので、毎回同じ）
     await resetSchema(pg);
     await migrate(db);
     const a = world();
     for (const x of DAYS) await runDaily(x, opts(a));
     const poster = (await readAllEvents(db)).find((e) => e.type === "post.published");
-    expect(poster, "投稿がない（試験の前提が崩れた）").toBeDefined();
+    expect(poster, "投稿がない").toBeDefined();
     const id = p(poster!).agentId as string;
     const d = DAYS.filter((x) => jst(x, 0) <= poster!.recordedAt).at(-1)!;
-    // 2回目：その日のその AI の注文票の確定で落とす（投稿と判断の記録は書いたあと）
+    // 2回目：その日のその AI の注文票の確定で、1回だけ落とす（投稿と判断の記録は書いたあと）。
+    // 当たりの判定は値の位置に頼らず、INSERT の値に order_sheet.committed とその AI の ID が入っているかで見る
     await resetSchema(pg);
     await migrate(db);
     const w = world();
     for (const x of DAYS.slice(0, DAYS.indexOf(d))) await runDaily(x, opts(w));
-    let armed = true;
-    const hit = (t: string, q?: readonly unknown[]) => armed && t.startsWith("INSERT INTO events") && q?.[2] === "order_sheet.committed" && q.some((v) => typeof v === "string" && v.includes(`"agentId":"${id}"`));
-    const crashing: SqlDb = { ...db, transaction: (fn) => db.transaction((tx) => fn({ ...tx, query: (t, q) => (hit(t, q) ? ((armed = false), Promise.reject(new Error("crash"))) : tx.query(t, q)) })) };
+    let hits = 0;
+    const hit = (t: string, q?: readonly unknown[]) => {
+      if (hits > 0 || !t.startsWith("INSERT INTO events") || !q) return false;
+      const vals = q.filter((v): v is string => typeof v === "string");
+      return vals.includes("order_sheet.committed") && vals.some((v) => v.includes(`"agentId":"${id}"`));
+    };
+    const crashing: SqlDb = { ...db, transaction: (fn) => db.transaction((tx) => fn({ ...tx, query: (t, q) => (hit(t, q) ? (hits++, Promise.reject(new Error("crash"))) : tx.query(t, q)) })) };
     await expect(runDaily(d, opts(w, { db: crashing }))).rejects.toThrow("crash");
+    expect(hits, "仕込んだ失敗が1回だけ起きていない").toBe(1);
     const events = await readAllEvents(db);
     const today = events.filter((e) => e.type === "agent.run" && p(e).agentId === id && e.recordedAt >= jst(d, 0));
-    const postRun = today.find((e) => p(e).purpose === "post")!;
-    const orderRun = today.find((e) => p(e).purpose === "order")!;
-    expect(events.some((e) => e.type === "order_sheet.committed" && p(e).runSeq === orderRun.seq)).toBe(false);
+    const postRun = today.find((e) => p(e).purpose === "post");
+    const orderRun = today.find((e) => p(e).purpose === "order");
+    expect(postRun && orderRun, "その日の投稿用と注文用の run がない").toBeTruthy();
+    expect(events.some((e) => e.type === "order_sheet.committed" && p(e).runSeq === orderRun!.seq), "注文票が確定済み").toBe(false);
+    // ここから先の手順は、断られても先へ進む（どこで直しても、回し直しが進めばよい）
     const store = await PgEventStore.open(db, { values: await PgValueStore.open(db), holidayTables, clock: w.clock });
-    const r = await store.append({ type: "post.published", actor: `agent:${id}`, refs: [postRun.seq], payload: { agentId: id, board: p(poster!).board, bodyHash: p(postRun).outputHash, citeSeqs: [], runSeq: postRun.seq } } as never);
-    expect(r.ok).toBe(true);
-    const forged = (await store.last())!;
-    await withdrawAndErase(w.clock, [forged]);
-    await runDaily(d, opts(w)); // いまは "output of run N is not available" で止まる
+    const r = await attempt(() => store.append({ type: "post.published", actor: `agent:${id}`, refs: [postRun!.seq], payload: { agentId: id, board: p(poster!).board, bodyHash: p(postRun!).outputHash, citeSeqs: [], runSeq: postRun!.seq } } as never));
+    if (r?.ok) {
+      const forged = (await store.last())!;
+      await attempt(() => store.append({ type: "content.withdrawn", actor: "operator:owner", refs: [forged.seq], payload: { targetSeq: forged.seq, reason: "権利者からの申し出", bodyErased: true } }));
+      await attempt(() => erase(forged.seq));
+    }
+    try {
+      await runDaily(d, opts(w)); // いまは "output of run N is not available" で止まる
+      rerun.finished = (await readAllEvents(db)).some((e) => e.type === "valuation.recorded" && p(e).date === d);
+    } catch (err) {
+      rerun.error = String(err);
+    }
+    rerun.ran = true;
+  });
+  it.fails("【欠陥の影響】上の状態から、同じ日の回し直しが最後まで進む（いまは止まる。直れば進む）", () => {
+    expect(rerun.ran, "前提の試験が動いていない").toBe(true);
+    expect(rerun.error).toBeUndefined();
+    expect(rerun.finished).toBe(true);
   });
 });
