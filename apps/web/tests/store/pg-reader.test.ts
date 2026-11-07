@@ -19,8 +19,9 @@ let db: SqlDb;
 /** 2026-11-09（月）から3営業日を回す */
 const DAYS = ["2026-11-09", "2026-11-10", "2026-11-11"];
 
-async function writeDays() {
+async function writeDays(beforeMigrate?: () => Promise<void>) {
   await resetSchema(pg);
+  await beforeMigrate?.();
   await migrate(db);
   const clock = new FakeClock(jst(DAYS[0]!, 7));
   const waitUntil = async (at: number) => void (at > clock.now() && clock.set(at));
@@ -94,14 +95,10 @@ describe("readSnapshot", { timeout: 60_000 }, () => {
     expect(warnings[0]).not.toMatch(/postgres:\/\//);
   });
 
-  it("SELECT だけの役割でも読め、警告を出さず、読み取り専用のトランザクションで読み、書く文・鍵・表を作る文を流さない", async () => {
-    await writeDays();
+  it("画面用の役割（ffr_reader）でも読め、警告を出さず、読み取り専用のトランザクションで読み、書く文・鍵・表を作る文を流さない", async () => {
+    await writeDays(createReaderRole);
     const expected = await readSnapshot(db, { warn: () => undefined });
-    await pg.exec(`
-      DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ffr_reader_test') THEN CREATE ROLE ffr_reader_test; END IF; END $$;
-      GRANT USAGE ON SCHEMA public TO ffr_reader_test;
-      GRANT SELECT ON events, stored_values TO ffr_reader_test;
-      SET ROLE ffr_reader_test;`);
+    await pg.exec("SET ROLE ffr_reader");
     try {
       const r = recording();
       const warnings: string[] = [];
@@ -112,8 +109,9 @@ describe("readSnapshot", { timeout: 60_000 }, () => {
       expect(r.log[1]).toMatch(/^SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY$/);
       expect(r.log[2]).toBe("SET LOCAL statement_timeout = '30s'");
       expect(r.log.filter((t) => t === "BEGIN")).toHaveLength(1);
-      // 権限を確かめる文（has_table_privilege）は、'INSERT' などの語を含むが書かない
-      const statements = r.log.filter((t) => !t.startsWith("SELECT has_table_privilege"));
+      // 権限を確かめる文（has_any_column_privilege・pg_has_role）は、'INSERT' などの語を含むが書かない
+      const statements = r.log.filter((t) => !/^SELECT (has_any_column_privilege|pg_has_role)\(/.test(t));
+      expect(statements.length).toBeLessThan(r.log.length);
       expect(statements.filter((t) => /\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|GRANT)\b|advisory|^lock /i.test(t))).toEqual([]);
     } finally {
       await pg.exec("RESET ROLE");
@@ -139,6 +137,161 @@ describe("readSnapshot", { timeout: 60_000 }, () => {
     expect(snap.events).toEqual([]);
     expect(snap.lastHash).toBeNull();
     expect(snap.accounts.size).toBe(0);
+  });
+});
+
+/** 運営者の手順の SQL（db/ops/create_reader_role.sql）を、パスワードとデータベース名を置き換えて流す。役割があれば作り直す */
+async function createReaderRole() {
+  const dbName = (await pg.query<{ d: string }>("SELECT current_database() AS d")).rows[0]!.d;
+  // 前の試験で与えた権限を外してから消す（DROP OWNED は、持ち物を消し、与えられた権限を外す）
+  await pg.exec("DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ffr_reader') THEN DROP OWNED BY ffr_reader; DROP ROLE ffr_reader; END IF; END $$");
+  const sql = readFileSync(new URL("../../db/ops/create_reader_role.sql", import.meta.url), "utf8");
+  await pg.exec(sql.replace("<password>", "test-only-pw").replaceAll("<db>", `"${dbName}"`));
+}
+
+const readerCheck = (): Promise<Record<string, unknown>> =>
+  pg.query<Record<string, unknown>>(readFileSync(new URL("../../db/ops/check_reader_role.sql", import.meta.url), "utf8")).then((r) => r.rows[0]!);
+const expectedCheck = {
+  who: "ffr_reader",
+  superuser: false,
+  write_all_data: false,
+  member_of_roles: 0,
+  can_select: true,
+  can_insert: false,
+  can_update: false,
+  can_delete: false,
+  can_truncate: false,
+  can_reference_or_trigger: false,
+  values_can_select: true,
+  values_can_insert: false,
+  values_can_update: false,
+  values_can_delete: false,
+  values_can_truncate: false,
+  values_can_reference_or_trigger: false,
+  can_erase_body: false,
+  can_create_temp: false,
+  can_create_schema: false,
+  can_create_in_schema: false,
+};
+
+describe("画面用の読むだけの役割（ffr_reader。db/ops/create_reader_role.sql）", { timeout: 60_000 }, () => {
+  for (const [label, before] of [
+    ["migrate の前に作る", true],
+    ["migrate の後に作る", false],
+  ] as const) {
+    it(`${label}と、読むことだけが許され、確認の SQL が想定の結果を返し、画面の読む口が警告なしで動く`, async () => {
+      await writeDays(before ? createReaderRole : undefined);
+      if (!before) await createReaderRole();
+      const expected = await readSnapshot(db, { warn: () => undefined });
+      try {
+        await pg.exec("SET ROLE ffr_reader");
+        expect(await readerCheck()).toEqual(expectedCheck);
+        const warnings: string[] = [];
+        const snap = await readSnapshot(db, { warn: (m) => warnings.push(m) });
+        expect(warnings).toEqual([]);
+        expect(snap.lastHash).toBe(expected.lastHash);
+        expect(snap.accounts.size).toBe(expected.accounts.size);
+      } finally {
+        await pg.exec("RESET ROLE");
+      }
+    });
+  }
+
+  it("誤って与えた書く権限は、migrate を流し直すと外れ、確認の SQL が想定どおりに戻る", async () => {
+    await writeDays(createReaderRole);
+    await pg.exec("GRANT INSERT, UPDATE, DELETE, TRUNCATE ON events, stored_values TO ffr_reader; GRANT EXECUTE ON FUNCTION erase_withdrawn_body(bigint) TO ffr_reader");
+    try {
+      await pg.exec("SET ROLE ffr_reader");
+      expect(await readerCheck()).toMatchObject({ can_insert: true, values_can_delete: true, can_erase_body: true });
+    } finally {
+      await pg.exec("RESET ROLE");
+    }
+    await migrate(db);
+    try {
+      await pg.exec("SET ROLE ffr_reader");
+      expect(await readerCheck()).toEqual(expectedCheck);
+    } finally {
+      await pg.exec("RESET ROLE");
+    }
+  });
+
+  it("誤って書ける役割（pg_write_all_data・表の持ち主）に入れられていれば、確認の SQL が気づく（NOINHERIT でも）", async () => {
+    await writeDays(createReaderRole);
+    const owner = (await pg.query<{ o: string }>("SELECT tableowner AS o FROM pg_tables WHERE tablename = 'events'")).rows[0]!.o;
+    for (const [role, expected] of [
+      ["pg_write_all_data", { write_all_data: true, member_of_roles: 1 }],
+      [owner, { member_of_roles: 1 }],
+    ] as const) {
+      await pg.exec(`GRANT "${role}" TO ffr_reader`);
+      try {
+        await pg.exec("SET ROLE ffr_reader");
+        expect(await readerCheck(), role).toMatchObject(expected);
+      } finally {
+        await pg.exec(`RESET ROLE; REVOKE "${role}" FROM ffr_reader`);
+      }
+    }
+    await pg.exec("SET ROLE ffr_reader");
+    try {
+      expect(await readerCheck()).toEqual(expectedCheck);
+    } finally {
+      await pg.exec("RESET ROLE");
+    }
+  });
+
+  it("列ごとの書く権限・TRIGGER・REFERENCES・データベースへの CREATE・書ける役割への所属を、確認の SQL と読む口の警告が見落とさない", async () => {
+    await writeDays(createReaderRole);
+    const dbName = (await pg.query<{ d: string }>("SELECT current_database() AS d")).rows[0]!.d;
+    const owner = (await pg.query<{ o: string }>("SELECT tableowner AS o FROM pg_tables WHERE tablename = 'events'")).rows[0]!.o;
+    // [与える文, 外す文, 確認の SQL で変わる列, 読む口が警告するか]
+    const cases: [string, string, Record<string, unknown>, boolean][] = [
+      ["GRANT INSERT (hash, kind, salt, content) ON stored_values TO ffr_reader", "REVOKE INSERT (hash, kind, salt, content) ON stored_values FROM ffr_reader", { values_can_insert: true }, true],
+      ["GRANT UPDATE (payload) ON events TO ffr_reader", "REVOKE UPDATE (payload) ON events FROM ffr_reader", { can_update: true }, true],
+      ["GRANT REFERENCES (hash) ON events TO ffr_reader", "REVOKE REFERENCES (hash) ON events FROM ffr_reader", { can_reference_or_trigger: true }, false],
+      ["GRANT TRIGGER ON stored_values TO ffr_reader", "REVOKE TRIGGER ON stored_values FROM ffr_reader", { values_can_reference_or_trigger: true }, false],
+      [`GRANT CREATE ON DATABASE "${dbName}" TO ffr_reader`, `REVOKE CREATE ON DATABASE "${dbName}" FROM ffr_reader`, { can_create_schema: true }, false],
+      ["GRANT pg_write_all_data TO ffr_reader", "REVOKE pg_write_all_data FROM ffr_reader", { write_all_data: true, member_of_roles: 1 }, true],
+      [`GRANT "${owner}" TO ffr_reader`, `REVOKE "${owner}" FROM ffr_reader`, { member_of_roles: 1 }, true],
+    ];
+    for (const [grant, revoke, changed, warns] of cases) {
+      await pg.exec(grant);
+      try {
+        await pg.exec("SET ROLE ffr_reader");
+        expect(await readerCheck(), grant).toEqual({ ...expectedCheck, ...changed });
+        const warnings: string[] = [];
+        await readSnapshot(db, { warn: (m) => warnings.push(m) });
+        expect(warnings, grant).toHaveLength(warns ? 1 : 0);
+      } finally {
+        await pg.exec(`RESET ROLE; ${revoke}`);
+      }
+    }
+  });
+
+  it("書く・消す・本文を消す関数・表や一時テーブルを作ることは、権限で断られる", async () => {
+    await writeDays(createReaderRole);
+    const last = (await readAllEvents(db)).at(-1)!;
+    const values = (await pg.query<{ n: number }>("SELECT count(*)::int AS n FROM stored_values")).rows[0]!.n;
+    const denied = [
+      `INSERT INTO events (seq, schema_ver, type, recorded_at, actor, keys, refs, payload, prev_hash, hash) VALUES (${last.seq + 1}, 1, 'source.captured', ${last.recordedAt}, 'system', '[]', '[]', '{}', '${last.hash}', '${"e".repeat(64)}')`,
+      "UPDATE events SET type = 'x'",
+      "DELETE FROM events",
+      "TRUNCATE events",
+      `INSERT INTO stored_values (hash, kind, salt, content) VALUES (repeat('a', 64), 'value', repeat('0', 32), '{}'::jsonb)`,
+      "UPDATE stored_values SET salt = repeat('1', 32)",
+      "DELETE FROM stored_values",
+      "TRUNCATE stored_values",
+      "SELECT erase_withdrawn_body(1)",
+      "CREATE TEMP TABLE t (x int)",
+      "CREATE TABLE public.t (x int)",
+      "DROP TABLE events",
+    ];
+    try {
+      await pg.exec("SET ROLE ffr_reader");
+      for (const sql of denied) await expect(pg.exec(sql), sql).rejects.toThrow(/permission denied|must be owner/);
+    } finally {
+      await pg.exec("RESET ROLE");
+    }
+    expect((await readAllEvents(db)).at(-1)!.hash).toBe(last.hash);
+    expect((await pg.query<{ n: number }>("SELECT count(*)::int AS n FROM stored_values")).rows[0]!.n).toBe(values);
   });
 });
 

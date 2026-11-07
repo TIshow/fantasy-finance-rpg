@@ -87,4 +87,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ffr_app') THEN
     REVOKE ALL ON FUNCTION erase_withdrawn_body(bigint) FROM ffr_app;
   END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ffr_reader') THEN
+    REVOKE ALL ON FUNCTION erase_withdrawn_body(bigint) FROM ffr_reader;
+  END IF;
 END $$;
