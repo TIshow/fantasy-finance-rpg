@@ -192,10 +192,10 @@ describe("受け取りと打ち切り", () => {
   it("記録にないバッチを探す：customId を渡し、例外は unknown", async () => {
     const seen: string[] = [];
     const { driver } = fakeDriver({ lookup: async (q) => (seen.push(q.customId), { kind: "found", batchIds: ["b9"] }) });
-    expect(await port(driver).findUnrecorded({ agentId: "ai-1", tradingDate: "2026-11-10", since: AT, now: AT, recordedBatchIds: new Set() })).toEqual({ kind: "found", batchIds: ["b9"] });
+    expect(await port(driver).findUnrecorded({ agentId: "ai-1", tradingDate: "2026-11-10", since: AT, now: AT, requestedAt: AT, recordedBatchIds: new Set() })).toEqual({ kind: "found", batchIds: ["b9"] });
     expect(seen).toEqual([await batchCustomIdOf("ai-1", "2026-11-10")]);
     const bad = fakeDriver({ lookup: async () => Promise.reject(new Error("x")) });
-    expect(await port(bad.driver).findUnrecorded({ agentId: "ai-1", tradingDate: "2026-11-10", since: AT, now: AT, recordedBatchIds: new Set() })).toEqual({ kind: "unknown" });
+    expect(await port(bad.driver).findUnrecorded({ agentId: "ai-1", tradingDate: "2026-11-10", since: AT, now: AT, requestedAt: AT, recordedBatchIds: new Set() })).toEqual({ kind: "unknown" });
   });
 });
 

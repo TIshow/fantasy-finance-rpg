@@ -142,6 +142,11 @@ export interface BatchLookupQuery {
   customId: string;
   since: number;
   now: number;
+  /**
+   * 前の実行が依頼を送ったかもしれない一番遅い時刻（runner の時計）。作ったバッチが一覧に出るまで待つ時間は、提供元ごとにここから数え、
+   * そのあいだは見つからなくても none を返さない。分からなければ now を渡す（none にならず、やり直さない側に倒れる）
+   */
+  requestedAt: number;
   /** 記録にあるバッチのID（探す対象から外す） */
   recordedBatchIds: ReadonlySet<string>;
 }
@@ -271,10 +276,10 @@ export class BatchPort implements LlmBatchPort {
    * found なら cancelBatch で取り消しを頼む。どちらでもやり直さず、unrecordedDrafts の記録で費用を maxCost で数える
    */
   async findUnrecorded(q: { agentId: string; tradingDate: string } & Omit<BatchLookupQuery, "customId">): Promise<BatchLookup> {
-    if (!Number.isFinite(q.since) || !Number.isFinite(q.now)) throw new RangeError("since and now must be finite numbers");
+    if (![q.since, q.now, q.requestedAt].every(Number.isFinite)) throw new RangeError("since, now and requestedAt must be finite numbers");
     const customId = await batchCustomIdOf(q.agentId, q.tradingDate);
     try {
-      return await this.#driver.lookup({ customId, since: q.since, now: q.now, recordedBatchIds: q.recordedBatchIds });
+      return await this.#driver.lookup({ customId, since: q.since, now: q.now, requestedAt: q.requestedAt, recordedBatchIds: q.recordedBatchIds });
     } catch (e) {
       if (e instanceof RangeError) throw e;
       return { kind: "unknown" };

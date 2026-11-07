@@ -10,6 +10,12 @@ import { openaiBatchReservePrice } from "./openai-pricing";
 export const OPENAI_PROVIDER = "openai";
 /** 記録にないバッチを探すときに読む一覧のページ数の上限（1ページ100件）。超えたら決められない（unknown） */
 const LOOKUP_MAX_PAGES = 20;
+/**
+ * 依頼を送ってから、「作られていない」と決めてよくなるまでの時間（1時間。Gemini の GEMINI_CREATE_SETTLE_MS と同じ考え）。
+ * 資料（https://developers.openai.com/api/docs/guides/batch 、2026-11-08 確認）には、作成が一覧に出るまでの遅れが書かれていない。
+ * 待つ側の損は「やり直しが遅れる」だけで、二重課金よりずっと小さい
+ */
+export const OPENAI_CREATE_SETTLE_MS = 60 * 60 * 1000;
 
 /**
  * 予約の料金。長い文脈の料金（入力が272,000トークンを超えるとき）を1,000万トークンあたりのセントに直す。時刻では変わらない。
@@ -27,6 +33,8 @@ export function openaiBatchDriver(client: Client): BatchDriver {
   return {
     provider: OPENAI_PROVIDER,
     settingKeys: ["max_tokens", "reasoning_effort"],
+    // キャッシュへの書き込み（最大で入力の2.5倍）は、入力の欄（1倍）と書き込みの欄（2倍）の両方に入れて3倍で数える（toTokenUsage）
+    inputCostFactor: 3,
     priceAt: (modelId) => openaiReservePrice(modelId),
     prepare(r, customId) {
       const items = [{ customId, params: toOpenAIParams(r.model, r.messages) }];
@@ -69,19 +77,22 @@ export function openaiBatchDriver(client: Client): BatchDriver {
     },
     /**
      * since より後に作られた、記録にないバッチをすべて見つかったとする（OpenAI のバッチの情報には customId がない。
-     * GPT の AI は1体なので、ほかの AI のバッチと取り違えない。2体以上にするなら作り直す）
+     * GPT の AI は1体なので、ほかの AI のバッチと取り違えない。2体以上にするなら作り直す）。
+     * 作った時刻（created_at）は秒なので、since も秒に切り下げて比べる。requestedAt から OPENAI_CREATE_SETTLE_MS がたつまでは none にしない
      */
     async lookup(q) {
+      const since = Math.floor(q.since / 1000) * 1000;
+      const none = q.now - q.requestedAt >= OPENAI_CREATE_SETTLE_MS ? ({ kind: "none" } as const) : ({ kind: "unknown" } as const);
       const found: string[] = [];
       let after: string | undefined;
       for (let page = 0; page < LOOKUP_MAX_PAGES; page += 1) {
         const r = await client.list({ limit: 100, ...(after === undefined ? {} : { after }) });
         if (!r.ok) return { kind: "unknown" };
-        for (const b of r.value.data) if (b.createdAt >= q.since && !q.recordedBatchIds.has(b.id)) found.push(b.id);
+        for (const b of r.value.data) if (b.createdAt >= since && !q.recordedBatchIds.has(b.id)) found.push(b.id);
         // 一覧は新しい順。いちばん古いものが since より前なら、その先は読まなくてよい
         const oldest = r.value.data.at(-1);
-        if (!r.value.hasMore || r.value.lastId === null || (oldest !== undefined && oldest.createdAt < q.since)) {
-          return found.length > 0 ? { kind: "found", batchIds: found } : { kind: "none" };
+        if (!r.value.hasMore || r.value.lastId === null || (oldest !== undefined && oldest.createdAt < since)) {
+          return found.length > 0 ? { kind: "found", batchIds: found } : none;
         }
         after = r.value.lastId;
       }
