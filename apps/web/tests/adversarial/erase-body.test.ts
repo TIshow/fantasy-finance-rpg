@@ -159,17 +159,20 @@ async function insertRaw(type: string, actor: string, payloadJson: string, keys:
 }
 
 describe("PR #163 の守り（ほかの記録が指す本文は消せない）を突く", { timeout: 60_000 }, () => {
-  // 前半（通常の it）が前提を確かめて手順を進め、結果を残す。後半（it.fails）は結果だけを見る。前提が崩れれば前半が赤になる
-  const crafted: { ran?: boolean; kept?: boolean } = {};
-  it("【欠陥・低の前提】本文の項目に、別の書き方（接頭辞つき・入れ子）で同じハッシュを持つ投稿を足し、本物の投稿だけを非表示にして関数を呼ぶ", async () => {
+  /**
+   * 本文の項目に、別の書き方（接頭辞つき・入れ子）で同じハッシュを持つ投稿を、run の seq が runSeq の投稿用の run を指して足し、
+   * 本物の投稿だけを非表示にして関数を呼ぶ。本文が残ったかを返す
+   */
+  async function craftAndErase(runSeq: (target: LogEvent) => LogEvent) {
     const { append, withdraw } = await golden();
     const target = goldenPosts[0]!;
     const h = p(target).bodyHash as string;
-    const postRun = goldenRuns.find((r) => p(r).agentId === "ai-a" && p(r).purpose === "post")!;
+    const run = runSeq(target);
+    const agentId = p(run).agentId as string;
     // 検査を通る形で足せる（本文のハッシュの形は検査されない）。daily verify も通る
     const seqs: number[] = [];
     for (const bodyHash of [`sha256:${h}`, { x: h }]) {
-      const seq = await attempt(() => append("post.published", "agent:ai-a", [postRun.seq], { agentId: "ai-a", board: "TSTB", bodyHash, citeSeqs: [], runSeq: postRun.seq }));
+      const seq = await attempt(() => append("post.published", `agent:${agentId}`, [run.seq], { agentId, board: "TSTB", bodyHash, citeSeqs: [], runSeq: run.seq }));
       if (seq !== undefined) seqs.push(seq);
     }
     expect(seqs, "細工した投稿を足せなかった（試験の前提が崩れた）").toHaveLength(2);
@@ -177,7 +180,21 @@ describe("PR #163 の守り（ほかの記録が指す本文は消せない）�
     // 細工した投稿は非表示にしない。本物の投稿だけを、本文を消すとして非表示にする
     await withdraw(target.seq);
     await attempt(() => erase(target.seq));
-    crafted.kept = await has(h);
+    return has(h);
+  }
+  const runOf = (post: LogEvent) => goldenRuns.find((r) => r.seq === p(post).runSeq)!;
+
+  // PR #158 で it.fails にしたもの。PR #182（db/004_erase_outputs.sql）で、細工した投稿が本物と同じ run を指す形に限って直った（run_has_many_posts で断る）
+  it("本物の投稿と同じ run を指す、別の書き方の投稿があると、関数は断り、本文が残る", async () => {
+    expect(await craftAndErase(runOf)).toBe(true);
+  });
+
+  // 上の形を、細工した投稿が別の判断の run を指すように変えると、まだ消える
+  // 前半（通常の it）が前提を確かめて手順を進め、結果を残す。後半（it.fails）は結果だけを見る。前提が崩れれば前半が赤になる
+  const crafted: { ran?: boolean; kept?: boolean } = {};
+  it("【欠陥・低の前提】別の書き方の投稿が、本物の投稿とは別の判断（別の AI）の投稿用の run を指すとき", async () => {
+    const other = (target: LogEvent) => runOf(goldenPosts.find((e) => p(e).agentId !== p(target).agentId)!);
+    crafted.kept = await craftAndErase(other);
     crafted.ran = true;
   });
   it.fails("【欠陥・低】上の状態で、別の書き方の投稿は件数にもほかの記録にも数えられず、本文が消える（直れば本文が残る）", () => {
