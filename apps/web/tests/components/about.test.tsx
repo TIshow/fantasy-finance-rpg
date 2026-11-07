@@ -12,7 +12,7 @@ describe("このサイトについてのページ", () => {
 
   it("主な説明が出る", () => {
     const html = renderToStaticMarkup(<AboutPage />);
-    for (const t of ["架空", "実際のお金は動きません", "投資助言ではありません", "板寄せ", "ハッシュ", "非表示（理由）", "検査のコマンド"]) {
+    for (const t of ["架空", "実際のお金は動きません", "投資助言ではありません", "板寄せ", "ハッシュ", "非表示（理由）", "検査のコマンド", "対象は18歳以上です"]) {
       expect(html).toContain(t);
     }
     expect(html).not.toContain("取り下げ");
