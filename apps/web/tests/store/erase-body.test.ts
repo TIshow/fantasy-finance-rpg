@@ -17,7 +17,7 @@ let pg: PGlite;
 let db: SqlDb;
 beforeAll(async () => {
   ({ pg, db } = await openPglite());
-  await pg.exec("CREATE ROLE ffr_app");
+  await pg.exec("CREATE ROLE ffr_app; CREATE ROLE ffr_reader");
 }, 60_000);
 afterAll(() => db.close());
 
@@ -221,11 +221,13 @@ describe("erase_withdrawn_body", () => {
     expect(await problems()).toEqual([[erased, "not_erased"], [erased, "output_not_erased"]]);
     await db.query(run.replace("<seq>", String(erased)));
     expect((await db.query(list)).rows).toEqual([]);
-    expect(await problems()).toEqual([]);
+    // 固定データの注文用の出力は本文を含まないので残る。本文がもうないので、残りが本文を含むかを確かめられず、output_unverifiable として出る
+    // （毎日の実行では、投稿用と注文用の出力は同じ全文なので、両方が消えて何も出ない）
+    expect(await problems()).toEqual([[erased, "output_unverifiable"]]);
     // 本文がないのに、最後の記録が真でない（持ち主がトリガを外して消した場合など）
     await pg.exec("ALTER TABLE stored_values DISABLE TRIGGER USER");
     await db.query("DELETE FROM stored_values WHERE hash = $1", [bodyOf(kept)]);
-    expect(await problems()).toEqual([[kept, "missing"]]);
+    expect(await problems()).toEqual([[erased, "output_unverifiable"], [kept, "missing"]]);
   }, 60_000);
 });
 
@@ -243,12 +245,24 @@ const tryDelete = (h: string) =>
     await tx.query("SELECT set_config('ffr.erase_body', $1, true)", [h]);
     await tx.query("DELETE FROM stored_values WHERE hash = $1", [h]);
   });
+const problemOf = async (seq: number) => (await db.query<{ p: string | null }>("SELECT withdrawn_post_problem(current_schema(), $1) AS p", [seq])).rows[0]!.p;
+/** 手順書の2つ目の文（食い違い）のうち、seq の投稿の行 */
+const problemsOf = async (seq: number) => (await db.query<{ seq: number; problem: string }>(opsStatements()[1]!)).rows.filter((r) => Number(r.seq) === seq).map((r) => r.problem);
+/** 役割 role になって fn を動かし、必ず持ち主に戻す */
+async function as<T>(role: string, fn: () => Promise<T>): Promise<T> {
+  await pg.exec(`SET ROLE ${role}`);
+  try {
+    return await fn();
+  } finally {
+    await pg.exec("RESET ROLE");
+  }
+}
 
 /**
- * 毎日の実行と同じ形の判断を1つ足す：投稿用と注文用の agent.run（同じ AI・同じ入力・同じ出力の全文）、投稿、本文を消す印つきの取り下げ。
- * extra で、同じ判断の別の出力（文を持つもの・持たないもの）を足せる
+ * 毎日の実行と同じ形の判断を1つ足す：投稿用の agent.run・投稿・注文用の agent.run・注文票の確定（同じ AI・同じ入力。出力は既定で同じ全文の JSON）、
+ * 本文を消す印つきの取り下げ。orderOutput で注文用の出力を変え、order: false で注文用の run を、sheet: false で注文票の確定を省ける
  */
-async function decision(o: { agentId?: string; inputSeqs?: number[]; text: string; withdraw?: boolean; extra?: string[] }) {
+async function decision(o: { agentId?: string; inputSeqs?: number[]; text: string; withdraw?: boolean; post?: boolean; orderOutput?: string; order?: boolean; sheet?: boolean }) {
   const agentId = o.agentId ?? "ai-x";
   const inputSeqs = o.inputSeqs ?? [1, 2];
   const output = canonicalize({ note: "n", orders: [], post: { board: "TSTA", text: o.text } });
@@ -259,59 +273,167 @@ async function decision(o: { agentId?: string; inputSeqs?: number[]; text: strin
   };
   const postRun = await run("post", output);
   const body = await putBodyRow(o.text);
-  await insertRaw("post.published", `agent:${agentId}`, { agentId, board: "TSTA", bodyHash: body, runSeq: postRun.seq });
-  const post = await lastSeq();
-  const orderRun = await run("order", output);
-  const extra: string[] = [];
-  for (const x of o.extra ?? []) extra.push((await run("order", x)).h);
-  if (o.withdraw !== false) await insertRaw("content.withdrawn", "operator:owner", { targetSeq: post, reason: "申し出", bodyErased: true });
-  return { post, body, postRun: postRun.seq, outputs: [postRun.h, orderRun.h], extra };
+  let post = 0;
+  if (o.post !== false) {
+    await insertRaw("post.published", `agent:${agentId}`, { agentId, board: "TSTA", bodyHash: body, runSeq: postRun.seq });
+    post = await lastSeq();
+  }
+  const outputs = [postRun.h];
+  if (o.order !== false) {
+    const orderRun = await run("order", o.orderOutput ?? output);
+    outputs.push(orderRun.h);
+    if (o.sheet !== false) await insertRaw("order_sheet.committed", "system", { agentId, tradingDate: "2026-11-10", orders: [], runSeq: orderRun.seq, inputSeqs });
+  }
+  if (o.withdraw !== false && post > 0) await insertRaw("content.withdrawn", "operator:owner", { targetSeq: post, reason: "申し出", bodyErased: true });
+  return { post, body, postRun: postRun.seq, outputs };
 }
 
 describe("erase_withdrawn_body と判断の出力（db/004_erase_outputs.sql。#179）", () => {
-  it("同じ判断の出力のうち、同じ文を持つものを消す（全文が同じ・本文をそのまま含む・JSON の文字列の形で含む）。文を持たない出力とほかの判断の出力は残す", async () => {
+  it("同じ判断の、本文を持つ出力（投稿用と注文用）を消す。ほかの判断の出力は残し、イベントは変えない。何度呼んでも同じ結果", async () => {
     await setUp();
     const text = '「買い」と言った\n He said "buy" \\ now';
-    // 別の日の判断（入力が違う）。同じ文でも消さない
-    const other = await decision({ inputSeqs: [1, 3], text, withdraw: false });
-    const d = await decision({ text, extra: [`raw: ${text}`, "[]", canonicalize([{ text }])] });
+    const other = await decision({ inputSeqs: [1, 3], text: "別の日の投稿", withdraw: false });
+    const otherAgent = await decision({ agentId: "ai-y", text, withdraw: false }); // ほかの AI の同じ文は、確かめにも消す対象にも入らない
+    const d = await decision({ text });
+    const before = await readAllEvents(db);
+    expect(await problemOf(d.post)).toBeNull();
     expect(await erase(d.post)).toBe(d.body);
-    for (const h of [d.body, ...d.outputs, d.extra[0]!, d.extra[2]!]) expect(await has(h)).toBe(false);
-    expect(await has(d.extra[1]!)).toBe(true);
-    for (const h of [other.body, ...other.outputs]) expect(await has(h)).toBe(true);
-    // 何度呼んでも同じ結果
+    for (const h of [d.body, ...d.outputs]) expect(await has(h)).toBe(false);
+    for (const h of [other.body, ...other.outputs, otherAgent.body, ...otherAgent.outputs]) expect(await has(h)).toBe(true);
+    expect(await readAllEvents(db)).toEqual(before);
     expect(await erase(d.post)).toBeNull();
     expect(await erasedOutputs(d.post)).toEqual([]);
+    expect(await problemsOf(d.post)).toEqual([]);
   }, 60_000);
 
-  it("本文だけを先に消した投稿（003 の版）も、もう一度呼べば出力が消える（NULL が返る）。食い違いの確かめにも出る", async () => {
+  it("本文を持つかは、全体が本文と同じか、JSON の文字列の値として丸ごと含むかで決める。引用符のない形・本文の一部だけでは消さない", async () => {
+    await setUp();
+    const text = "買い";
+    const cases: [string, boolean][] = [
+      [canonicalize([{ text }]), true], // JSON の文字列の値として丸ごと
+      [text, true], // 全体が本文と同じ
+      [`raw: ${text}`, false], // 引用符のない形
+      [canonicalize({ note: "買いたい" }), false], // 本文の一部だけ
+      [canonicalize({ note: `${text} です` }), false],
+      ["[]", false],
+    ];
+    const ds = [];
+    for (const [i, [orderOutput]] of cases.entries()) ds.push(await decision({ agentId: `ai-c${i}`, text, orderOutput }));
+    for (const [i, [, erased]] of cases.entries()) {
+      expect(await erase(ds[i]!.post)).toBe(ds[i]!.body);
+      expect(await has(ds[i]!.outputs[0]!)).toBe(false);
+      expect(await has(ds[i]!.outputs[1]!), `case ${i}`).toBe(!erased);
+    }
+  }, 60_000);
+
+  it("【高1】アプリの接続（ffr_app）で、本物の判断の run を指す偽の投稿を足し、運営者が取り下げて消しても、本物の出力も本文も消えない", async () => {
+    await setUp();
+    const real = await decision({ text: "本物の投稿", withdraw: false });
+    // ffr_app で、本物の投稿用の run を指す偽の投稿と、その本文（任意の文）を足す
+    const forged = await as("ffr_app", async () => {
+      const out: number[] = [];
+      for (const text of ["{", "本物の投稿", "TSTA"]) {
+        const body = await putBodyRow(text);
+        await insertRaw("post.published", "agent:ai-x", { agentId: "ai-x", board: "TSTA", bodyHash: body, runSeq: real.postRun });
+        out.push(await lastSeq());
+      }
+      return out;
+    });
+    for (const seq of forged) await insertRaw("content.withdrawn", "operator:owner", { targetSeq: seq, reason: "偽", bodyErased: true });
+    for (const seq of forged) {
+      await expect(erase(seq)).rejects.toThrow("run_has_many_posts");
+      await expect(erasedOutputs(seq)).rejects.toThrow("run_has_many_posts");
+      expect(await problemsOf(seq)).toEqual(["not_erased", "output_not_erased", "run_has_many_posts"].filter((p) => p !== "output_not_erased" || seq !== forged[0]));
+    }
+    for (const h of [real.body, ...real.outputs]) expect(await has(h)).toBe(true);
+    // 本物の投稿の側も、別の本文の投稿が同じ run を指すあいだは消せない（手順書に出続ける）
+    await insertRaw("content.withdrawn", "operator:owner", { targetSeq: real.post, reason: "申し出", bodyErased: true });
+    await expect(erase(real.post)).rejects.toThrow("run_has_many_posts");
+    for (const h of [real.body, ...real.outputs]) expect(await has(h)).toBe(true);
+  }, 60_000);
+
+  it("【高1】元の run の出力が本文を含まない投稿（投稿のない判断の run を指す偽の投稿）は断る。注文用の run を指す偽の投稿は、出力に触れずに本文だけを消す", async () => {
+    await setUp();
+    const silent = await decision({ text: "投稿しなかった判断", post: false });
+    const posted = await decision({ inputSeqs: [1, 3], text: "本物" });
+    const forged = await as("ffr_app", async () => {
+      await insertRaw("post.published", "agent:ai-x", { agentId: "ai-x", board: "TSTA", bodyHash: await putBodyRow("{"), runSeq: silent.postRun });
+      const a = await lastSeq();
+      // 注文用の run（本物の投稿の判断）を指す
+      const orderRun = (await db.query<{ seq: string }>("SELECT seq FROM events WHERE type = 'agent.run' AND payload->>'outputHash' = $1", [posted.outputs[1]])).rows[0]!.seq;
+      await insertRaw("post.published", "agent:ai-x", { agentId: "ai-x", board: "TSTA", bodyHash: await putBodyRow("本物"), runSeq: Number(orderRun) });
+      return [a, await lastSeq()] as const;
+    });
+    for (const seq of forged) await insertRaw("content.withdrawn", "operator:owner", { targetSeq: seq, reason: "偽", bodyErased: true });
+    await expect(erase(forged[0])).rejects.toThrow("output_without_body");
+    expect(await problemsOf(forged[0])).toEqual(["not_erased", "output_without_body"]);
+    for (const h of silent.outputs) expect(await has(h)).toBe(true);
+    const body = (await db.query<{ h: string }>("SELECT payload->>'bodyHash' AS h FROM events WHERE seq = $1", [forged[1]])).rows[0]!.h;
+    expect(await erase(forged[1])).toBe(body);
+    for (const h of posted.outputs) expect(await has(h)).toBe(true);
+  }, 60_000);
+
+  it("【中2】同じ AI の、同じ判断の外の出力が本文を持てば断る（入力の一覧が違う）。日をまたいで入力の一覧が同じなら、判断が分からないとして断る", async () => {
+    await setUp();
+    const text = "毎日同じことを言う";
+    const yesterday = await decision({ inputSeqs: [1, 3], text, withdraw: false });
+    const d = await decision({ text });
+    await expect(erase(d.post)).rejects.toThrow("text_outside_decision");
+    expect(await problemsOf(d.post)).toEqual(["not_erased", "output_not_erased", "text_outside_decision"]);
+    for (const h of [d.body, ...d.outputs, yesterday.body, ...yesterday.outputs]) expect(await has(h)).toBe(true);
+    // 入力の一覧が同じ判断が2日分ある（投稿用・注文用の run が2つずつ）
+    await setUp();
+    await decision({ text: "一日目", withdraw: false });
+    const e = await decision({ text: "二日目" });
+    await expect(erase(e.post)).rejects.toThrow("decision_unclear");
+    for (const h of [e.body, ...e.outputs]) expect(await has(h)).toBe(true);
+  }, 60_000);
+
+  it("【中3】同じ判断に注文用の run がない、または注文票の確定・拒否の記録がないときは、本文も出力も消さない", async () => {
+    for (const o of [{ order: false }, { sheet: false }]) {
+      await setUp();
+      const d = await decision({ text: "確定の前", ...o });
+      await expect(erase(d.post)).rejects.toThrow("sheet_not_settled");
+      await expect(erasedOutputs(d.post)).rejects.toThrow("sheet_not_settled");
+      expect(await problemsOf(d.post)).toEqual(["not_erased", "output_not_erased", "sheet_not_settled"]);
+      for (const h of [d.body, ...d.outputs]) expect(await has(h)).toBe(true);
+    }
+    // 拒否の記録でもよい
+    await setUp();
+    const d = await decision({ text: "拒否された日", sheet: false });
+    const orderRun = (await db.query<{ seq: string }>("SELECT seq FROM events WHERE type = 'agent.run' AND payload->>'outputHash' = $1", [d.outputs[1]])).rows[0]!.seq;
+    await insertRaw("order_sheet.rejected", "system", { agentId: "ai-x", tradingDate: "2026-11-10", reason: "suspended", runSeq: Number(orderRun), inputSeqs: [1, 2], orders: [] });
+    expect(await erase(d.post)).toBe(d.body);
+  }, 60_000);
+
+  it("【低7】本文がもうないとき（003 の版で本文だけを消した・本文と元の run の出力の両方がない）は、何も消さず、残った出力を output_unverifiable として出す", async () => {
     await setUp();
     const d = await decision({ text: "先に本文だけ消した" });
-    await tryDelete(d.body);
-    for (const h of d.outputs) expect(await has(h)).toBe(true);
-    const mismatch = opsStatements()[1]!;
-    const problems = async () => (await db.query<{ seq: number; problem: string }>(mismatch)).rows.filter((r) => Number(r.seq) === d.post).map((r) => r.problem);
-    expect(await problems()).toEqual(["output_not_erased"]);
-    expect(await erase(d.post)).toBeNull();
-    for (const h of d.outputs) expect(await has(h)).toBe(false);
-    expect(await problems()).toEqual([]);
+    await pg.exec("ALTER TABLE stored_values DISABLE TRIGGER USER");
+    await db.query("DELETE FROM stored_values WHERE hash = $1", [d.body]);
+    const e = await decision({ inputSeqs: [1, 3], text: "本文と元の出力を消した" });
+    await db.query("DELETE FROM stored_values WHERE hash = ANY($1)", [[e.body, e.outputs[0]!]]);
+    await pg.exec("ALTER TABLE stored_values ENABLE TRIGGER USER");
+    for (const x of [d, e]) {
+      expect(await erase(x.post)).toBeNull();
+      expect(await erasedOutputs(x.post)).toEqual([]);
+      expect(await problemsOf(x.post)).toEqual(["output_unverifiable"]);
+    }
+    for (const h of [...d.outputs, e.outputs[1]!]) expect(await has(h)).toBe(true);
   }, 60_000);
 
-  it("同じ判断から出たほかの投稿が表示されたままでも、取り下げた投稿の文を持つ出力は消す。ほかの投稿の本文は残り、その投稿の側からは消せない", async () => {
+  it("本文の項目が同じ写しの投稿は、元の run を指していても数えない。写しがすべて本文を消す印つきで取り下げられれば、本文と出力を消せる", async () => {
     await setUp();
-    const d = await decision({ text: "同じ判断の投稿が2つ", withdraw: false });
-    const siblingBody = await putBodyRow("もう1つ");
-    await insertRaw("post.published", "agent:ai-x", { agentId: "ai-x", board: "TSTA", bodyHash: siblingBody, runSeq: d.postRun });
-    const sibling = await lastSeq();
-    await insertRaw("content.withdrawn", "operator:owner", { targetSeq: sibling, reason: "申し出", bodyErased: true });
-    // d は取り下げていない：本文の行がある投稿は本文の条件で断り、出力だけを消す関数も、投稿自身の取り下げがなければ断る
-    await expect(erase(d.post)).rejects.toThrow("may not be erased");
-    await expect(erasedOutputs(d.post)).rejects.toThrow("may not be erased");
+    const d = await decision({ text: "写しのある投稿", withdraw: false });
+    await insertRaw("post.published", "agent:ai-x", { agentId: "ai-x", board: "TSTA", bodyHash: d.body, runSeq: d.postRun });
+    const twin = await lastSeq();
+    await insertRaw("content.withdrawn", "operator:owner", { targetSeq: twin, reason: "申し出", bodyErased: true });
+    await expect(erase(twin)).rejects.toThrow("may not be erased"); // 写しの片方がまだ表示されている
+    await expect(erasedOutputs(d.post)).rejects.toThrow("may not be erased"); // 投稿自身が取り下げられていない
     for (const h of [d.body, ...d.outputs]) expect(await has(h)).toBe(true);
-    // 兄弟の投稿を消すと、その元の agent.run の出力と、全文が同じ注文の出力が消える。d の本文の行（表示されたまま）は残る
-    expect(await erase(sibling)).toBe(siblingBody);
+    await insertRaw("content.withdrawn", "operator:owner", { targetSeq: d.post, reason: "申し出", bodyErased: true });
+    expect(await erase(twin)).toBe(d.body);
     for (const h of d.outputs) expect(await has(h)).toBe(false);
-    expect(await has(d.body)).toBe(true);
   }, 60_000);
 
   it("出力のハッシュを、agent.run の outputHash のほかに指す記録があれば、本文も出力も消さない", async () => {
@@ -322,36 +444,56 @@ describe("erase_withdrawn_body と判断の出力（db/004_erase_outputs.sql。#
     for (const h of [d.body, ...d.outputs]) expect(await has(h)).toBe(true);
   }, 60_000);
 
-  it("見張り：取り下げていない判断の出力と、別の判断の agent.run にも指される出力は、持ち主が設定を自分で入れても消せない", async () => {
+  it("見張り：関数と同じ範囲だけを通す。取り下げていない判断・確かめに当たる判断・別の判断にも指される出力は、持ち主が設定を入れても消せない", async () => {
     await setUp();
     const kept = await decision({ text: "取り下げていない", withdraw: false });
+    const unsettled = await decision({ inputSeqs: [1, 5], text: "確定の前", sheet: false });
     const other = await decision({ inputSeqs: [1, 3], text: "取り下げた別の日" });
     const d = await decision({ inputSeqs: [1, 4], text: "取り下げた" });
     // 取り下げた判断と同じ AI・入力を名乗る agent.run で、別の日の出力を指す（アプリの接続でも直接入れられる行）
     await insertRaw("agent.run", "system", { agentId: "ai-x", purpose: "order", inputSeqs: [1, 4], outputHash: other.outputs[1], ok: true });
-    for (const h of [...kept.outputs, other.outputs[1]!]) {
+    for (const h of [...kept.outputs, ...unsettled.outputs, other.outputs[1]!, ...d.outputs]) {
       await expect(tryDelete(h)).rejects.toThrow(/stored_values is append-only/);
       expect(await has(h)).toBe(true);
     }
-    // 2つの判断から指される出力があると、どちらの投稿も、関数で消せない（断る側に倒す。手順書の食い違いの確かめに出続ける）。
-    // 取り下げた判断の側では、その出力が同じ文（「取り下げた」）を含むので、消す対象に入り、条件に合わずに断られる
     await expect(erase(other.post)).rejects.toThrow("may not be erased");
-    await expect(erase(d.post)).rejects.toThrow("may not be erased");
-    for (const h of [other.body, d.body, ...other.outputs, ...d.outputs]) expect(await has(h)).toBe(true);
-    // 取り下げた判断の出力でも、指す記録が正しければ、見張りは通す（持ち主は関数を通らずに消せる。003 と同じ守りの範囲）
-    await tryDelete(d.outputs[0]!);
-    expect(await has(d.outputs[0]!)).toBe(false);
+    await expect(erase(d.post)).rejects.toThrow("decision_unclear");
+    // 確かめに当たらない判断の出力は、持ち主なら関数を通らずに消せる（003 と同じ守りの範囲）。元の run の出力を先に消すと、残りは消せない
+    await setUp();
+    const e = await decision({ text: "持ち主が直接消す" });
+    await tryDelete(e.outputs[0]!);
+    expect(await has(e.outputs[0]!)).toBe(false);
+    await expect(tryDelete(e.outputs[1]!)).rejects.toThrow(/stored_values is append-only/);
+    const f = await decision({ inputSeqs: [1, 3], text: "順に消す" });
+    await tryDelete(f.outputs[1]!);
+    await tryDelete(f.outputs[0]!);
+    for (const h of f.outputs) expect(await has(h)).toBe(false);
   }, 60_000);
 
-  it("アプリの役割（ffr_app）は erase_withdrawn_outputs を呼べない", async () => {
+  it("アプリの役割（ffr_app）と読むだけの役割（ffr_reader）は、erase_withdrawn_body も erase_withdrawn_outputs も呼べない", async () => {
     await setUp();
     const d = await decision({ text: "アプリからは消せない" });
-    try {
-      await pg.exec("SET ROLE ffr_app");
-      await expect(erasedOutputs(d.post)).rejects.toThrow(/permission denied/);
-    } finally {
-      await pg.exec("RESET ROLE");
+    for (const role of ["ffr_app", "ffr_reader"]) {
+      await as(role, async () => {
+        await expect(erase(d.post)).rejects.toThrow(/permission denied/);
+        await expect(erasedOutputs(d.post)).rejects.toThrow(/permission denied/);
+      });
     }
-    for (const h of d.outputs) expect(await has(h)).toBe(true);
+    for (const h of [d.body, ...d.outputs]) expect(await has(h)).toBe(true);
+    // 確認の SQL（db/ops/check_reader_role.sql）も、どちらも呼べないことを false で出す
+    const check = await as("ffr_reader", async () => (await pg.query<{ can_erase_body: boolean }>(readFileSync(new URL("../../db/ops/check_reader_role.sql", import.meta.url), "utf8"))).rows[0]!);
+    expect(check.can_erase_body).toBe(false);
+  }, 60_000);
+
+  it("手順書の1つ目の文は、一緒に消える出力の件数と先頭の部分を出す", async () => {
+    await setUp();
+    const d = await decision({ text: "一覧に出る" });
+    const rows = (await db.query<{ seq: number; outputs_to_erase: number; outputs_preview: string[] }>(opsStatements()[0]!)).rows.filter((r) => Number(r.seq) === d.post);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.outputs_to_erase).toBe(2);
+    expect(rows[0]!.outputs_preview).toEqual([0, 1].map(() => canonicalize({ note: "n", orders: [], post: { board: "TSTA", text: "一覧に出る" } }).slice(0, 80)));
+    // 確かめに当たる投稿は、一覧に出ない
+    const u = await decision({ inputSeqs: [1, 3], text: "確定の前", sheet: false });
+    expect((await db.query<{ seq: number }>(opsStatements()[0]!)).rows.map((r) => Number(r.seq))).not.toContain(u.post);
   }, 60_000);
 });
