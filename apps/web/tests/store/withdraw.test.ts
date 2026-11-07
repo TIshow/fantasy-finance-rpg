@@ -171,8 +171,12 @@ describe("withdrawReasonProblem", () => {
     expect(withdrawReasonProblem("A".repeat(32).replace(/A/g, "f"))).toMatch(/hash-like/);
     expect(withdrawReasonProblem("事実と\n異なる")).toMatch(/control/);
     expect(withdrawReasonProblem("誤り\u0007")).toMatch(/control/);
-    expect(withdrawReasonProblem("誤り‮りま")).toMatch(/bidirectional/);
-    expect(withdrawReasonProblem("誤り⁦x⁩")).toMatch(/bidirectional/);
+    expect(withdrawReasonProblem("誤り\u202Eりま")).toMatch(/invisible formatting/); // 向きを右から左に変える
+    expect(withdrawReasonProblem("誤り\u2066x\u2069")).toMatch(/invisible formatting/); // 向きを分ける
+    expect(withdrawReasonProblem("誤\u200Bり")).toMatch(/invisible formatting/); // 幅のない空白
+    expect(withdrawReasonProblem("誤\u200Fり")).toMatch(/invisible formatting/); // 右から左の印
+    expect(withdrawReasonProblem("誤\u061Cり")).toMatch(/invisible formatting/); // アラビア文字の印
+    expect(withdrawReasonProblem("誤\uFEFFり")).toMatch(/invisible formatting/); // BOM（両端なら trim が落とすので、間に置く）
     expect(withdrawReasonProblem("2026年11月9日の投稿の誤り（seq 12345）")).toBeNull();
   });
 

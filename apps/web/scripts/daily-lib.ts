@@ -179,8 +179,8 @@ const OPERATOR_NAME = /^[a-z0-9_-]{1,32}$/;
 /** ハッシュに見える文字列（16進で32文字以上）。erase_body.sql のとおり、理由にハッシュがあると、その本文を消せなくなる */
 const HASH_LIKE = /[0-9a-f]{32,}/i;
 
-/** 改行などの制御文字と、文字の向きを変える文字（画面で理由の見え方をすり替えられる） */
-const BAD_CHARS = /[\p{Cc}‪-‮⁦-⁩]/u;
+/** 改行などの制御文字（Cc）と、見えない書式の文字（Cf。文字の向きを変える U+202A〜202E・U+2066〜2069、幅のない U+200B〜200F、U+061C、U+FEFF など）。画面で理由の見え方をすり替えられる */
+const BAD_CHARS = /[\p{Cc}\p{Cf}\u202A-\u202E\u2066-\u2069]/u;
 const BODY_HASH = /^[0-9a-f]{64}$/;
 
 /** 理由の誤りを返す（なければ null）。誤りは使い方の誤りとして扱う */
@@ -188,7 +188,7 @@ export function withdrawReasonProblem(reason: string | undefined): string | null
   const r = (reason ?? "").trim();
   if (r.length === 0) return "--reason is required";
   if ([...r].length > WITHDRAW_REASON_MAX) return `--reason must be at most ${WITHDRAW_REASON_MAX} characters`;
-  if (BAD_CHARS.test(r)) return "--reason must not contain line breaks, control characters or bidirectional control characters";
+  if (BAD_CHARS.test(r)) return "--reason must not contain line breaks, control characters or invisible formatting characters (such as bidirectional controls)";
   if (HASH_LIKE.test(r)) return "--reason must not contain a hash-like string (32 or more hex digits); it would block erasing a body";
   return null;
 }
@@ -217,17 +217,20 @@ export async function withdrawPost(db: SqlDb, req: WithdrawRequest, o: { clock: 
   if (!(await isTableOwner(db))) throw new Error("withdraw needs the table owner's connection (DATABASE_ADMIN_URL), not the app's connection");
 
   // 本文を消す印つきで書くときは、書いたのと同じトランザクションの中で、DB の判定（stored_values_erasable）で消せるかを確かめ、
-  // 消せなければ取り消す。書く前は対象の投稿にまだ印がないので、判定は書いたあとでないと真にならない
+  // 消せなければ取り消す。書く前は対象の投稿にまだ印がないので、判定は書いたあとでないと真にならない。
+  // 書いたかは、トランザクションの返す追記の結果（ok で content.withdrawn）で見分ける（SQL の文字列には頼らない）
   let mustBeErasable: string | null = null;
+  let checked = false;
   const guarded: SqlDb = {
     ...db,
     transaction: (fn) =>
       db.transaction(async (tx) => {
-        let inserted = false;
-        const r = await fn({ ...tx, query: (t, p) => ((inserted ||= t.startsWith("INSERT INTO events")), tx.query(t, p)) });
-        if (inserted && mustBeErasable !== null) {
+        const r = await fn(tx);
+        const written = r as { ok?: unknown; event?: { type?: unknown } } | null;
+        if (mustBeErasable !== null && written?.ok === true && written.event?.type === "content.withdrawn") {
           const ok = (await tx.query<{ ok: boolean }>("SELECT stored_values_erasable(current_schema(), $1) AS ok", [mustBeErasable])).rows[0]?.ok;
           if (ok !== true) throw new Error(`the body of ${req.targetSeq} cannot be erased (another record refers to the same hash); nothing was written`);
+          checked = true;
         }
         return r;
       }),
@@ -251,5 +254,7 @@ export async function withdrawPost(db: SqlDb, req: WithdrawRequest, o: { clock: 
     payload: { targetSeq: req.targetSeq, reason: req.reason.trim(), bodyErased: req.eraseBody },
   });
   if (!r.ok) throw new Error(`content.withdrawn: ${r.reason}`);
+  // 守りが働かなかった（保管の作りが変わった）。書けてしまっているので、運営者に知らせて止める
+  if (mustBeErasable !== null && !checked) throw new Error(`content.withdrawn seq=${r.event.seq} was written, but the erasable check did not run; check db/ops/erase_body.sql before erasing`);
   return { seq: r.event.seq, hash: r.event.hash, targetSeq: req.targetSeq, bodyErased: req.eraseBody };
 }
