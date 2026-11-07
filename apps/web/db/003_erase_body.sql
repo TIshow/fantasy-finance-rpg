@@ -1,7 +1,8 @@
 -- 非表示にした投稿の本文を消す手続き（docs/EVENT_LOG.md §5.2・§6.1。lead の指示 #25 PR-3）。何度流しても同じ結果になる（冪等）。
 -- 消せるのは、stored_values の本文（kind = 'body'）のうち、次をすべて満たすものだけ。乱数（salt）は同じ行にあるので一緒に消える。
 --   * その本文を bodyHash に持つ post.published があり、それらすべてについて、最後の content.withdrawn（運営者が書いたもの）の bodyErased が真
---   * ほかの記録が、そのハッシュを指していない（投稿の bodyHash の項目を除く、すべての記録の中身のどこにも出てこない）。
+--   * ほかの記録が、そのハッシュを指していない（投稿の中身の bodyHash の項目を除き、すべての記録の中身・keys・refs を文字列にして、
+--     どこにも出てこない。入れ子や接頭辞つきの書き方でも見つかる。中身がオブジェクトでない行も、そのまま文字列にして探す）。
 --     例：agent.run の outputHash（判断の出力）、source.captured の contentHash、prices・企業行動の valuesHash、訂正の新しい本文。
 --     中身の項目の名前ではなく文字列で探すので、ハッシュでログの外を指す項目が増えても、消してはいけない行を消さない側に倒れる
 -- イベントの表は変えない。本文のハッシュはイベントに残るので、ハッシュの連鎖は壊れない。
@@ -27,7 +28,8 @@ BEGIN
   -- 行の h は 64 文字の16進（stored_values の制約）。投稿の中身から来た h に % などが混じっても、当たりが増えて断る側に倒れる
   EXECUTE format($q$
     SELECT EXISTS (SELECT 1 FROM %1$I.events e
-                   WHERE (CASE WHEN e.type = 'post.published' THEN e.payload - 'bodyHash' ELSE e.payload END)::text LIKE '%%' || $1 || '%%')$q$, sch) INTO elsewhere USING h;
+                   WHERE ((CASE WHEN e.type = 'post.published' AND jsonb_typeof(e.payload) = 'object' THEN e.payload - 'bodyHash' ELSE e.payload END)::text
+                          || e.keys::text || e.refs::text) LIKE '%%' || $1 || '%%')$q$, sch) INTO elsewhere USING h;
   RETURN posts > 0 AND posts = erasable AND NOT elsewhere;
 END $$;
 
@@ -52,7 +54,8 @@ CREATE TRIGGER stored_values_refuse_row_change BEFORE UPDATE ON stored_values FO
 DROP TRIGGER IF EXISTS stored_values_guard_delete ON stored_values;
 CREATE TRIGGER stored_values_guard_delete BEFORE DELETE ON stored_values FOR EACH ROW EXECUTE FUNCTION stored_values_guard_delete();
 
--- 投稿 target_seq の本文と乱数を消し、消した本文のハッシュを返す。消す本文の行がなければ NULL（消し済み、または値の行を指す。何度呼んでも同じ結果）。
+-- 投稿 target_seq の本文と乱数を消し、消した本文のハッシュを返す。消す本文の行がなければ NULL（何度呼んでも同じ結果）。
+-- NULL は「消し済み」のほか、値の行を指す投稿や、本文の行がもともとない投稿でも返る。手順書の2つ目の文の missing で確かめる。
 -- 投稿がない・消してよい条件に合わないときは例外で、何も消さない。表は、migrate を流したときの schema のものを使う
 CREATE OR REPLACE FUNCTION erase_withdrawn_body(target_seq bigint) RETURNS text LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 DECLARE
