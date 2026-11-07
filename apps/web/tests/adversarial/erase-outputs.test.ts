@@ -8,6 +8,9 @@
 // - その日の注文票が確定する前には消さない（毎日の実行の回し直しが止まるため）
 // - 消したあとも、イベントは変わらず、ハッシュの連鎖と保存の検査（verifyDatabase）が通り、毎日の実行を続けられる
 // 欠陥の再現は、前半（通常の it）が前提を確かめて手順を進め、後半（it.fails）が結果だけを見る形にする（前提が崩れれば前半が赤になる）。
+// #179 の lead の判断 6（案A）から：本文は（003 の決まりに合えば）必ず消える。判断の出力は、確かめがすべて通ったときだけ一緒に消え、
+// 通らなければ残り、手順書の確かめに出続ける（7f7406e）。
+import { readFileSync } from "node:fs";
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { productionSetup, runDaily, verifyDatabase } from "../../scripts/daily-lib";
@@ -39,6 +42,19 @@ const has = async (hash: string) => (await db.query("SELECT 1 FROM stored_values
 const erase = async (seq: number) => (await db.query<{ h: string | null }>("SELECT erase_withdrawn_body($1) AS h", [seq])).rows[0]!.h;
 const eraseOutputs = async (seq: number) => (await db.query<{ h: string }>("SELECT erase_withdrawn_outputs($1) AS h", [seq])).rows.map((r) => r.h);
 const problem = async (seq: number) => (await db.query<{ p: string | null }>("SELECT withdrawn_post_problem(current_schema(), $1) AS p", [seq])).rows[0]!.p;
+/** 本文をいま消すとき、出力を残す理由（手順書の1つ目の文の outputs_kept_because と同じ関数） */
+const skip = async (seq: number) => (await db.query<{ p: string | null }>("SELECT withdrawn_post_skip(current_schema(), $1) AS p", [seq])).rows[0]!.p;
+/** 手順書の文（コメントの行を除き、; で分ける） */
+const opsStatements = () =>
+  readFileSync(new URL("../../db/ops/erase_body.sql", import.meta.url), "utf8")
+    .split("\n")
+    .filter((l) => !l.startsWith("--"))
+    .join("\n")
+    .split(";")
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
+/** 手順書の2つ目の文（食い違い）が、投稿 seq について出す名前 */
+const discrepancies = async (seq: number) => (await db.query<{ seq: number; problem: string }>(opsStatements()[1]!)).rows.filter((r) => Number(r.seq) === seq).map((r) => r.problem);
 const attempt = async <T>(fn: () => Promise<T>): Promise<T | undefined> => {
   try {
     return await fn();
@@ -113,17 +129,17 @@ describe("投稿しない判断に、アプリの接続で投稿用の run と�
   // 毎日の実行では、投稿しない判断（規則の AI のほとんどの日）は注文用の run しか持たない。agent.run は書き手が system で、
   // アプリの接続でも足せる。投稿用の run を足し、その出力の JSON の文字列と同じ本文の投稿を足すと、確かめを通る。
   // つまり「投稿のない投稿用の run」は、ふつうはできなくても、アプリの接続でいつでも作れる（PR #182 の本文の想定より広い）
-  const r: { ran?: boolean; outputKept?: boolean; outputHash?: string } = {};
-  it("【欠陥・高の前提】2日目の投稿しない判断に、出力の note と同じ本文の偽の投稿を足し、運営者がそれを取り下げて本文を消す", async () => {
+  // PR #183 で【欠陥・高】として it.fails にしたもの。7f7406e の post_after_order で直った（偽の run と投稿は注文用の run より後に書かれる）
+  it("2日目の投稿しない判断に、出力の note と同じ本文の偽の投稿を足し、運営者がそれを取り下げて消すと、偽の投稿の本文は消え、本物の判断の出力は残る（post_after_order）", async () => {
     const { clock, events, post } = await threeDays();
     const agentId = pl(post).agentId as string;
     // 投稿した AI の2日目の判断（投稿しない日。出力の note に日付が入るので、ほかの日の出力とは重ならない）
     const day2 = events.filter((e) => e.type === "agent.run" && pl(e).agentId === agentId && e.recordedAt >= jst(DAYS[1]!, 0) && e.recordedAt < jst(DAYS[2]!, 0));
     expect(day2.map((e) => pl(e).purpose), "2日目は注文用の run だけのはず").toEqual(["order"]);
     const order = day2[0]!;
-    r.outputHash = pl(order).outputHash as string;
+    const outputHash = pl(order).outputHash as string;
     const { values } = await openStore(clock);
-    const output = values.body(r.outputHash)!.value;
+    const output = values.body(outputHash)!.value;
     const note = (JSON.parse(output) as { note: string }).note;
     expect(output).toContain(JSON.stringify(note));
     const before = await readAllEvents(db);
@@ -133,19 +149,22 @@ describe("投稿しない判断に、アプリの接続で投稿用の run と�
     await verifyDatabase(db, holidayTable);
     // 運営者が（偽と気づかずに）取り下げ、手順書の1つ目の文に出るのを見てから消す
     await withdraw(clock, forged.post.seq);
-    expect(await problem(forged.post.seq)).toBeNull();
-    await attempt(() => erase(forged.post.seq));
-    r.outputKept = await has(r.outputHash);
-    // 消えても、イベントは変わらず、連鎖と保存の検査は通る（本物の判断の出力が消えたことは、検査では分からない）
+    expect(await problem(forged.post.seq)).toBe("post_after_order");
+    expect(await skip(forged.post.seq)).toBe("post_after_order");
+    // 出力だけを消す関数も断る
+    await expect(eraseOutputs(forged.post.seq)).rejects.toThrow("post_after_order");
+    // 本文は消える（案A）。本物の判断（注文用の run）の出力は残る
+    expect(await erase(forged.post.seq)).toBe(forged.bodyHash);
+    expect(await has(forged.bodyHash)).toBe(false);
+    expect(await has(outputHash)).toBe(true);
+    expect(await has(pl(forged.run).outputHash as string), "偽の run の出力（本物と同じ文の別の行）も残る").toBe(true);
+    // 手順書の2つ目の文に出続ける
+    expect(await discrepancies(forged.post.seq)).toEqual(["output_unverifiable"]);
+    // イベントは変わらず、連鎖と保存の検査は通る
     const after = await readAllEvents(db);
     expect(after.slice(0, before.length)).toEqual(before);
     expect(await verifyChain(after)).toEqual([]);
     await verifyDatabase(db, holidayTable);
-    r.ran = true;
-  });
-  it.fails("【欠陥・高】上の状態で、本物の判断（注文用の run）の出力の行が、全文ごと消える（直れば残る）", () => {
-    expect(r.ran, "前提の試験が動いていない").toBe(true);
-    expect(r.outputKept).toBe(true);
   });
 
   it("（上の欠陥の影響の範囲）表示中の投稿の本文の行を、偽の run の出力として指させても、本文は消えない（ほかの記録が指すハッシュは消せない）", async () => {
@@ -168,9 +187,9 @@ describe("投稿しない判断に、アプリの接続で投稿用の run と�
 
 describe("本物の投稿と同じ本文の写しを足す", { timeout: 120_000 }, () => {
   // 写しの投稿（本文のハッシュが同じ）は run_has_many_posts に数えない。erase_withdrawn_body は 003 の決まり（写しがすべて取り下げられるまで
-  // 本文を消せない）で断るが、erase_withdrawn_outputs（運営者が直接呼べる）と削除の見張りは、写しだけの取り下げで本物の判断の出力を通す
-  const r: { ran?: boolean; viaFunction?: boolean; viaGuard?: boolean } = {};
-  it("【欠陥・低の前提】アプリの接続で、表示中の投稿の写しを足し、写しだけを取り下げる", async () => {
+  // 本文を消せない）で断る。PR #183 で【欠陥・低】として it.fails にした、出力だけを消す関数と削除の見張りが写しだけの取り下げで
+  // 本物の判断の出力を通す件は、7f7406e で直った（同じ本文の投稿がすべて取り下げられているときだけ通す）
+  it("アプリの接続で、表示中の投稿の写しを足し、写しだけを取り下げても、見張りの判定も出力だけを消す関数も、本物の判断の出力を通さない", async () => {
     const { clock, events, post } = await threeDays();
     const runs = decisionRuns(events, events.find((e) => e.seq === pl(post).runSeq)!);
     expect(runs.map((e) => pl(e).purpose).sort()).toEqual(["order", "post"]);
@@ -187,26 +206,27 @@ describe("本物の投稿と同じ本文の写しを足す", { timeout: 120_000 
     expect(await problem(twin.seq)).toBeNull();
     // 削除の見張りが使う判定は、本物の判断の出力を「消してよい」と言う
     const guard = await Promise.all(outputs.map(async (h) => (await db.query<{ ok: boolean }>("SELECT stored_values_output_erasable(current_schema(), $1) AS ok", [h])).rows[0]!.ok));
-    r.viaGuard = guard.every((ok) => !ok);
-    // 出力だけを消す関数を、運営者が写しの seq で呼ぶ
-    await attempt(() => eraseOutputs(twin.seq));
-    r.viaFunction = (await Promise.all(outputs.map(has))).every(Boolean);
+    expect(guard).toEqual(outputs.map(() => false));
+    // 出力だけを消す関数を、運営者が写しの seq で呼んでも断る
+    await expect(eraseOutputs(twin.seq)).rejects.toThrow("may not be erased");
+    // 持ち主が印を入れて直接消そうとしても、見張りが断る
+    for (const h of outputs) {
+      await expect(
+        db.transaction(async (tx) => {
+          await tx.query("SELECT set_config('ffr.erase_body', $1, true)", [h]);
+          await tx.query("DELETE FROM stored_values WHERE hash = $1", [h]);
+        }),
+      ).rejects.toThrow(/append-only/);
+    }
+    for (const h of outputs) expect(await has(h)).toBe(true);
     expect(await has(pl(post).bodyHash as string), "本物の投稿の本文は残る").toBe(true);
     await verifyDatabase(db, holidayTable);
-    r.ran = true;
-  });
-  it.fails("【欠陥・低】上の状態で、削除の見張りの判定（stored_values_output_erasable）が、表示中の投稿の判断の出力を消してよいと言う（直れば言わない）", () => {
-    expect(r.ran, "前提の試験が動いていない").toBe(true);
-    expect(r.viaGuard).toBe(true);
-  });
-  it.fails("【欠陥・低】上の状態で、erase_withdrawn_outputs が、表示中の投稿の判断の出力（投稿用と注文用）を消す（直れば残る）", () => {
-    expect(r.ran, "前提の試験が動いていない").toBe(true);
-    expect(r.viaFunction).toBe(true);
   });
 });
 
 describe("細工が断られること", { timeout: 120_000 }, () => {
-  it("本物の投稿の run を指す、別の本文の偽の投稿を取り下げて消そうとしても断られ、本物の出力も本文も残る", async () => {
+  // 案A（7f7406e）で、偽の投稿の本文は消えるようになった。本物の判断の出力と本物の投稿の本文は残る
+  it("本物の投稿の run を指す、別の本文の偽の投稿を取り下げて消すと、偽の本文だけが消え、本物の出力も本文も残る（run_has_many_posts）", async () => {
     const { clock, events, post } = await threeDays();
     const runs = decisionRuns(events, events.find((e) => e.seq === pl(post).runSeq)!);
     const forged = await asApp(async () => {
@@ -217,19 +237,34 @@ describe("細工が断られること", { timeout: 120_000 }, () => {
       return f.event;
     });
     await withdraw(clock, forged.seq);
-    await expect(erase(forged.seq)).rejects.toThrow("run_has_many_posts");
+    expect(await skip(forged.seq)).toBe("run_has_many_posts");
     await expect(eraseOutputs(forged.seq)).rejects.toThrow("run_has_many_posts");
+    expect(await erase(forged.seq)).toBe(pl(forged).bodyHash);
+    // 本文を消したあとは、出力だけを消す関数は何もしない
+    expect(await eraseOutputs(forged.seq)).toEqual([]);
     for (const r of runs) expect(await has(pl(r).outputHash as string)).toBe(true);
     expect(await has(pl(post).bodyHash as string)).toBe(true);
+    expect(await discrepancies(forged.seq)).toEqual(["output_unverifiable"]);
+    // 本物の投稿は表示中なので、食い違いには出ない
+    expect(await discrepancies(post.seq)).toEqual([]);
   });
 
-  it("（いまの決まり）本物の投稿の判断に、アプリの接続で投稿用の run を足すと、本物の投稿の本文を消せなくなる（decision_unclear）", async () => {
+  // 案A（7f7406e）の前は、本物の投稿の本文を消せなくなった（本文消しを止める手）。いまは本文が消え、出力は残って手順書に出る
+  it("本物の投稿の判断に、アプリの接続で投稿用の run を足しても、本物の投稿の本文は消える。判断の出力は残り、手順書に出続ける（decision_unclear）", async () => {
     const { clock, events, post } = await threeDays();
-    const order = decisionRuns(events, events.find((e) => e.seq === pl(post).runSeq)!).find((e) => pl(e).purpose === "order")!;
+    const runs = decisionRuns(events, events.find((e) => e.seq === pl(post).runSeq)!);
+    const order = runs.find((e) => pl(e).purpose === "order")!;
     await forgePost(clock, order, "偽の投稿");
     await withdraw(clock, post.seq);
-    await expect(erase(post.seq)).rejects.toThrow("decision_unclear");
-    expect(await has(pl(post).bodyHash as string)).toBe(true);
+    expect(await skip(post.seq)).toBe("decision_unclear");
+    expect(await erase(post.seq)).toBe(pl(post).bodyHash);
+    expect(await has(pl(post).bodyHash as string)).toBe(false);
+    for (const r of runs) expect(await has(pl(r).outputHash as string)).toBe(true);
+    expect(await discrepancies(post.seq)).toEqual(["output_unverifiable"]);
+    // 画面と読むだけの口からは消えている
+    const snap = await readSnapshot(db, { warn: () => undefined });
+    expect(snap.bodyOf(pl(post).bodyHash as string)).toBeUndefined();
+    await verifyDatabase(db, holidayTable);
   });
 
   it("アプリの接続で、運営者を名乗る取り下げを足せても、関数を呼べず、見張りも通らない", async () => {
@@ -277,8 +312,9 @@ describe("削除の見張りと関数の範囲", { timeout: 120_000 }, () => {
   });
 });
 
-describe("注文票の確定の前に消すと断る", { timeout: 180_000 }, () => {
-  it("投稿のあと、その AI の注文票の確定の前に落ち、その間に運営者が本文を消そうとすると、断られて何も消えない。回し直してから消せる", async () => {
+describe("注文票の確定の前に消す", { timeout: 180_000 }, () => {
+  // 案A（7f7406e）の前は断っていた。いまは本文だけが消え、出力は残る（回し直しが出力を読めるように）
+  it("投稿のあと、その AI の注文票の確定の前に落ち、その間に運営者が本文を消すと、本文だけが消え、出力は残る。回し直しはその日と次の営業日を最後まで進める", async () => {
     // 1回目：投稿する AI と日を知る
     const first = await threeDays();
     const id = pl(first.post).agentId as string;
@@ -303,16 +339,21 @@ describe("注文票の確定の前に消すと断る", { timeout: 180_000 }, () 
     expect(runs.map((e) => pl(e).purpose).sort(), "投稿用と注文用の run は書いたあと").toEqual(["order", "post"]);
     expect(events.some((e) => e.type === "order_sheet.committed" && pl(e).agentId === id && e.recordedAt >= jst(d, 0))).toBe(false);
     await withdraw(w.clock, post.seq);
-    await expect(erase(post.seq)).rejects.toThrow("sheet_not_settled");
+    expect(await skip(post.seq)).toBe("sheet_not_settled");
     await expect(eraseOutputs(post.seq)).rejects.toThrow("sheet_not_settled");
-    expect(await has(pl(post).bodyHash as string)).toBe(true);
+    expect(await erase(post.seq)).toBe(pl(post).bodyHash);
+    expect(await has(pl(post).bodyHash as string)).toBe(false);
     for (const r of runs) expect(await has(pl(r).outputHash as string)).toBe(true);
-    // 回し直すと、その日を最後まで進め、そのあと消せる
+    // 回し直すと、その日を最後まで進める
     await w.run(d);
     for (const x of DAYS.slice(DAYS.indexOf(d) + 1)) await w.run(x);
     const before = await readAllEvents(db);
-    expect(await erase(post.seq)).toBe(pl(post).bodyHash);
-    for (const r of runs) expect(await has(pl(r).outputHash as string)).toBe(false);
+    expect(before.some((e) => e.type === "order_sheet.committed" && pl(e).agentId === id && e.recordedAt >= jst(d, 0))).toBe(true);
+    // 確定のあとも、関数はもう出力を消せない（本文がないため）。出力は残り、手順書の2つ目の文に出続ける
+    expect(await erase(post.seq)).toBeNull();
+    expect(await eraseOutputs(post.seq)).toEqual([]);
+    for (const r of runs) expect(await has(pl(r).outputHash as string)).toBe(true);
+    expect(await discrepancies(post.seq)).toEqual(["output_unverifiable"]);
     expect(await readAllEvents(db)).toEqual(before);
     expect(await verifyChain(before)).toEqual([]);
     await verifyDatabase(db, holidayTable);
