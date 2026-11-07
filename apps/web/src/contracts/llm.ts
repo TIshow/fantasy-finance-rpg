@@ -114,3 +114,92 @@ export interface LlmPort {
    */
   complete(request: LlmRequest): Promise<LlmResult>;
 }
+
+// ---- バッチの口（#179。lead の決定：依頼・受け取り・締めでの打ち切りに分ける） ----
+// 依頼（前の営業日 16:35）と受け取り（翌朝 06:50・07:20）は別の実行なので、1回の complete では済まない。
+// 予約と依頼の控えはイベント（llm.batch.submitted・llm.batch.closed。EVENT_LOG §3.2）に残し、どの実行からも見えるようにする。
+// この口はイベントを書かない。書くのは呼び出し側（runner）で、返した値をそのまま記録に入れる。
+
+/** バッチに依頼する1件。判断を使う取引日を足す（記録の一意キー llmbatch:<agentId>:<tradingDate> になる） */
+export interface LlmBatchRequest extends LlmRequest {
+  /** 判断を使う取引日（YYYY-MM-DD）。依頼した時刻で締めがまだ来ていない最初の営業日 */
+  tradingDate: string;
+}
+
+/**
+ * 依頼の控え。llm.batch.submitted の記録だけから作り直せる値で作る（翌朝の別の実行が受け取れるように。llmTicketOf）。
+ * 提供元ごとの追加の値（OpenAI の結果のファイルなど）は、batchId から引き直す。
+ */
+export interface LlmBatchTicket {
+  agentId: string;
+  provider: string;
+  modelId: string;
+  /** 提供元のバッチのID */
+  batchId: string;
+  /** バッチの中の1件のID（英数字・ハイフン・下線で1〜64文字） */
+  customId: string;
+  /** 予約した費用（LlmRequest.maxCost） */
+  maxCost: Deciyen;
+  tradingDate: string;
+  /** 依頼した時刻（UNIXミリ秒）。記録では llm.batch.submitted の recordedAt */
+  submittedAt: number;
+}
+
+/**
+ * 依頼の結果。sentBodyHash は、提供元に実際に渡した本文（JSON。OpenAI は上げたファイルの中身）のバイト列の SHA-256（16進の小文字）。
+ * ok: false のうち、
+ * - budget_exceeded：送っていない。費用0。llm.batch.submitted は書かない（agent.run の失敗だけを書く）
+ * - billingUnknown: true：バッチが作られた（課金されうる）か分からない。呼び出し側は batchId を null にした llm.batch.submitted を書き、
+ *   すぐに result: "failed"・費用 maxCost の llm.batch.closed で閉じる（予約を使ったものとして数える。安全側）。自動で再試行しない
+ * - billingUnknown がないもの：作られていないと分かっている（提供元が断った）。費用0。llm.batch.submitted は書かない
+ */
+export type LlmSubmitResult =
+  | { ok: true; ticket: LlmBatchTicket; sentBodyHash: string }
+  | { ok: false; errorCode: "budget_exceeded"; submittedAt: number }
+  | { ok: false; errorCode: Extract<LlmErrorCode, "timeout" | "rate_limited" | "provider_error">; billingUnknown?: true; sentBodyHash: string; submittedAt: number };
+
+/**
+ * バッチが閉じた結果。llm.batch.closed の中身にあたる。
+ * - collected：答えを受け取った。output と respondedModel がある
+ * - expired：締め（8:30）で打ち切った、または提供元で期限が切れた
+ * - failed：提供元で失敗した、結果が読めなかった
+ * usage.cost は実際の費用（0.1円単位、端数は切り上げ。1ドル＝160円）。分からなければ maxCost をそのまま入れ、costUnknown: true を付ける。
+ * 実費が maxCost を超えても切り捨てない。トークン数が分からなければ 0。
+ */
+export type LlmBatchClosed =
+  | { status: "closed"; result: "collected"; output: string; respondedModel: string; usage: LlmUsage; costUnknown?: true; finishedAt: number }
+  | { status: "closed"; result: "expired" | "failed"; errorCode: Extract<LlmErrorCode, "timeout" | "rate_limited" | "provider_error">; usage: LlmUsage; costUnknown?: true; finishedAt: number };
+
+export type LlmCollectResult = { status: "pending" } | LlmBatchClosed;
+
+/**
+ * まとめて依頼し、あとで受け取る口（各社のバッチ）。
+ * 費用の上限：その日の使用済み ＝ 閉じたバッチの実際の費用 ＋ 閉じていないバッチの予約（maxCost）。全提供元の合計。
+ * 暦日は依頼した時刻の日本時間の日付。数え方は src/events/llm-cost.ts の llmCostUsed と同じにする（記録から誰でも確かめられるように）。
+ * 予約は llm.batch.submitted の記録で残す。依頼してから呼び出し側がそれを書くまでのあいだの予約は、実装が自分で持って数える。
+ * 同じ日の依頼を、複数の実行から同時に行わない（毎日の実行は1つずつ動かす前提。記録には提供元のバッチのIDが要るので、
+ * 送る前に記録で予約することはできず、実行をまたいだ判定と予約は原子的にできないため）。
+ * 依頼したのに記録を書く前に止まった場合に備え、同じ AI・同じ取引日の依頼をやり直す前に、提供元の一覧で作られていないかを確かめる。
+ * 提供元の形への直し方（system の置き場所、設定の文字列から数への変換など）は、提供元ごとに決まった形にし、試験で確かめる。
+ * settings と messages のほかは足さない（ツールなし。temperature は送らない。#179 の lead の決定）。
+ * Promise を返す口の RangeError は reject（同期で投げない）。それ以外の失敗は reject せず、決まった結果で返す。
+ * 提供元のエラー文（リクエストIDなどを含みうる）は返さない（EVENT_LOG §1）。
+ */
+export interface LlmBatchPort {
+  readonly policy: LlmPolicy;
+  /** day（YYYY-MM-DD、日本時間）の使用済み。記録にある分と、まだ記録されていない自分の予約の合計 */
+  spent(day: string): Promise<Deciyen>;
+  /**
+   * 依頼。maxCost の検査（LlmRequest と同じ。外れたら RangeError で reject）→ spent(依頼の日)＋maxCost が
+   * dailyCostLimit を超えるなら送らずに budget_exceeded → 予約して提供元に送る。dryRun でも依頼する（投稿は書くため）。
+   */
+  submit(request: LlmBatchRequest): Promise<LlmSubmitResult>;
+  /** 受け取り。終わっていなければ pending（予約はそのまま）。終わっていれば閉じた結果を返す */
+  collect(ticket: LlmBatchTicket): Promise<LlmCollectResult>;
+  /**
+   * 締め（8:30）での打ち切り。提供元にバッチの取り消しを頼み、result: "expired"（errorCode: "timeout"）で閉じた結果を返す。
+   * 取り消しのあとで課金されたかが分からないときは、費用を maxCost にして costUnknown: true を付ける（安全側）。
+   * 取り消しの前に答えが出ていても、締めのあとなので使わない（費用は実際の値を入れてよい）。pending は返さない。
+   */
+  abandon(ticket: LlmBatchTicket): Promise<LlmBatchClosed>;
+}

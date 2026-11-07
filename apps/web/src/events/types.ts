@@ -16,6 +16,8 @@ export const EVENT_TYPES = [
   "universe.set",
   "agent.registered",
   "agent.run",
+  "llm.batch.submitted",
+  "llm.batch.closed",
   "post.published",
   "order_sheet.committed",
   "order_sheet.rejected",
