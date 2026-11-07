@@ -33,7 +33,7 @@ describe("buildView（手で組んだ小さなログ）", () => {
     ev("order_sheet.rejected", { agentId: "b", tradingDate: "2026-11-09", reason: "suspended" }, 130),
     ev("fills.executed", { agentId: "a", fills: [{ symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 12005, amount: 1, status: "filled" }, { symbol: "X2", side: "buy", requestedQty: 100, qty: 0, price: null, amount: 0, status: "expired", reason: "no_open_price" }] }, 140),
     ev("agent.suspended", { agentId: "*", scope: "both", reason: "点検" }, 150),
-    ev("content.withdrawn", { targetSeq: 5, reason: "誤り", textRemoved: false }, 155),
+    ev("content.withdrawn", { targetSeq: 5, reason: "誤り", bodyErased: false }, 155),
     ev("prices.close", { date: "2026-11-09", valuesHash: "x" }, 156),
     ev("prices.close", { date: "2026-11-10", valuesHash: "x" }, 157),
     ev("valuation.recorded", { agentId: "a", date: "2026-11-09", cash: 300, positions: [{ symbol: "X1", qty: 100, price: 12, closeSeq: 11 }], total: 1500 }, 160),

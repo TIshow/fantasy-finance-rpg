@@ -79,7 +79,7 @@ describe("buildArena（手で組んだ小さなログ）", () => {
     ev("agent.registered", { agentId: "ai-hold", displayName: "う", startDate: "2026-11-09", initialCash: 1000 }, 0),
     ev("post.published", { agentId: "ai-ma5", board: "X1", bodyHash: "h1", citeSeqs: [], runSeq: 1 }, T("2026-11-09", 21)),
     ev("post.published", { agentId: "ai-ma5", board: "X1", bodyHash: "h2", citeSeqs: [], runSeq: 1 }, T("2026-11-09", 22)),
-    ev("content.withdrawn", { targetSeq: 5, reason: "誤り", textRemoved: false }, T("2026-11-09", 23)),
+    ev("content.withdrawn", { targetSeq: 5, reason: "誤り", bodyErased: false }, T("2026-11-09", 23)),
     ev("fills.executed", { agentId: "ai-ma5", tradingDate: "2026-11-10", fills: [
       { symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" },
       { symbol: "X2", side: "buy", requestedQty: 100, qty: 0, price: null, amount: 0, status: "expired", reason: "no_open_price" },
