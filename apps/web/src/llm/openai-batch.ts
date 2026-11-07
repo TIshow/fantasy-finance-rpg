@@ -13,7 +13,7 @@
 // - エラーの一覧：https://developers.openai.com/api/docs/guides/error-codes
 import type { LlmMessage, LlmModel } from "../contracts";
 import { sha256Hex } from "../events/hash";
-import type { BatchCall, BatchFailure, SentBody } from "./anthropic-batch";
+import type { BatchFailure, SentBody } from "./anthropic-batch";
 import type { TokenUsage } from "./cost";
 
 export type { BatchCall, BatchFailure, SentBody } from "./anthropic-batch";
@@ -97,15 +97,17 @@ export function toOpenAIParams(model: LlmModel, messages: readonly LlmMessage[])
  * 欄の値も確かめ、外れたら RangeError。
  */
 function requestLine(item: BatchRequestItem): string {
+  // 型をすり抜けた undefined・null・配列でも TypeError にせず、RangeError で断る
+  if (!isObj(item.params)) throw new RangeError("params must be an object");
   const p = item.params;
   if (typeof p.model !== "string" || p.model === "") throw new RangeError("params.model must be a non-empty string");
   if (!Number.isSafeInteger(p.max_output_tokens) || p.max_output_tokens < MIN_OUTPUT_TOKENS) throw new RangeError("params.max_output_tokens is invalid");
   if (!Array.isArray(p.input) || p.input.length === 0) throw new RangeError("params.input must not be empty");
-  const input = p.input.map((m) => {
-    if (!ROLES.has(m.role) || typeof m.content !== "string") throw new RangeError("params.input has an invalid message");
-    return { role: m.role, content: m.content };
+  const input = p.input.map((m: unknown) => {
+    if (!isObj(m) || !isStr(m.role) || !ROLES.has(m.role) || typeof m.content !== "string") throw new RangeError("params.input has an invalid message");
+    return { role: m.role as LlmMessage["role"], content: m.content };
   });
-  if (p.reasoning !== undefined && !EFFORTS.has(p.reasoning.effort)) throw new RangeError("params.reasoning.effort is invalid");
+  if (p.reasoning !== undefined && (!isObj(p.reasoning) || !isStr(p.reasoning.effort) || !EFFORTS.has(p.reasoning.effort))) throw new RangeError("params.reasoning.effort is invalid");
   const body = {
     model: p.model,
     input,
@@ -122,7 +124,7 @@ export interface UploadedFile {
   createdAt: number;
 }
 /** ファイルの上げの結果。成功でも失敗でも、送った本文（1行1件の JSON）とそのハッシュを一緒に返す */
-export type UploadResult = BatchCall<UploadedFile> & { sent: SentBody };
+export type UploadResult = OpenAIBatchCall<UploadedFile> & { sent: SentBody };
 
 export type OpenAIBatchState = "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled";
 const STATES: ReadonlySet<string> = new Set(["validating", "failed", "in_progress", "finalizing", "completed", "expired", "cancelling", "cancelled"]);
@@ -144,7 +146,7 @@ export interface BatchStatus {
   endedAt: number | null;
   validationErrors: number;
 }
-export type BatchCreateResult = BatchCall<BatchStatus> & { billingUnknown?: true };
+export type BatchCreateResult = OpenAIBatchCall<BatchStatus> & { billingUnknown?: true };
 
 export interface BatchListOptions {
   /** 1〜100 の整数。なければ提供元の既定（20） */
@@ -172,6 +174,33 @@ export const OPENAI_ERROR_CODES = [
 ] as const;
 export type OpenAIErrorType = (typeof OPENAI_ERROR_TYPES)[number];
 export type OpenAIErrorCode = (typeof OPENAI_ERROR_CODES)[number];
+
+/**
+ * お金に関わる印：残高切れ・使用額の上限。429 で返るが、待っても通らない（人が残高や上限を直すまで続く）。
+ * これらが付いた失敗は rate_limited にせず provider_error にする。
+ */
+export const OPENAI_BILLING_ERROR_TYPES: readonly OpenAIErrorType[] = ["insufficient_quota"];
+export const OPENAI_BILLING_ERROR_CODES: readonly OpenAIErrorCode[] = [
+  "credit_balance_exhausted",
+  "organization_spend_limit_exceeded",
+  "project_spend_limit_exceeded",
+  "organization_usage_limit_exceeded",
+];
+
+/**
+ * 失敗。BatchFailure に、応答の本文にあったエラーの種類（providerErrorType）と印（providerErrorCode）を足したもの。
+ * 公式の一覧にあるときだけ載せる。エラー文は持たない。
+ */
+export type OpenAIBatchFailure = BatchFailure & { providerErrorType?: OpenAIErrorType; providerErrorCode?: OpenAIErrorCode };
+export type OpenAIBatchCall<T> = { ok: true; value: T } | OpenAIBatchFailure;
+
+/** 失敗が、残高切れ・使用額の上限によるものか（待っても通らない。人が確かめる） */
+export function isOpenAIBillingError(f: { providerErrorType?: OpenAIErrorType; providerErrorCode?: OpenAIErrorCode }): boolean {
+  return (
+    (f.providerErrorType !== undefined && OPENAI_BILLING_ERROR_TYPES.includes(f.providerErrorType)) ||
+    (f.providerErrorCode !== undefined && OPENAI_BILLING_ERROR_CODES.includes(f.providerErrorCode))
+  );
+}
 
 /**
  * 1件の結果。
@@ -212,6 +241,8 @@ export interface OpenAIBatchClientOptions {
   timeoutMs?: number;
   /** 結果のファイルの取り出しの待ち時間の上限（ミリ秒）。件数が多いと本文が大きくなるので、ほかより長い既定にする */
   resultsTimeoutMs?: number;
+  /** ファイルの上げの待ち時間の上限（ミリ秒）。上げるファイルは最大 200MB なので、ほかより長い既定にする */
+  uploadTimeoutMs?: number;
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -226,7 +257,9 @@ const need = <T>(ok: boolean, v: T): T => {
 /** Unix 時刻（秒）をミリ秒に */
 const time = (v: unknown): number => need(isCount(v), (v as number) * 1000);
 const optTime = (v: unknown): number | null => (v === null || v === undefined ? null : time(v));
-const optStr = (v: unknown): string | null => (v === null || v === undefined ? null : need(isStr(v), v as string));
+const isId = (v: unknown): v is string => isStr(v) && OBJECT_ID.test(v);
+/** ID の欄。なければ null。あれば英数字・ハイフン・下線だけ（あとで URL のパスに入れるので、形を確かめる） */
+const optId = (v: unknown): string | null => (v === null || v === undefined ? null : need(isId(v), v as string));
 const optCount = (v: unknown): number => (v === null || v === undefined ? 0 : need(isCount(v), v as number));
 
 function parseFile(json: unknown): UploadedFile {
@@ -236,9 +269,9 @@ function parseFile(json: unknown): UploadedFile {
 }
 
 function parseStatus(json: unknown): BatchStatus {
-  need(isObj(json) && json.object === "batch" && isStr(json.id) && isStr(json.status) && STATES.has(json.status), null);
+  need(isObj(json) && json.object === "batch" && isId(json.id) && isStr(json.status) && STATES.has(json.status), null);
   const j = json as Record<string, unknown>;
-  need(isStr(j.endpoint) && isStr(j.input_file_id), null);
+  need(isStr(j.endpoint) && isId(j.input_file_id), null);
   const c = j.request_counts ?? { total: 0, completed: 0, failed: 0 };
   need(isObj(c) && isCount(c.total) && isCount(c.completed) && isCount(c.failed), null);
   const counts = c as { total: number; completed: number; failed: number };
@@ -250,8 +283,8 @@ function parseStatus(json: unknown): BatchStatus {
     status: j.status as OpenAIBatchState,
     endpoint: j.endpoint as string,
     inputFileId: j.input_file_id as string,
-    outputFileId: optStr(j.output_file_id),
-    errorFileId: optStr(j.error_file_id),
+    outputFileId: optId(j.output_file_id),
+    errorFileId: optId(j.error_file_id),
     counts: { total: counts.total, completed: counts.completed, failed: counts.failed },
     createdAt: time(j.created_at),
     expiresAt: optTime(j.expires_at),
@@ -263,7 +296,7 @@ function parseStatus(json: unknown): BatchStatus {
 function parseList(json: unknown): BatchList {
   need(isObj(json) && json.object === "list" && Array.isArray(json.data) && typeof json.has_more === "boolean", null);
   const j = json as Record<string, unknown>;
-  return { data: (j.data as unknown[]).map(parseStatus), hasMore: j.has_more as boolean, firstId: optStr(j.first_id), lastId: optStr(j.last_id) };
+  return { data: (j.data as unknown[]).map(parseStatus), hasMore: j.has_more as boolean, firstId: optId(j.first_id), lastId: optId(j.last_id) };
 }
 
 const KNOWN_TYPES: ReadonlySet<string> = new Set(OPENAI_ERROR_TYPES);
@@ -404,6 +437,8 @@ export function reconcileResults(requested: readonly string[], items: readonly B
 
 /**
  * 作成の失敗で billingUnknown が付いたときの突き合わせ。一覧から、上げたファイルの ID で作られたバッチを探す。
+ * 渡された一覧の中だけを探す。一覧は複数のページに分かれる（hasMore が true なら、lastId を after に渡して次を読む）ので、
+ * 呼び出し側が全ページ（少なくとも、ファイルを上げた時刻より後に作られた分のすべて）を読んでつないでから渡す。
  * ファイルは1回の作成にしか使わないので、見つかれば2つ目を作らない。見つからなくても、一覧の更新が遅れている
  * かもしれないので、自動で作り直さない（運用者が確かめる）。
  */
@@ -411,10 +446,35 @@ export function findBatchesByInputFile(batches: readonly BatchStatus[], inputFil
   return batches.filter((b) => b.inputFileId === inputFileId);
 }
 
-function failureOf(status: number): BatchFailure {
-  if (status === 429) return { ok: false, errorCode: "rate_limited", reason: "http", status };
-  if (status === 408 || status === 504) return { ok: false, errorCode: "timeout", reason: "http", status };
-  return { ok: false, errorCode: "provider_error", reason: "http", status };
+/**
+ * 2xx でない応答の分類。marks は本文の error.type・error.code のうち、公式の一覧にあるもの。
+ * - お金に関わる印（残高切れ・使用額の上限）は、429 でも provider_error（待っても通らない）
+ * - 429 と 503（混んでいる・ゆっくり送って。Anthropic の 529 と同じ扱い）は rate_limited
+ * - 408・504 は timeout。ほかは provider_error
+ */
+function failureOf(status: number, marks: { errorType?: OpenAIErrorType; errorCode?: OpenAIErrorCode }): OpenAIBatchFailure {
+  const provider = {
+    ...(marks.errorType === undefined ? {} : { providerErrorType: marks.errorType }),
+    ...(marks.errorCode === undefined ? {} : { providerErrorCode: marks.errorCode }),
+  };
+  const errorCode: BatchFailure["errorCode"] = isOpenAIBillingError(provider)
+    ? "provider_error"
+    : status === 429 || status === 503
+      ? "rate_limited"
+      : status === 408 || status === 504
+        ? "timeout"
+        : "provider_error";
+  return { ok: false, errorCode, reason: "http", status, ...provider };
+}
+
+/** 2xx でない応答の本文から、公式の一覧にあるエラーの種類と印だけを取る。読めなければ何も取らない（エラー文は捨てる） */
+async function errorMarks(res: Response): Promise<{ errorType?: OpenAIErrorType; errorCode?: OpenAIErrorCode }> {
+  try {
+    const json: unknown = JSON.parse(await res.text());
+    return isObj(json) ? knownError(json.error) : {};
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -422,7 +482,7 @@ function failureOf(status: number): BatchFailure {
  * 408・5xx（向こうで処理が進んだかもしれない）、2xx なのに本文が読めない・形が合わない（作られている）。
  * 408 以外の 4xx は、作られていないとみなす。
  */
-function uncertainOnCreate(f: BatchFailure): boolean {
+function uncertainOnCreate(f: OpenAIBatchFailure): boolean {
   if (f.status === undefined) return true;
   return f.status === 408 || f.status >= 500 || (f.status >= 200 && f.status < 300);
 }
@@ -445,13 +505,14 @@ function checkBaseUrl(raw: string): string {
   return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
 }
 
-/** Batch API の呼び出し。どれも reject せず BatchCall を返す（引数の誤りだけ RangeError で reject） */
+/** Batch API の呼び出し。どれも reject せず OpenAIBatchCall を返す（引数の誤りだけ RangeError で reject） */
 export class OpenAIBatchClient {
   readonly #apiKey: string;
   readonly #fetch: typeof fetch;
   readonly #baseUrl: string;
   readonly #timeoutMs: number;
   readonly #resultsTimeoutMs: number;
+  readonly #uploadTimeoutMs: number;
 
   constructor(options: OpenAIBatchClientOptions) {
     this.#apiKey = checkApiKey(options.apiKey, "apiKey");
@@ -460,6 +521,7 @@ export class OpenAIBatchClient {
     this.#baseUrl = checkBaseUrl(options.baseUrl ?? OPENAI_BASE_URL);
     this.#timeoutMs = options.timeoutMs ?? 30_000;
     this.#resultsTimeoutMs = options.resultsTimeoutMs ?? 120_000;
+    this.#uploadTimeoutMs = options.uploadTimeoutMs ?? 120_000;
   }
 
   /**
@@ -469,22 +531,22 @@ export class OpenAIBatchClient {
   async upload(items: readonly BatchRequestItem[]): Promise<UploadResult> {
     if (items.length === 0 || items.length > OPENAI_BATCH_MAX_REQUESTS) throw new RangeError(`requests must be 1 to ${OPENAI_BATCH_MAX_REQUESTS}`);
     const ids = new Set<string>();
-    const models = new Set<string>();
     for (const it of items) {
-      if (!CUSTOM_ID.test(it.customId) || ids.has(it.customId)) throw new RangeError("customId must be unique and match ^[A-Za-z0-9_-]{1,64}$");
+      if (!isObj(it) || !isStr(it.customId) || !CUSTOM_ID.test(it.customId) || ids.has(it.customId)) throw new RangeError("customId must be unique and match ^[A-Za-z0-9_-]{1,64}$");
       ids.add(it.customId);
-      models.add(it.params.model);
     }
+    // 形の確かめ（requestLine）を先に済ませてから、モデルを数える
+    const lines = items.map(requestLine);
     // 1つのファイルには1つのモデルの依頼しか入れられない
-    if (models.size !== 1) throw new RangeError("all requests in a batch must use the same model");
-    const body = items.map(requestLine).join("\n");
+    if (new Set(items.map((it) => it.params.model)).size !== 1) throw new RangeError("all requests in a batch must use the same model");
+    const body = lines.join("\n");
     const bytes = new TextEncoder().encode(body);
     if (bytes.length > OPENAI_BATCH_MAX_BYTES) throw new RangeError("batch input is too large");
     const sent: SentBody = { body, sha256: await sha256Hex(bytes) };
     const form = new FormData();
     form.append("purpose", "batch");
     form.append("file", new Blob([bytes], { type: "application/jsonl" }), "batch.jsonl");
-    const r = await this.#call("POST", "/v1/files", form, (text) => parseFile(JSON.parse(text)), this.#timeoutMs);
+    const r = await this.#call("POST", "/v1/files", form, (text) => parseFile(JSON.parse(text)), this.#uploadTimeoutMs);
     return { ...r, sent };
   }
 
@@ -492,17 +554,22 @@ export class OpenAIBatchClient {
    * 上げたファイルからバッチを作る（依頼）。1つのファイルは1回の作成にだけ使う。
    * 失敗に billingUnknown が付いたら、作られた（＝課金されうる）か分からない。自動で再試行せず、
    * list と findBatchesByInputFile で、そのファイルから作られたバッチがあるかを確かめる。
+   * 応答の inputFileId と endpoint が送ったものと違えば、形が合わない（malformed）として billingUnknown を付ける
+   * （何かが作られたが、頼んだものか分からない）。
    */
   async create(inputFileId: string): Promise<BatchCreateResult> {
     checkId(inputFileId);
     const body = JSON.stringify({ input_file_id: inputFileId, endpoint: OPENAI_BATCH_ENDPOINT, completion_window: OPENAI_COMPLETION_WINDOW });
-    const r = await this.#json("POST", "/v1/batches", body, parseStatus);
+    const r = await this.#json("POST", "/v1/batches", body, (json) => {
+      const s = parseStatus(json);
+      return need(s.inputFileId === inputFileId && s.endpoint === OPENAI_BATCH_ENDPOINT, s);
+    });
     if (!r.ok && uncertainOnCreate(r)) return { ...r, billingUnknown: true };
     return r;
   }
 
   /** バッチの一覧（新しい順）。作成の失敗に billingUnknown が付いたときの突き合わせに使う */
-  async list(options: BatchListOptions = {}): Promise<BatchCall<BatchList>> {
+  async list(options: BatchListOptions = {}): Promise<OpenAIBatchCall<BatchList>> {
     const q = new URLSearchParams();
     if (options.limit !== undefined) {
       if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 100) throw new RangeError("limit must be an integer from 1 to 100");
@@ -517,13 +584,13 @@ export class OpenAIBatchClient {
   }
 
   /** バッチの状態 */
-  async retrieve(batchId: string): Promise<BatchCall<BatchStatus>> {
+  async retrieve(batchId: string): Promise<OpenAIBatchCall<BatchStatus>> {
     checkId(batchId);
     return this.#json("GET", `/v1/batches/${batchId}`, undefined, parseStatus);
   }
 
   /** 取り消しを頼む。返る状態はふつう cancelling（最長10分）。cancelled になると、取り消しの前に終わった分の結果は残る */
-  async cancel(batchId: string): Promise<BatchCall<BatchStatus>> {
+  async cancel(batchId: string): Promise<OpenAIBatchCall<BatchStatus>> {
     checkId(batchId);
     return this.#json("POST", `/v1/batches/${batchId}/cancel`, undefined, parseStatus);
   }
@@ -532,7 +599,7 @@ export class OpenAIBatchClient {
    * 結果のファイル（1行1件の JSON）。バッチの outputFileId（成功）と errorFileId（失敗・期限切れ）の両方を読み、
    * つないでから reconcileResults で突き合わせる。形が合わない行は、その行だけ malformed にして、ほかの行は返す。
    */
-  async results(fileId: string): Promise<BatchCall<BatchItemResult[]>> {
+  async results(fileId: string): Promise<OpenAIBatchCall<BatchItemResult[]>> {
     checkId(fileId);
     return this.#call("GET", `/v1/files/${fileId}/content`, undefined, (text) => {
       const out: BatchItemResult[] = [];
@@ -543,11 +610,11 @@ export class OpenAIBatchClient {
     }, this.#resultsTimeoutMs);
   }
 
-  #json<T>(method: string, path: string, body: string | undefined, parse: (json: unknown) => T): Promise<BatchCall<T>> {
+  #json<T>(method: string, path: string, body: string | undefined, parse: (json: unknown) => T): Promise<OpenAIBatchCall<T>> {
     return this.#call(method, path, body, (text) => parse(JSON.parse(text)), this.#timeoutMs);
   }
 
-  async #call<T>(method: string, path: string, body: string | FormData | undefined, parse: (text: string) => T, timeoutMs: number): Promise<BatchCall<T>> {
+  async #call<T>(method: string, path: string, body: string | FormData | undefined, parse: (text: string) => T, timeoutMs: number): Promise<OpenAIBatchCall<T>> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let status: number | undefined;
@@ -559,8 +626,8 @@ export class OpenAIBatchClient {
       const res = await this.#fetch(`${this.#baseUrl}${path}`, { method, headers, body, signal: controller.signal, redirect: "error" });
       status = res.status;
       if (!res.ok) {
-        await res.body?.cancel().catch(() => undefined);
-        return failureOf(res.status);
+        // 本文は、公式の一覧にあるエラーの種類と印を取るためだけに読む（エラー文は捨てる）
+        return failureOf(res.status, await errorMarks(res));
       }
       const text = await res.text();
       try {

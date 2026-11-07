@@ -7,12 +7,14 @@ import { batchCostDeciyen } from "../../src/llm/cost";
 import {
   OpenAIBatchClient,
   findBatchesByInputFile,
+  isOpenAIBillingError,
   openaiApiKeyFromEnv,
   reconcileResults,
   toOpenAIParams,
   type BatchItemResult,
+  type BatchStatus,
 } from "../../src/llm/openai-batch";
-import { openaiBatchPrice } from "../../src/llm/openai-pricing";
+import { openaiBatchPrice, openaiBatchReservePrice } from "../../src/llm/openai-pricing";
 
 const recorded = (name: string) => readFileSync(new URL(`./recorded/${name}`, import.meta.url), "utf8");
 const KEY = "sk-proj-test-not-a-real-key";
@@ -123,6 +125,39 @@ describe("OpenAI のバッチの口", () => {
     for (const bad of [{ limit: 0 }, { limit: 101 }, { limit: 1.5 }, { after: "../x" }, { after: "a?b" }]) await expect(client(f).list(bad)).rejects.toThrow(RangeError);
   });
 
+  it("一覧が複数ページのときは、呼び出し側が lastId を after に渡して全ページを読み、つないでから探す", async () => {
+    const completed = JSON.parse(recorded("openai-batch-completed.json"));
+    const page1 = { object: "list", data: [{ ...completed, id: "batch_1", input_file_id: "file-1" }], has_more: true, first_id: "batch_1", last_id: "batch_1" };
+    const page2 = { object: "list", data: [completed], has_more: false, first_id: BATCH, last_id: BATCH };
+    const { f, seen } = fakeFetch((url) => new Response(JSON.stringify(url.includes("after=batch_1") ? page2 : page1)));
+    const c = client(f);
+    const pages: BatchStatus[][] = [];
+    let after: string | undefined;
+    for (;;) {
+      const r = await c.list({ limit: 100, ...(after === undefined ? {} : { after }) });
+      if (!r.ok) throw new Error("list failed");
+      pages.push(r.value.data);
+      if (!r.value.hasMore || r.value.lastId === null) break;
+      after = r.value.lastId;
+    }
+    expect(seen.map((s) => s.url)).toEqual(["https://api.openai.com/v1/batches?limit=100", "https://api.openai.com/v1/batches?limit=100&after=batch_1"]);
+    // 1ページ目だけでは見つからず、全ページをつなぐと見つかる
+    expect(findBatchesByInputFile(pages[0]!, FILE)).toEqual([]);
+    expect(findBatchesByInputFile(pages.flat(), FILE).map((b) => b.id)).toEqual([BATCH]);
+  });
+
+  it("バッチ・ファイルの ID の欄（outputFileId・errorFileId・lastId など）は形を確かめ、外れたら malformed", async () => {
+    const completed = JSON.parse(recorded("openai-batch-completed.json"));
+    for (const bad of [{ output_file_id: "../v1/models" }, { error_file_id: "file?x" }, { output_file_id: 1 }, { error_file_id: "" }, { id: "batch/x" }, { input_file_id: "a#b" }]) {
+      const { f } = fakeFetch(() => new Response(JSON.stringify({ ...completed, ...bad })));
+      expect(await client(f).retrieve(BATCH), JSON.stringify(bad)).toEqual({ ok: false, errorCode: "provider_error", reason: "malformed", status: 200 });
+    }
+    const list = fakeFetch(() => new Response(JSON.stringify({ object: "list", data: [], has_more: true, first_id: null, last_id: "batch/../x" })));
+    expect(await client(list.f).list()).toEqual({ ok: false, errorCode: "provider_error", reason: "malformed", status: 200 });
+    const none = fakeFetch(() => new Response(JSON.stringify({ ...completed, output_file_id: null, error_file_id: undefined })));
+    expect(await client(none.f).retrieve(BATCH)).toMatchObject({ ok: true, value: { outputFileId: null, errorFileId: null } });
+  });
+
   it("結果（成功のファイル）：output_text だけをつなぎ、トークン数を読む。断りの文は入れない", async () => {
     const { f } = fakeFetch(() => new Response(recorded("openai-batch-output.jsonl")));
     const r = await client(f).results("file-Bq7pY1nC2dE3fG4hJ5kL6m");
@@ -148,6 +183,23 @@ describe("OpenAI のバッチの口", () => {
       ],
     });
     expect(JSON.stringify(r)).not.toContain("secret");
+  });
+
+  it("応答がなくエラーだけの行：batch_expired 以外は errored。一覧にある種類・印だけ持ち、状態コードは持たない", async () => {
+    const lines = [
+      '{"custom_id":"e-1","response":null,"error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"req_secret123"}}',
+      '{"custom_id":"e-2","response":null,"error":{"code":"made_up_code","message":"req_secret123"}}',
+      '{"custom_id":"e-3","response":null,"error":{"type":"insufficient_quota","code":"credit_balance_exhausted"}}',
+    ];
+    const { f } = fakeFetch(() => new Response(lines.join("\n")));
+    expect(await client(f).results(FILE)).toEqual({
+      ok: true,
+      value: [
+        { customId: "e-1", type: "errored", errorType: "service_unavailable_error", errorCode: "server_is_overloaded" },
+        { customId: "e-2", type: "errored" },
+        { customId: "e-3", type: "errored", errorType: "insufficient_quota", errorCode: "credit_balance_exhausted" },
+      ],
+    });
   });
 
   it("結果の1行が形に合わなければ、その行だけ malformed にして、ほかの行は生かす", async () => {
@@ -181,11 +233,41 @@ describe("OpenAI のバッチの口", () => {
     expect(JSON.stringify(r)).not.toContain("secret");
   });
 
-  it("HTTP の失敗は状態コードだけを返し、本文（エラー文）を入れない", async () => {
-    for (const [status, errorCode] of [[429, "rate_limited"], [408, "timeout"], [504, "timeout"], [401, "provider_error"], [500, "provider_error"], [503, "provider_error"]] as const) {
-      const { f } = fakeFetch(() => new Response('{"error":{"message":"request-id=req_secret123","type":"invalid_request_error"}}', { status }));
-      expect(await client(f).retrieve(BATCH)).toEqual({ ok: false, errorCode, reason: "http", status });
+  it("HTTP の失敗は状態コードと、公式の一覧にあるエラーの種類・印だけを返し、エラー文を入れない。503 は 429 と同じく rate_limited", async () => {
+    for (const [status, errorCode] of [[429, "rate_limited"], [503, "rate_limited"], [408, "timeout"], [504, "timeout"], [401, "provider_error"], [500, "provider_error"]] as const) {
+      const { f } = fakeFetch(() => new Response('{"error":{"message":"request-id=req_secret123","type":"invalid_request_error","code":"made_up_code"}}', { status }));
+      const r = await client(f).retrieve(BATCH);
+      expect(r).toEqual({ ok: false, errorCode, reason: "http", status, providerErrorType: "invalid_request_error" });
+      expect(JSON.stringify(r)).not.toContain("secret");
     }
+    // 本文が JSON でない・error がない・一覧にない種類だけ、なら印は付けない
+    for (const body of ["not json req_secret123", "{}", '{"error":{"type":"made_up","code":null}}', ""]) {
+      const { f } = fakeFetch(() => new Response(body, { status: 429 }));
+      expect(await client(f).retrieve(BATCH)).toEqual({ ok: false, errorCode: "rate_limited", reason: "http", status: 429 });
+    }
+  });
+
+  it("429 でも、残高切れ・使用額の上限の印があれば rate_limited にせず provider_error。待てば通るものは rate_limited のまま", async () => {
+    const err = (error: object) => JSON.stringify({ error: { message: "request-id=req_secret123", ...error } });
+    const cases: [object, Record<string, unknown>][] = [
+      [{ type: "insufficient_quota", code: "insufficient_quota" }, { errorCode: "provider_error", providerErrorType: "insufficient_quota" }],
+      [{ type: "insufficient_quota", code: "credit_balance_exhausted" }, { errorCode: "provider_error", providerErrorType: "insufficient_quota", providerErrorCode: "credit_balance_exhausted" }],
+      [{ type: "invalid_request_error", code: "organization_spend_limit_exceeded" }, { errorCode: "provider_error", providerErrorType: "invalid_request_error", providerErrorCode: "organization_spend_limit_exceeded" }],
+      [{ code: "project_spend_limit_exceeded" }, { errorCode: "provider_error", providerErrorCode: "project_spend_limit_exceeded" }],
+      [{ code: "organization_usage_limit_exceeded" }, { errorCode: "provider_error", providerErrorCode: "organization_usage_limit_exceeded" }],
+      [{ type: "rate_limit_error", code: "slow_down" }, { errorCode: "rate_limited", providerErrorType: "rate_limit_error", providerErrorCode: "slow_down" }],
+    ];
+    for (const [error, expected] of cases) {
+      const r = await client(fakeFetch(() => new Response(err(error), { status: 429 })).f).retrieve(BATCH);
+      expect(r, JSON.stringify(error)).toEqual({ ok: false, reason: "http", status: 429, ...expected });
+      expect(!r.ok && isOpenAIBillingError(r)).toBe(expected.errorCode === "provider_error");
+      expect(JSON.stringify(r)).not.toContain("secret");
+    }
+    const busy = await client(fakeFetch(() => new Response(err({ type: "service_unavailable_error", code: "server_is_overloaded" }), { status: 503 })).f).retrieve(BATCH);
+    expect(busy).toEqual({ ok: false, errorCode: "rate_limited", reason: "http", status: 503, providerErrorType: "service_unavailable_error", providerErrorCode: "server_is_overloaded" });
+    // 作成で残高切れなら、作られていない（4xx）ので billingUnknown は付けない
+    const created = await client(fakeFetch(() => new Response(err({ type: "insufficient_quota" }), { status: 429 })).f).create(FILE);
+    expect(created).toEqual({ ok: false, errorCode: "provider_error", reason: "http", status: 429, providerErrorType: "insufficient_quota" });
   });
 
   it("通信断は network、待ち時間切れは timeout、それ以外の例外は unexpected。例外の文を入れない", async () => {
@@ -208,6 +290,18 @@ describe("OpenAI のバッチの口", () => {
     expect(await c.retrieve(BATCH)).toMatchObject({ ok: false, errorCode: "timeout" });
   });
 
+  it("ファイルの上げは、ほかと別の待ち時間を使う", async () => {
+    const slow = (async (_: RequestInfo | URL, init?: RequestInit) => {
+      await new Promise((ok) => setTimeout(ok, 30));
+      if (init?.signal?.aborted) throw new DOMException("aborted", "AbortError");
+      return new Response(recorded("openai-file-uploaded.json"));
+    }) as typeof fetch;
+    const long = new OpenAIBatchClient({ apiKey: KEY, fetch: slow, timeoutMs: 5, uploadTimeoutMs: 1000 });
+    expect((await long.upload([{ customId: "a", params }])).ok).toBe(true);
+    const short = new OpenAIBatchClient({ apiKey: KEY, fetch: slow, timeoutMs: 1000, uploadTimeoutMs: 5 });
+    expect(await short.upload([{ customId: "a", params }])).toMatchObject({ ok: false, errorCode: "timeout", reason: "timeout" });
+  });
+
   it("作成：応答がない・408・5xx・2xx で形が合わないときは billingUnknown を付ける。ほかの 4xx は付けない", async () => {
     const cases: [typeof fetch, Record<string, unknown>][] = [
       [fakeFetch(() => Promise.reject(new TypeError("fetch failed"))).f, { errorCode: "provider_error", reason: "network", billingUnknown: true }],
@@ -218,6 +312,12 @@ describe("OpenAI のバッチの口", () => {
       [fakeFetch(() => new Response('{"object":"batch","id":"x"}')).f, { errorCode: "provider_error", reason: "malformed", status: 200, billingUnknown: true }],
     ];
     for (const [f, expected] of cases) expect(await client(f, 5).create(FILE)).toEqual({ ok: false, ...expected });
+    // 応答の inputFileId・endpoint が送ったものと違えば、形が合わないとして billingUnknown
+    const created = JSON.parse(recorded("openai-batch-created.json"));
+    for (const other of [{ input_file_id: "file-other" }, { endpoint: "/v1/chat/completions" }]) {
+      const f = fakeFetch(() => new Response(JSON.stringify({ ...created, ...other }))).f;
+      expect(await client(f).create(FILE), JSON.stringify(other)).toEqual({ ok: false, errorCode: "provider_error", reason: "malformed", status: 200, billingUnknown: true });
+    }
     for (const status of [400, 401, 429]) {
       const r = await client(fakeFetch(() => new Response("", { status })).f).create(FILE);
       expect(r.ok).toBe(false);
@@ -266,6 +366,12 @@ describe("OpenAI のバッチの口", () => {
     await expect(c.upload([{ customId: "a", params }, { customId: "b", params: { ...params, model: "gpt-6-luna" } }])).rejects.toThrow(RangeError);
     await expect(c.upload([{ customId: "a", params: { ...params, max_output_tokens: 15 } }])).rejects.toThrow(RangeError);
     await expect(c.upload([{ customId: "a", params: { ...params, input: [{ role: "tool" as "user", content: "x" }] } }])).rejects.toThrow(RangeError);
+    // 型をすり抜けた undefined・null も TypeError ではなく RangeError（モデルを数える前に形を確かめる）
+    const shapes = [undefined, null, [], { ...params, reasoning: null }, { ...params, input: [null] }, { ...params, input: [{ role: "user", content: null }] }, { ...params, reasoning: { effort: 1 } }];
+    for (const bad of shapes) {
+      await expect(c.upload([{ customId: "a", params: bad as unknown as typeof params }]), JSON.stringify(bad)).rejects.toThrow(RangeError);
+      await expect(c.upload([{ customId: "a", params }, { customId: "b", params: bad as unknown as typeof params }]), JSON.stringify(bad)).rejects.toThrow(RangeError);
+    }
     await expect(c.create("../../v1/models")).rejects.toThrow(RangeError);
     await expect(c.retrieve("a?b")).rejects.toThrow(RangeError);
     await expect(c.results("a/b")).rejects.toThrow(RangeError);
@@ -356,5 +462,14 @@ describe("OpenAI のバッチの料金", () => {
   it("表にないモデルは undefined（toString などの名前も）", () => {
     expect(openaiBatchPrice("gpt-6-astra", { inputTokens: 1 })).toBeUndefined();
     expect(openaiBatchPrice("toString", { inputTokens: 1 })).toBeUndefined();
+    expect(openaiBatchReservePrice("gpt-6-astra")).toBeUndefined();
+    expect(openaiBatchReservePrice("toString")).toBeUndefined();
+  });
+
+  it("予約（maxCost の見積もり）には、入力の長さによらず長い文脈の料金を使う", () => {
+    expect(openaiBatchReservePrice("gpt-6.1-sol")).toEqual({ inputCentsPerMTok: 200, outputCentsPerMTok: 750 });
+    // 入力2万・出力の上限2万5千で予約すると：2万 × 2ドル/100万 ＋ 2万5千 × 7.5ドル/100万 ＝ 0.2275ドル → 36.4円
+    const reserve = { inputTokens: 20000, outputTokens: 25000, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+    expect(batchCostDeciyen(reserve, openaiBatchReservePrice("gpt-6.1-sol")!, 160)).toBe(364);
   });
 });
