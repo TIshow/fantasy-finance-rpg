@@ -250,10 +250,13 @@ describe("画面のデータの出どころが、PGlite の20営業日の記録�
     for (const s of SYMBOLS) for (const h of buildBoard(view, s)!.holders) expect(investors).toContain(h.agentId);
     // トップの約定の流れも AI投資家の分だけ（売買役の約定は、名前が AI投資家のキャラの名前にならない）
     const names = investors.map((id) => characterOf(id, view.agents.find((a) => a.agentId === id)!.agentName).name);
-    for (const f of buildArena(view).feed.filter((x) => x.kind === "fill")) expect(names.some((n) => f.text.startsWith(n)), f.text).toBe(true);
+    const feedFills = buildArena(view).feed.filter((x) => x.kind === "fill");
+    expect(feedFills.length).toBeGreaterThan(0);
+    for (const f of feedFills) expect(names.some((n) => f.text.startsWith(n)), f.text).toBe(true);
     // 売買役の AIのページは作られない
     const mm = [...hand.kinds].find(([, k]) => k !== "investor")![0];
-    await expect(AgentPage({ params: Promise.resolve({ id: mm }) })).rejects.toThrow();
+    // Next.js の notFound() の例外（digest が "NEXT_HTTP_ERROR_FALLBACK;404"）。ほかの例外では通らない
+    await expect(AgentPage({ params: Promise.resolve({ id: mm }) })).rejects.toMatchObject({ digest: expect.stringMatching(/;404$/) });
   }, 60_000);
 
   it("トップ：各 AI投資家の評価額・損益・順位が、手計算と一致する（日ごとの評価額・前日比・順位も）", () => {
@@ -285,14 +288,30 @@ describe("画面のデータの出どころが、PGlite の20営業日の記録�
       if (!lastFill) expect(c.lastTrade).toBeNull();
       else expect(c.lastTrade).toBe(`${lastFill.tradingDate.slice(5, 7)}/${lastFill.tradingDate.slice(8, 10)} ${lastFill.side === "buy" ? "買" : "売"} ${lastFill.symbol} ${lastFill.qty}株`);
     }
+    // 「直近の終値で評価」の印の付いた日が1件以上ある（印の付く場合を通っている）
+    const staleRows = view.agents.flatMap((a) => a.days.filter((d) => d.stale).map((d) => `${a.agentId} ${d.date}`));
+    console.log(`stale valuation days: ${staleRows.join(", ") || "none"}`);
+    expect(staleRows.length).toBeGreaterThan(0);
     // カードの並びは順位の順
     expect(cards.map((c) => c.rank)).toEqual([...cards.map((c) => c.rank)].sort((x, y) => x! - y!));
-    // 流れの「首位」の行：総資産が、その日の手計算の最大の評価額
+    // 流れの「首位」の行（key は rank-<日付>）：その日の手計算の最大の評価額と、その AI の名前（同額なら「同額」の行）
     const rankItems = feed.filter((f) => f.kind === "rank");
-    expect(rankItems.length).toBeGreaterThan(0);
-    const maxByTotal = new Set(hand.investors.flatMap((id) => hand.days.get(id)!).map((d) => d.total));
-    for (const r of rankItems) if (r.text.includes("総資産")) expect(maxByTotal.has(yen(r.text))).toBe(true);
-  });
+    expect(rankItems.filter((r) => r.text.includes("総資産")).length).toBeGreaterThan(0);
+    for (const r of rankItems) {
+      const date = r.key.replace(/^rank-/, "");
+      const totals = hand.investors.map((id) => ({ id, total: hand.days.get(id)!.find((d) => d.date === date)!.total }));
+      const max = Math.max(...totals.map((t) => t.total));
+      const leaders = totals.filter((t) => t.total === max);
+      if (leaders.length > 1) {
+        expect(r.text, date).toContain("同額");
+        continue;
+      }
+      const leader = leaders[0]!.id;
+      const name = characterOf(leader, view.agents.find((a) => a.agentId === leader)!.agentName).name;
+      expect(r.text.startsWith(`${name}が首位`), `${date}: ${r.text}`).toBe(true);
+      expect(yen(r.text), date).toBe(max);
+    }
+  }, 60_000);
 
   it("口座（getAccounts）：AI投資家の現金・株数・取得原価が、作り直した台帳と手計算に一致する", () => {
     for (const id of hand.investors) {
@@ -302,9 +321,11 @@ describe("画面のデータの出どころが、PGlite の20営業日の記録�
       expect(shown.cash, id).toBe(h.cash);
       expect(shown.holdings, id).toEqual(h.holdings);
     }
-  });
+  }, 60_000);
 
   it("AIのページ：総資産・損益・現金・持ち株（株数・評価額・取得単価・含み損益）・約定の件数・順位が、手計算と台帳に一致する", async () => {
+    // 持ち株の行が1件以上ある（空の比較で通らない）
+    expect(hand.investors.reduce((n, id) => n + pages.get(id)!.holdings.length, 0)).toBeGreaterThan(0);
     for (const id of hand.investors) {
       const page = pages.get(id)!;
       const last = lastDay(id);
@@ -335,7 +356,7 @@ describe("画面のデータの出どころが、PGlite の20営業日の記録�
         expect(yen(hc.unrealized!.text)).toBe(qty * price - cost);
       }
     }
-  });
+  }, 60_000);
 
   it("AIのページの売買の履歴：約定の行が記録の約定と1件ずつ一致し、新しい約定日から並ぶ", async () => {
     for (const id of hand.investors) {
@@ -366,7 +387,7 @@ describe("画面のデータの出どころが、PGlite の20営業日の記録�
       expect(page.history.filter((r) => r.head === "注文なし").length).toBe(empty);
       expect(page.history.filter((r) => r.status === "拒否").length).toBe(rejected);
     }
-  });
+  }, 60_000);
 
   it("銘柄のページ：値段の推移（板寄せの値段）と出来高が、約定の記録から足した値と、板寄せの記録に一致する。持っているAIの株数・評価額も手計算と一致する", async () => {
     expect((await symbolParams()).map((x) => x.symbol)).toEqual(expect.arrayContaining([...SYMBOLS].sort()));
@@ -416,7 +437,7 @@ describe("画面のデータの出どころが、PGlite の20営業日の記録�
         expect(h.stale).toBe(hand.staleOn(s, LAST));
       }
     }
-  });
+  }, 60_000);
   // 画面の作り直しは1時間ごとなので、毎日の実行の途中の記録を読むことがある。架空の市場では、寄り付きの板寄せ・約定と評価が
   // 1回の実行の中で続けて書かれ、1件ずつ別のトランザクションなので、その間に読むと「今日の約定はあるが評価はまだ（または一部だけ）」が見える。
   // その状態は、評価の追記を途中で失敗させて作る。この確かめは記録を書き足すので、最後に置く
@@ -436,6 +457,7 @@ describe("画面のデータの出どころが、PGlite の20営業日の記録�
       { label: "9:35 評価が一部だけ", at: jst(NEXT, 9, 36), db: () => crashingOn("valuation.recorded", firstInvestor + 2) },
     ];
     const seenStates = new Set<number>();
+    let hiddenCost = 0;
     for (const step of steps) {
       clock.set(Math.max(clock.now(), step.at));
       await runDaily(NEXT, { db: step.db(), clock, prepare: productionSetup, holidayTable }).catch((e: Error) => expect(e.message).toBe("crash"));
@@ -468,7 +490,10 @@ describe("画面のデータの出どころが、PGlite の20営業日の記録�
         expect(page.holdings.map((x) => x.qty), where).toEqual(page.holdings.map((x) => last.qty[x.symbol]));
         for (const hc of page.holdings) {
           const tradedAfterValuation = filledToday.has(id) && last.date !== NEXT;
-          if (tradedAfterValuation) expect(hc.unitCostText, `${where} ${hc.symbol}`).toBeNull();
+          if (tradedAfterValuation) {
+            expect(hc.unitCostText, `${where} ${hc.symbol}`).toBeNull();
+            hiddenCost++;
+          }
           else expect(yen(hc.unitCostText), `${where} ${hc.symbol}`).toBe(Math.round(h2.acc.get(id)!.holdings[hc.symbol]!.cost / hc.qty));
         }
       }
@@ -476,5 +501,54 @@ describe("画面のデータの出どころが、PGlite の20営業日の記録�
     }
     // 「評価が一部だけ」の状態を、実際に作れたこと
     expect([...seenStates].some((n) => n > 0 && n < 3), JSON.stringify([...seenStates])).toBe(true);
+    // 「評価より後に約定したので取得単価を出さない」側を、実際に通ったこと
+    expect(hiddenCost).toBeGreaterThan(0);
   }, 120_000);
+
+  // 「直近の終値で評価」の印（PAPER_TRADING_RULES §6）を持ち株の画面で確かめるため、記録を書き足して、
+  // AI投資家の持っている銘柄に値段がつかなかった日を最終日にする。この確かめも記録を書き足すので、最後に置く
+  it("持っている銘柄に値段がつかなかった日が最終日のとき、AIのページの持ち株と銘柄のページの持ち主に印が付き、値段は直近の値段で、評価額は手計算と一致する", async () => {
+    const waitUntil = async (at: number) => void (at > clock.now() && clock.set(at));
+    let t = Date.parse("2026-12-02T00:00:00Z");
+    let found: { id: string; symbol: string; date: string } | undefined;
+    let h2 = hand;
+    let evs = events;
+    for (let n = 0; n < 40 && !found; n++, t += 86_400_000) {
+      const date = new Date(t).toISOString().slice(0, 10);
+      await runDaily(date, { db, clock, waitUntil, prepare: productionSetup, holidayTable });
+      evs = await readAllEvents(db);
+      h2 = handCompute(evs);
+      for (const id of h2.investors) {
+        const last = h2.days.get(id)!.at(-1)!;
+        const symbol = Object.keys(last.qty).find((s) => h2.staleOn(s, last.date));
+        if (symbol && last.date === date) found = { id, symbol, date };
+      }
+    }
+    expect(found, "40日のうちに、持っている銘柄に値段がつかない日がなかった").toBeDefined();
+    console.log(`stale holding on the last day: ${JSON.stringify(found)}`);
+    const { id, symbol, date } = found!;
+    const v = await getView();
+    const accts = await getAccounts();
+    const last = h2.days.get(id)!.at(-1)!;
+    const page = buildAgentPage(v, accts, id)!;
+    expect(page.stats!.asOf).toBe(`${date.slice(5, 7)}/${date.slice(8, 10)}`);
+    expect(yen(page.stats!.totalText)).toBe(last.total);
+    for (const hc of page.holdings) {
+      expect(hc.stale, hc.symbol).toBe(h2.staleOn(hc.symbol, date));
+      expect(yen(hc.closeText), hc.symbol).toBe(h2.priceOn(hc.symbol, date));
+      expect(yen(hc.valueText), hc.symbol).toBe(hc.qty * h2.priceOn(hc.symbol, date));
+    }
+    expect(page.holdings.find((x) => x.symbol === symbol)!.stale).toBe(true);
+    // その日の板寄せは「値つかず」で、直近の値段を添える
+    const day = v.market.companies.find((c) => c.listing.symbol === symbol)!.days.find((d) => d.date === date)!;
+    expect(day.price).toBeNull();
+    expect(yen(day.carriedText)).toBe(h2.priceOn(symbol, date));
+    // 銘柄のページの持ち主
+    const holder = buildBoard(v, symbol)!.holders.find((x) => x.agentId === id)!;
+    expect(holder.stale).toBe(true);
+    expect(holder.qty).toBe(last.qty[symbol]);
+    expect(yen(holder.valueText)).toBe(last.qty[symbol]! * h2.priceOn(symbol, date));
+    // 日ごとの一覧の印も、その日に付く
+    expect(v.agents.find((a) => a.agentId === id)!.days.at(-1)!.stale).toBe(true);
+  }, 180_000);
 });
