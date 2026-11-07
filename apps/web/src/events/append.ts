@@ -9,6 +9,7 @@ import type { Listing } from "../ledger/ledger";
 import { registrationProblem, type Account, type Order, type ParticipantKind, type RejectReason } from "../ledger/types";
 import { CanonicalizeError } from "./canonical";
 import { sealEvent } from "./chain";
+import { llmTokenCost, type LlmPrice, type LlmTokens } from "./llm-cost";
 import { POST_INTENTS, POST_STANCES, type Actor, type EventType, type LogEvent } from "./types";
 
 type Writer = "agent" | "system" | "operator";
@@ -28,6 +29,8 @@ const WRITERS: Record<EventType, Writer> = {
   "universe.set": "operator",
   "agent.registered": "operator",
   "agent.run": "system",
+  "llm.batch.submitted": "system",
+  "llm.batch.closed": "system",
   "post.published": "agent",
   "order_sheet.committed": "agent",
   "order_sheet.rejected": "system",
@@ -42,12 +45,14 @@ const WRITERS: Record<EventType, Writer> = {
 };
 
 /** 中身で他のイベントを指す項目。すべて refs にも入っていなければならない */
-const SEQ_FIELDS = ["runSeq", "sheetSeq", "openSeq", "closeSeq", "closedSeq", "refSeq", "targetSeq", "correctionSeq", "replyTo"];
+const SEQ_FIELDS = ["runSeq", "sheetSeq", "openSeq", "closeSeq", "closedSeq", "refSeq", "targetSeq", "correctionSeq", "replyTo", "batchSeq"];
 const SEQ_LIST_FIELDS = ["inputSeqs", "announcedSeqs", "citeSeqs", "sheetSeqs", "auctionSeqs"];
 
 /** 登録済みのAIについてのイベント（agent.suspended・agent.resumed は全体の "*" も可） */
 const AGENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
   "agent.run",
+  "llm.batch.submitted",
+  "llm.batch.closed",
   "post.published",
   "order_sheet.committed",
   "order_sheet.rejected",
@@ -61,7 +66,7 @@ const AGENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
 ]);
 
 /** 営業日を判定するイベント。ほかに営業日を使うのは登録済みのAIのイベントで、登録には一覧が要るので、ここに入れなくてよい */
-const NEEDS_CALENDAR: ReadonlySet<EventType> = new Set<EventType>(["prices.open", "prices.close", "market.closed", "agent.registered", "corporate_action.announced", "auction.cleared"]);
+const NEEDS_CALENDAR: ReadonlySet<EventType> = new Set<EventType>(["prices.open", "prices.close", "market.closed", "agent.registered", "corporate_action.announced", "auction.cleared", "llm.batch.submitted"]);
 
 /**
  * 営業日の判定を通した日付の項目（§3.5）。ログが使った一番遅い日付を覚えるのに使う。臨時休場の日は判定を通さないので入れない。
@@ -74,6 +79,7 @@ const JUDGED_DATES: Partial<Record<EventType, string[]>> = {
   "auction.cleared": ["date"],
   "agent.registered": ["startDate"],
   "order_sheet.committed": ["tradingDate"],
+  "llm.batch.submitted": ["tradingDate"],
   "valuation.recorded": ["date"],
   "corporate_actions.applied": ["asOf", "exDate"],
 };
@@ -97,6 +103,22 @@ const isShortText = (v: unknown) => typeof v === "string" && v !== "" && v.lengt
 
 /** 銘柄コード（例：7203、130A。テストでは架空の英字） */
 const SYMBOL = /^[0-9A-Z]{3,8}$/;
+
+/** LLM のバッチの記録（#179）。llm.batch.submitted と llm.batch.closed の項目 */
+const LLM_PRICE_FIELDS = ["inputCentsPer10MTok", "outputCentsPer10MTok"];
+const LLM_SUBMITTED_FIELDS = ["agentId", "provider", "modelId", "promptVersion", "sentBodyHash", "batchId", "customId", "maxCost", "tradingDate", "submittedAt", "yenPerUsd", ...LLM_PRICE_FIELDS, "maxInputTokens", "maxOutputTokens"];
+const LLM_TOKEN_FIELDS = ["inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens"];
+const LLM_CLOSED_FIELDS = ["batchSeq", "agentId", "result", "cost", "costUnknown", ...LLM_TOKEN_FIELDS, ...LLM_PRICE_FIELDS];
+const LLM_RESULTS: readonly unknown[] = ["collected", "expired", "failed"];
+/** SHA-256 の16進（小文字） */
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+/** 提供元のバッチのID（表示できる ASCII。Gemini は "batches/..." の形） */
+const BATCH_ID = /^[\x21-\x7e]{1,256}$/;
+/** バッチの中の1件のID（各社の決まりに共通する形） */
+const CUSTOM_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const isCount = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 0;
+/** 依頼を決めた時刻（submittedAt）から記録するまでに許す遅れ（1時間） */
+export const LLM_RECORD_WINDOW_MS = 3_600_000;
 
 export interface AppendContext {
   /** これまでに採用した祝日の一覧を、版（contentSha256）で引けるように渡す。どの版を使うかはログの holidays.adopted が決める */
@@ -192,23 +214,38 @@ export class EventLog {
     return r.ok ? null : `seq ${e.seq} (${e.type}): ${r.reason}`;
   }
 
-  private async write(d: Draft, expectedHash?: string): Promise<AppendResult> {
+  /**
+   * 書かずに、append と同じ検査だけをする。通るなら null、通らなければ理由。
+   * 送ったあとに書く記録（llm.batch.submitted）が断られないことを、送る前に確かめるのに使う（LlmBatchPort の契約）
+   */
+  async canAppend(d: Draft): Promise<string | null> {
+    if (d.type === "order_sheet.committed" || d.type === "order_sheet.rejected") return "use commitSheet";
+    const r = await this.seal(d);
+    return r.ok ? null : r.reason;
+  }
+
+  private async seal(d: Draft): Promise<AppendResult & { keys?: string[] }> {
     const p: unknown = d.payload;
     if (typeof p !== "object" || p === null || Array.isArray(p)) return { ok: false, reason: "payload must be an object" };
     const keys = keysOf(d.type, d.payload);
     if (typeof keys === "string") return { ok: false, reason: keys };
     const reason = this.check(d);
     if (reason) return { ok: false, reason };
-    let event: LogEvent;
     try {
-      event = await sealEvent(this.events.at(-1) ?? null, { ...d, keys }, this.keys);
+      return { ok: true, event: await sealEvent(this.events.at(-1) ?? null, { ...d, keys }, this.keys), keys };
     } catch (err) {
       if (err instanceof CanonicalizeError || (err instanceof Error && err.message.startsWith("invalid event:"))) return { ok: false, reason: err.message };
       throw err;
     }
+  }
+
+  private async write(d: Draft, expectedHash?: string): Promise<AppendResult> {
+    const r = await this.seal(d);
+    if (!r.ok) return r;
+    const { event } = r;
     if (expectedHash !== undefined && event.hash !== expectedHash) return { ok: false, reason: "does not match the recorded event" };
     this.events.push(event);
-    for (const k of keys) this.keys.add(k);
+    for (const k of r.keys!) this.keys.add(k);
     this.apply(event);
     return { ok: true, event };
   }
@@ -463,7 +500,50 @@ export class EventLog {
         return registrationProblem(p.kind, p.initialCash);
       }
       case "agent.run":
-        return p.purpose === "post" || p.purpose === "order" ? this.inputProblem(p.inputSeqs, null) : "purpose must be post or order";
+        if (p.purpose !== "post" && p.purpose !== "order") return "purpose must be post or order";
+        return llmRunProblem(p) ?? this.runBatchProblem(d, agentId, H) ?? this.inputProblem(p.inputSeqs, null);
+      case "llm.batch.submitted": {
+        // バッチへの依頼の控えと費用の予約（#179）。判断を使う取引日は、依頼を決めた時刻（submittedAt）で締めがまだ来ていない最初の営業日だけ
+        if (Object.keys(p).some((k) => !LLM_SUBMITTED_FIELDS.includes(k))) return "unknown field in a batch submission";
+        if (!isShortText(p.provider) || !isShortText(p.modelId) || !isShortText(p.promptVersion)) return "provider, modelId and promptVersion are required (up to 100 characters)";
+        if (typeof p.sentBodyHash !== "string" || !SHA256_HEX.test(p.sentBodyHash)) return "sentBodyHash must be a SHA-256 hex digest";
+        // null は、作られたか分からない依頼（課金されうるので、予約を残す）
+        if (!(p.batchId === null || (typeof p.batchId === "string" && BATCH_ID.test(p.batchId)))) return "batchId must be a provider batch id or null";
+        if (typeof p.customId !== "string" || !CUSTOM_ID.test(p.customId)) return "customId must match ^[A-Za-z0-9_-]{1,64}$";
+        if (!Number.isSafeInteger(p.maxCost) || (p.maxCost as number) < 1) return "maxCost must be a positive integer";
+        // 依頼を決めた時刻。取引日と費用の暦日はこれで決める（送ったあとに記録が遅れても、取引日が変わらないように）
+        const at = p.submittedAt;
+        if (!isTime(at) || at > d.recordedAt || d.recordedAt - at > LLM_RECORD_WINDOW_MS) return "submittedAt must be within an hour before recordedAt";
+        // 予約に使った料金（閉じたときも同じ料金で数える）と、予約の見積もりに使ったトークン数の上限
+        if (!Number.isSafeInteger(p.yenPerUsd) || (p.yenPerUsd as number) < 1) return "yenPerUsd must be a positive integer";
+        if (![...LLM_PRICE_FIELDS, "maxInputTokens", "maxOutputTokens"].every((f) => isCount(p[f]))) return "prices and max token counts must be non-negative integers";
+        const bound = llmTokenCost({ inputTokens: p.maxInputTokens as number, outputTokens: p.maxOutputTokens as number }, p as unknown as LlmPrice);
+        if (bound === null || (p.maxCost as number) < bound) return `maxCost must be at least ${String(bound)} (the cost of the max tokens)`;
+        try {
+          return p.tradingDate === tradingDateFor(at, H) ? null : "tradingDate must be the next trading date";
+        } catch {
+          return "submittedAt is outside the adopted holiday table";
+        }
+      }
+      case "llm.batch.closed": {
+        // バッチが閉じた記録。実際の費用が分からなければ、予約した費用をそのまま使う（安全側）
+        if (Object.keys(p).some((k) => !LLM_CLOSED_FIELDS.includes(k))) return "unknown field in a batch closing";
+        const sub = this.events[(p.batchSeq as number) - 1];
+        const sp = sub?.payload as Record<string, unknown> | undefined;
+        if (sub?.type !== "llm.batch.submitted" || sp?.agentId !== agentId) return "batchSeq must be llm.batch.submitted of the same agent";
+        if (!LLM_RESULTS.includes(p.result)) return "result must be collected, expired or failed";
+        const cache = LLM_TOKEN_FIELDS.slice(2);
+        if (!isCount(p.cost) || !isCount(p.inputTokens) || !isCount(p.outputTokens) || !cache.every((f) => p[f] === undefined || isCount(p[f]))) return "cost and token counts must be non-negative integers";
+        if (p.costUnknown !== undefined && (p.costUnknown !== true || p.cost !== sp.maxCost)) return "an unknown cost must be the reserved maxCost";
+        if (sp.batchId === null && (p.result !== "failed" || p.costUnknown !== true)) return "a submission without a batch id must close as failed with the reserved cost";
+        if (p.costUnknown === true) return LLM_PRICE_FIELDS.every((f) => p[f] === undefined) ? null : "an unknown cost has no price";
+        // 料金は予約の料金ちょうど（安い料金や 0 を書いて、その日の使った額を少なく見せられないように）。
+        // 提供元が実際にはもっと安く請求しても、予約の料金で数える（多めに数えるので安全側）
+        if (!LLM_PRICE_FIELDS.every((f) => p[f] === sp[f])) return "the price must equal the reserved price";
+        // 実際の費用は、トークン数と予約の料金から出した値ちょうど。予約を超えるのは書ける（上限の検査が挙げる）
+        const want = llmTokenCost(p as unknown as LlmTokens, sp as unknown as LlmPrice);
+        return p.cost === want ? null : `cost must be ${String(want)} (from the tokens and the price)`;
+      }
       case "post.published":
         if (this.isSuspended(agentId, "posts")) return "suspended";
         if (p.intent !== undefined && !(POST_INTENTS as readonly unknown[]).includes(p.intent)) return `intent must be one of ${POST_INTENTS.join(", ")}`;
@@ -651,6 +731,28 @@ export class EventLog {
     return null;
   }
 
+  /**
+   * LLM の agent.run が、元のバッチ（batchSeq）を正しく指しているか（#179）。規則で動くAIと、これまでの記録は batchSeq を持たない。
+   * 指す先は、同じAIの、答えを受け取った（collected）llm.batch.closed。送った本文のハッシュは、その依頼の記録と同じ。
+   * run は、その依頼の取引日の締め（8:30）より前に書く（締めのあとの答えは使わない）
+   */
+  private runBatchProblem(d: Draft, agentId: string, H: ReadonlySet<string>): string | null {
+    const p = d.payload;
+    if (p.batchSeq === undefined) return null;
+    const c = this.events[(p.batchSeq as number) - 1];
+    const cp = c?.payload as Record<string, unknown> | undefined;
+    if (c?.type !== "llm.batch.closed" || cp?.agentId !== agentId || cp.result !== "collected") return "batchSeq must be a collected llm.batch.closed of the same agent";
+    const sp = this.events[(cp.batchSeq as number) - 1]!.payload as Record<string, unknown>;
+    if (p.sentBodyHash !== sp.sentBodyHash) return "sentBodyHash must match the batch submission";
+    // 入力は、依頼を送る前に記録した情報だけ（送った本文に入っていない情報を、判断に使ったと書けないように）
+    if (Array.isArray(p.inputSeqs) && !p.inputSeqs.every((s) => typeof s === "number" && s < (cp.batchSeq as number))) return "inputSeqs must be recorded before the batch submission";
+    try {
+      return tradingDateFor(d.recordedAt, H) === sp.tradingDate ? null : "the run must be recorded before the cutoff of the batch's trading date";
+    } catch {
+      return "recordedAt is outside the adopted holiday table";
+    }
+  }
+
   /** 入力の並びが前のイベントを指し、約定日（あれば）の判断に使ってよい情報だけか（§3.2） */
   private inputProblem(inputs: unknown, tradingDate: string | null): string | null {
     if (!Array.isArray(inputs)) return "inputSeqs must be an array";
@@ -721,6 +823,17 @@ function keysOf(type: EventType, p: Record<string, unknown>): string[] | string 
       return k(["agentId", "tradingDate"], () => [`sheet:${String(id)}:${String(p.tradingDate)}`]);
     case "fills.executed":
       return k(["agentId", "tradingDate"], () => [`fills:${String(id)}:${String(p.tradingDate)}`]);
+    case "agent.run":
+      // バッチの1つの答えから書ける実行は、目的（投稿・注文）ごとに1回だけ
+      if (p.batchSeq === undefined) return [];
+      if (!Number.isSafeInteger(p.batchSeq)) return "invalid batchSeq";
+      return [`llmrun:${String(p.batchSeq)}:${String(p.purpose)}`];
+    case "llm.batch.submitted":
+      return k(["agentId", "tradingDate"], () => [`llmbatch:${String(id)}:${String(p.tradingDate)}`]);
+    case "llm.batch.closed":
+      // 1つの依頼は1回だけ閉じる
+      if (!Number.isSafeInteger(p.batchSeq)) return "invalid batchSeq";
+      return k(["agentId"], () => [`llmclosed:${String(p.batchSeq)}`]);
     case "valuation.recorded":
       return k(["agentId", "date"], () => [`valuation:${String(id)}:${String(p.date)}`]);
     case "corporate_actions.applied": {
@@ -736,6 +849,17 @@ function keysOf(type: EventType, p: Record<string, unknown>): string[] | string 
     default:
       return [];
   }
+}
+
+/**
+ * agent.run の、LLM の費用とトークン数の任意の項目（#179）。規則で動くAIは書かない。
+ * maxCost：費用の見積もり（予約）。cost：実際の費用（分からなければ maxCost）。どちらも0.1円単位。sentBodyHash：提供元に実際に送った本文のハッシュ
+ */
+function llmRunProblem(p: Record<string, unknown>): string | null {
+  if (p.maxCost !== undefined && (!Number.isSafeInteger(p.maxCost) || (p.maxCost as number) < 1)) return "maxCost must be a positive integer";
+  for (const f of ["cost", "inputTokens", "outputTokens"]) if (p[f] !== undefined && !isCount(p[f])) return `${f} must be a non-negative integer`;
+  if (p.sentBodyHash !== undefined && (typeof p.sentBodyHash !== "string" || !SHA256_HEX.test(p.sentBodyHash))) return "sentBodyHash must be a SHA-256 hex digest";
+  return null;
 }
 
 function payloadSeqs(p: Record<string, unknown>): unknown[] {
