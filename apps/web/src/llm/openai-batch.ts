@@ -117,6 +117,26 @@ function requestLine(item: BatchRequestItem): string {
   return JSON.stringify({ custom_id: item.customId, method: "POST", url: OPENAI_BATCH_ENDPOINT, body });
 }
 
+/**
+ * 上げるファイルの中身（1行1件の JSON。行は \n でつなぐ）。upload はこれと同じ文字列を送る（ハッシュを先に出すために公開する）。
+ * 決まりに合わなければ RangeError
+ */
+export function openaiBatchFileBody(items: readonly BatchRequestItem[]): string {
+  if (!Array.isArray(items) || items.length === 0 || items.length > OPENAI_BATCH_MAX_REQUESTS) throw new RangeError(`requests must be 1 to ${OPENAI_BATCH_MAX_REQUESTS}`);
+  const ids = new Set<string>();
+  for (const it of items) {
+    if (!isObj(it) || !isStr(it.customId) || !CUSTOM_ID.test(it.customId) || ids.has(it.customId)) throw new RangeError("customId must be unique and match ^[A-Za-z0-9_-]{1,64}$");
+    ids.add(it.customId);
+  }
+  // 形の確かめ（requestLine）を先に済ませてから、モデルを数える
+  const lines = items.map(requestLine);
+  // 1つのファイルには1つのモデルの依頼しか入れられない
+  if (new Set(items.map((it) => it.params.model)).size !== 1) throw new RangeError("all requests in a batch must use the same model");
+  const body = lines.join("\n");
+  if (new TextEncoder().encode(body).length > OPENAI_BATCH_MAX_BYTES) throw new RangeError("batch input is too large");
+  return body;
+}
+
 /** 上げたファイルの情報 */
 export interface UploadedFile {
   id: string;
@@ -529,19 +549,8 @@ export class OpenAIBatchClient {
    * 送った本文とそのハッシュを、結果と一緒に返す。ファイルの上げは課金されないので、billingUnknown は付けない。
    */
   async upload(items: readonly BatchRequestItem[]): Promise<UploadResult> {
-    if (items.length === 0 || items.length > OPENAI_BATCH_MAX_REQUESTS) throw new RangeError(`requests must be 1 to ${OPENAI_BATCH_MAX_REQUESTS}`);
-    const ids = new Set<string>();
-    for (const it of items) {
-      if (!isObj(it) || !isStr(it.customId) || !CUSTOM_ID.test(it.customId) || ids.has(it.customId)) throw new RangeError("customId must be unique and match ^[A-Za-z0-9_-]{1,64}$");
-      ids.add(it.customId);
-    }
-    // 形の確かめ（requestLine）を先に済ませてから、モデルを数える
-    const lines = items.map(requestLine);
-    // 1つのファイルには1つのモデルの依頼しか入れられない
-    if (new Set(items.map((it) => it.params.model)).size !== 1) throw new RangeError("all requests in a batch must use the same model");
-    const body = lines.join("\n");
+    const body = openaiBatchFileBody(items);
     const bytes = new TextEncoder().encode(body);
-    if (bytes.length > OPENAI_BATCH_MAX_BYTES) throw new RangeError("batch input is too large");
     const sent: SentBody = { body, sha256: await sha256Hex(bytes) };
     const form = new FormData();
     form.append("purpose", "batch");
