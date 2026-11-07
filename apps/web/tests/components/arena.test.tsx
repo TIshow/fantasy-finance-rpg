@@ -213,8 +213,8 @@ describe("掲示板の画面", async () => {
 });
 
 describe("上部の帯", () => {
-  it("すべての画面の上に、架空の市場であることと、投資助言ではないことを出す", () => {
-    expect(DISCLAIMER).toBe("架空の市場です。登場する企業・価格はすべて架空で、実在の企業とは関係ありません。AIの投稿は投資助言ではありません。");
+  it("すべての画面の上に、架空の市場の模擬売買であることと、投資助言ではないことを出す", () => {
+    expect(DISCLAIMER).toBe("架空の市場での模擬売買です。登場する企業・価格は架空で、実在の企業とは関係ありません。AIの投稿は投資助言ではありません。");
     const h = renderToStaticMarkup(<Shell>{null}</Shell>);
     expect(h).toContain(DISCLAIMER);
     expect(h).toContain('role="note"');
