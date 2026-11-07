@@ -9,7 +9,9 @@ import {
   GeminiBatchClient,
   findGeminiBatchByDisplayName,
   geminiApiKeyFromEnv,
+  reconcileGeminiResults,
   toGeminiRequest,
+  type GeminiItemResult,
   type GeminiList,
 } from "../../src/llm/gemini-batch";
 
@@ -134,9 +136,11 @@ describe("Gemini のバッチの口", () => {
     const c = client(f, undefined, "https://proxy.example.test/base/");
     expect(await c.retrieve(ID)).toMatchObject({ ok: true, value: { state: "succeeded", done: true, endedAt: Date.parse("2026-11-09T08:02:11Z") } });
     expect(await c.cancel(ID)).toEqual({ ok: true, value: null });
+    expect((await c.results(ID)).ok).toBe(true);
     expect(seen.map((s) => `${s.init.method} ${s.url}`)).toEqual([
       `GET https://proxy.example.test/base/v1/batches/${ID}`,
       `POST https://proxy.example.test/base/v1/batches/${ID}:cancel`,
+      `GET https://proxy.example.test/base/v1/batches/${ID}`,
     ]);
     expect(seen.every((s) => !s.url.includes(KEY))).toBe(true);
     expect(await client(fakeFetch(() => new Response("{}")).f).cancel(ID)).toEqual({ ok: true, value: null });
@@ -198,6 +202,120 @@ describe("Gemini のバッチの口", () => {
     expect(await listOf({ operations: null, unreachable: null, nextPageToken: null })).toEqual({ ok: true, value: { batches: [], unreadable: [], unreachable: 0, nextPageToken: null } });
   });
 
+  it("結果：text の部分だけをつなぎ（考えた過程の要約は入れない）、トークン数を読む。失敗はコードだけを残し、エラー文を入れない", async () => {
+    const { f } = fakeFetch(() => new Response(recorded("gemini-batch-succeeded.json")));
+    const r = await client(f).results(ID);
+    expect(r.ok && r.value.status).toMatchObject({ state: "succeeded", counts: { requests: 4, succeeded: 2, failed: 2, pending: 0 } });
+    expect(r.ok && r.value.items).toEqual([
+      {
+        customId: "run-a",
+        type: "succeeded",
+        output: '{"post":null,"orders":[]}',
+        respondedModel: "gemini-3.8-flash",
+        finishReason: "STOP",
+        blockReason: null,
+        usage: { inputTokens: 20000, outputTokens: 4500, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      },
+      { customId: "run-b", type: "errored", errorCode: 3 },
+      {
+        customId: "run-c",
+        type: "succeeded",
+        output: "",
+        respondedModel: "gemini-3.8-flash",
+        finishReason: null,
+        blockReason: "SAFETY",
+        usage: { inputTokens: 120, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      },
+      { customId: "run-d", type: "errored" },
+    ]);
+    expect(JSON.stringify(r)).not.toContain("secret");
+  });
+
+  it("結果の置き場所は3通り読む（metadata.output・response.output・response）。終わる前は空", async () => {
+    const op = JSON.parse(recorded("gemini-batch-succeeded.json"));
+    const box = op.response.inlinedResponses;
+    const variants = [
+      { ...op, response: undefined, metadata: { ...op.metadata, output: { inlinedResponses: box } } },
+      { ...op, response: { output: { inlinedResponses: box } } },
+      op,
+    ];
+    for (const v of variants) {
+      const r = await client(fakeFetch(() => new Response(JSON.stringify(v))).f).results(ID);
+      expect(r.ok && r.value.items.map((i) => i.type)).toEqual(["succeeded", "errored", "succeeded", "errored"]);
+    }
+    // 2か所以上にあり、中身が同じなら読む。空 {} と全件、件数違い、中身違いは malformed（黙って結果を失わない）
+    const same = { ...op, metadata: { ...op.metadata, output: { inlinedResponses: box } } };
+    expect(await client(fakeFetch(() => new Response(JSON.stringify(same))).f).results(ID)).toMatchObject({ ok: true, value: { items: { length: 4 } } });
+    const conflicts = [
+      { ...op, metadata: { ...op.metadata, output: { inlinedResponses: {} } } },
+      { ...op, metadata: { ...op.metadata, output: { inlinedResponses: { inlinedResponses: box.inlinedResponses.slice(0, 3) } } } },
+      { ...op, response: { ...op.response, output: { inlinedResponses: { inlinedResponses: [...box.inlinedResponses.slice(0, 3), { error: { code: 5 }, metadata: { key: "run-d" } }] } } } },
+    ];
+    for (const v of conflicts) {
+      expect(await client(fakeFetch(() => new Response(JSON.stringify(v))).f).results(ID)).toEqual({ ok: false, errorCode: "provider_error", reason: "malformed", status: 200 });
+    }
+    const running = { ...op, done: false, metadata: { ...op.metadata, state: "BATCH_STATE_RUNNING" } };
+    expect(await client(fakeFetch(() => new Response(JSON.stringify(running))).f).results(ID)).toMatchObject({ ok: true, value: { status: { state: "running" }, items: [] } });
+    const jobState = { ...op, metadata: { ...op.metadata, state: "JOB_STATE_SUCCEEDED" } };
+    expect(await client(fakeFetch(() => new Response(JSON.stringify(jobState))).f).results(ID)).toMatchObject({ ok: true, value: { status: { state: "succeeded" } } });
+  });
+
+  it("成功で終わったのに結果がない（ファイルで返った場合を含む）・件数が違うなら malformed。取り消し・期限切れで結果がないなら空", async () => {
+    const op = JSON.parse(recorded("gemini-batch-succeeded.json"));
+    const noResults = { ...op, response: { responsesFile: "files/abc" } };
+    expect(await client(fakeFetch(() => new Response(JSON.stringify(noResults))).f).results(ID)).toEqual({ ok: false, errorCode: "provider_error", reason: "malformed", status: 200 });
+    // 成功で終わったのに、結果の件数が依頼の件数（requestCount）と違う
+    for (const list of [[], op.response.inlinedResponses.inlinedResponses.slice(0, 3)]) {
+      const v = { ...op, response: { inlinedResponses: { inlinedResponses: list } } };
+      expect(await client(fakeFetch(() => new Response(JSON.stringify(v))).f).results(ID)).toEqual({ ok: false, errorCode: "provider_error", reason: "malformed", status: 200 });
+    }
+    const emptyBox = { ...op, response: { inlinedResponses: {} } };
+    expect(await client(fakeFetch(() => new Response(JSON.stringify(emptyBox))).f).results(ID)).toEqual({ ok: false, errorCode: "provider_error", reason: "malformed", status: 200 });
+    for (const state of ["BATCH_STATE_CANCELLED", "BATCH_STATE_EXPIRED", "BATCH_STATE_FAILED"]) {
+      const v = { ...op, response: undefined, error: { code: 1, message: "req_secret123" }, metadata: { ...op.metadata, state } };
+      const r = await client(fakeFetch(() => new Response(JSON.stringify(v))).f).results(ID);
+      expect(r).toMatchObject({ ok: true, value: { items: [], status: { errorCode: 1 } } });
+      expect(JSON.stringify(r)).not.toContain("secret");
+    }
+  });
+
+  it("結果の1件が形に合わなければ、その1件だけ malformed にして、ほかは生かす", async () => {
+    const op = JSON.parse(recorded("gemini-batch-succeeded.json"));
+    const good = { error: { code: 1 }, metadata: { key: "ok-1" } };
+    const list = [
+      good,
+      "not an object req_secret123",
+      { response: { candidates: [] }, metadata: { key: "bad-1" } },
+      { error: { code: 1 }, metadata: { key: "a/b" } },
+      { response: { usageMetadata: { promptTokenCount: -1 } }, metadata: { key: "bad-2" } },
+      { response: { candidates: [{}, {}], usageMetadata: { promptTokenCount: 1 } }, metadata: { key: "bad-3" } },
+      { response: { candidates: [{ finishReason: "free text req_secret123" }], usageMetadata: { promptTokenCount: 1 } }, metadata: { key: "bad-4" } },
+      { error: { code: 1 }, response: { usageMetadata: { promptTokenCount: 1 } }, metadata: { key: "bad-5" } },
+      { response: { usageMetadata: { promptTokenCount: 1, thoughtsTokenCount: "12" } }, metadata: { key: "ok-2" } },
+      { error: { code: 0 }, metadata: { key: "bad-6" } },
+      { response: { usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, thoughtsTokenCount: 3, totalTokenCount: 25 } }, metadata: { key: "ok-3" } },
+      { response: { usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 12 } }, metadata: { key: "ok-4" } },
+    ];
+    const v = { ...op, metadata: { ...op.metadata, batchStats: { requestCount: String(list.length) } }, response: { inlinedResponses: { inlinedResponses: list } } };
+    const r = await client(fakeFetch(() => new Response(JSON.stringify(v))).f).results(ID);
+    expect(r.ok && r.value.items).toEqual([
+      { customId: "ok-1", type: "errored", errorCode: 1 },
+      { type: "malformed", index: 2 },
+      { type: "malformed", index: 3, customId: "bad-1" },
+      { type: "malformed", index: 4 },
+      { type: "malformed", index: 5, customId: "bad-2" },
+      { type: "malformed", index: 6, customId: "bad-3" },
+      { type: "malformed", index: 7, customId: "bad-4" },
+      { type: "malformed", index: 8, customId: "bad-5" },
+      { customId: "ok-2", type: "succeeded", output: "", respondedModel: null, finishReason: null, blockReason: null, usage: { inputTokens: 1, outputTokens: 12, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } },
+      { type: "malformed", index: 10, customId: "bad-6" },
+      // 合計が足し算より大きければ、差（25-18=7）を出力に足す。小さければ足さない
+      { customId: "ok-3", type: "succeeded", output: "", respondedModel: null, finishReason: null, blockReason: null, usage: { inputTokens: 10, outputTokens: 15, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } },
+      { customId: "ok-4", type: "succeeded", output: "", respondedModel: null, finishReason: null, blockReason: null, usage: { inputTokens: 10, outputTokens: 5, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } },
+    ]);
+    expect(JSON.stringify(r)).not.toContain("secret");
+  });
+
   it("HTTP の失敗は状態コードだけを返し、本文（エラー文）を入れない", async () => {
     for (const [status, errorCode] of [[429, "rate_limited"], [408, "timeout"], [504, "timeout"], [401, "provider_error"], [503, "rate_limited"], [500, "provider_error"]] as const) {
       const { f } = fakeFetch(() => new Response('{"error":{"code":1,"message":"request-id=req_secret123"}}', { status }));
@@ -212,6 +330,7 @@ describe("Gemini のバッチの口", () => {
     expect(await client(odd.f).retrieve(ID)).toEqual({ ok: false, errorCode: "provider_error", reason: "unexpected" });
     const hang = (async (_: RequestInfo | URL, init?: RequestInit) => abortable(init)) as typeof fetch;
     expect(await client(hang, 5).retrieve(ID)).toEqual({ ok: false, errorCode: "timeout", reason: "timeout" });
+    expect(await client(hang, 5).results(ID)).toEqual({ ok: false, errorCode: "timeout", reason: "timeout" });
   });
 
   it("状態と結果の取り出し（終わったバッチは全文が返る）だけ、待ち時間の上限を別に決められる", async () => {
@@ -223,6 +342,7 @@ describe("Gemini のバッチの口", () => {
       return new Response(recorded("gemini-batch-succeeded.json"));
     }) as typeof fetch;
     const c2 = new GeminiBatchClient({ apiKey: KEY, fetch: slowOk, timeoutMs: 5, resultsTimeoutMs: 60_000 });
+    expect((await c2.results(ID)).ok).toBe(true);
     expect((await c2.retrieve(ID)).ok).toBe(true);
   });
 
@@ -299,8 +419,42 @@ describe("Gemini のバッチの口", () => {
     await expect(c.create(GOOGLE, NAME, [{ customId: "a", messages: [{ role: "user", content: "x".repeat(GEMINI_MAX_BODY_BYTES) }] }])).rejects.toThrow(RangeError);
     await expect(c.retrieve("../../v1/models")).rejects.toThrow(RangeError);
     await expect(c.cancel("a:b")).rejects.toThrow(RangeError);
+    await expect(c.results("")).rejects.toThrow(RangeError);
     expect(seen).toHaveLength(0);
     expect((await c.create(GOOGLE, NAME, [{ customId: "a".repeat(64), messages }])).ok).toBe(true);
+  });
+});
+
+describe("結果の突き合わせ（reconcileGeminiResults）", () => {
+  it("重なった customId と依頼にない customId は信じず、形が合わない1件は数える", () => {
+    const items: GeminiItemResult[] = [
+      { customId: "a", type: "errored" },
+      { customId: "b", type: "errored", errorCode: 3 },
+      { customId: "b", type: "errored" },
+      { customId: "zzz", type: "errored" },
+      { type: "malformed", index: 5, customId: "c" },
+      { type: "malformed", index: 6 },
+    ];
+    const r = reconcileGeminiResults(["a", "b", "c", "d"], items);
+    expect([...r.matched.entries()]).toEqual([["a", { customId: "a", type: "errored" }]]);
+    expect(r.duplicated).toEqual(["b"]);
+    expect(r.missing).toEqual(["c", "d"]);
+    expect(r.unexpected).toBe(1);
+    expect(r.malformed).toBe(2);
+  });
+
+  it("依頼した customId が重なっていれば RangeError", () => {
+    expect(() => reconcileGeminiResults(["a", "a"], [])).toThrow(RangeError);
+  });
+
+  it("同じ customId が、形の合う1件と合わない1件の両方に出たら、重なりとして扱う", () => {
+    const r = reconcileGeminiResults(["a"], [
+      { customId: "a", type: "errored" },
+      { type: "malformed", index: 2, customId: "a" },
+    ]);
+    expect(r.matched.size).toBe(0);
+    expect(r.duplicated).toEqual(["a"]);
+    expect(r.missing).toEqual([]);
   });
 });
 
