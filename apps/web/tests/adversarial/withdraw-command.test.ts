@@ -12,6 +12,7 @@
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isTableOwner, productionSetup, runDaily, verifyDatabase, withdrawPost, withdrawReasonProblem } from "../../scripts/daily-lib";
+import { canonicalize } from "../../src/events/canonical";
 import { verifyChain } from "../../src/events/chain";
 import type { LogEvent } from "../../src/events/types";
 import { holidayTable } from "../../src/holidays";
@@ -49,21 +50,59 @@ async function as<T>(role: string, fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** 2営業日を本番の入口で書く */
-async function setUp() {
-  await resetSchema(pg);
-  await migrate(db);
+/** 2つ目の投稿の元にする判断：最後の日の、投稿しない AI の注文用の run の中身と、1つ目の投稿の掲示板（回し直しても毎回同じ） */
+let secondSource: { payload: Record<string, unknown>; refs: number[]; board: string; output: string } | undefined;
+const SECOND_TEXT = "二つ目の投稿の本文";
+
+/** 3営業日を本番の入口で書く。規則の AI はあまり投稿しないので、最後の日に、投稿しない AI の判断に投稿を1つ足す（2つ目の投稿） */
+function days() {
   const clock = new FakeClock(jst(DAYS[0]!, 7));
   const waitUntil = async (at: number) => void (at > clock.now() && clock.set(at));
-  for (const d of DAYS) await runDaily(d, { db, clock, prepare: productionSetup, holidayTable, waitUntil });
-  const first = (await readAllEvents(db)).find((e) => e.type === "post.published");
-  if (!first) throw new Error("no post.published in the production run");
-  // 規則の AI はあまり投稿しないので、本文の行を持つ2つ目の投稿を、同じ判断の記録を指して足す（検査を通る記録）
+  const run = (d: string) => runDaily(d, { db, clock, prepare: productionSetup, holidayTable, waitUntil });
+  return { clock, waitUntil, run };
+}
+async function setUp() {
+  if (!secondSource) {
+    const { run } = days();
+    // 一度だけ、足さずに最後まで回し、最後の日の判断の入力（どの記録を見たか）を知る
+    await resetSchema(pg);
+    await migrate(db);
+    for (const d of DAYS) await run(d);
+    const events = await readAllEvents(db);
+    const first = events.find((e) => e.type === "post.published");
+    if (!first) throw new Error("no post.published in the production run");
+    const lastDay = events.filter((e) => e.type === "agent.run" && e.recordedAt >= jst(DAYS.at(-1)!, 0));
+    const order = lastDay.find((e) => {
+      const p = e.payload as { agentId: string; purpose: string };
+      return p.purpose === "order" && p.agentId !== (first.payload as { agentId: string }).agentId && !lastDay.some((x) => (x.payload as { agentId: string; purpose: string }).agentId === p.agentId && (x.payload as { purpose: string }).purpose === "post");
+    });
+    if (!order) throw new Error("no order run without a post on the last day");
+    const output = (await PgValueStore.open(db)).body((order.payload as { outputHash: string }).outputHash)?.value;
+    if (output === undefined) throw new Error("the output of the order run is not stored");
+    secondSource = { payload: order.payload as Record<string, unknown>, refs: [...order.refs], board: (first.payload as { board: string }).board, output };
+  }
+  const { clock, waitUntil, run } = days();
+  await resetSchema(pg);
+  await migrate(db);
+  for (const d of DAYS.slice(0, -1)) await run(d);
+  // 最後の日の判断の前に、その AI の投稿用の run（入力は毎日の実行が選ぶものと同じ。出力は投稿を足した判断）と投稿を書いておく。
+  // 毎日の実行は、記録済みの run の出力をその日の判断として読み直し、注文用の run を同じ入力・同じ出力で書いて注文票を確定する。
+  // こうすると、2つ目の投稿は、1つ目の投稿とは別の判断から出た投稿になる（本文を消す関数の「1つの run を指す投稿は1つ」に合う）
   const values = await PgValueStore.open(db);
-  const bodyHash = await values.putBody("二つ目の投稿の本文");
-  const second = await (await PgEventStore.open(db, { values, holidayTables: new Map([[holidayTable.contentSha256, holidayTable]]), clock })).append({ type: "post.published", actor: first.actor, refs: first.refs, payload: { ...(first.payload as Record<string, unknown>), bodyHash } } as never);
+  const store = await PgEventStore.open(db, { values, holidayTables: new Map([[holidayTable.contentSha256, holidayTable]]), clock });
+  const src = secondSource;
+  const agentId = src.payload.agentId as string;
+  const decision = { ...(JSON.parse(src.output) as Record<string, unknown>), post: { board: src.board, text: SECOND_TEXT } };
+  const outputHash = await values.putBody(canonicalize(decision));
+  const postRun = await store.append({ type: "agent.run", actor: "system", refs: src.refs, payload: { ...src.payload, purpose: "post", outputHash, startedAt: clock.now(), finishedAt: clock.now() } } as never);
+  if (!postRun.ok) throw new Error(`could not add the post run: ${postRun.reason}`);
+  const bodyHash = await values.putBody(SECOND_TEXT);
+  const second = await store.append({ type: "post.published", actor: `agent:${agentId}`, refs: [postRun.event.seq], payload: { agentId, board: src.board, bodyHash, citeSeqs: [], runSeq: postRun.event.seq } } as never);
   if (!second.ok) throw new Error(`could not add the second post: ${second.reason}`);
+  await run(DAYS.at(-1)!);
   const events = await readAllEvents(db);
+  const sheet = events.find((e) => e.type === "order_sheet.committed" && (e.payload as { agentId: string }).agentId === agentId && e.seq > second.event.seq);
+  if (!sheet) throw new Error("the order sheet of the second post's decision was not committed");
   const posts = events.filter((e) => e.type === "post.published");
   expect(posts.length).toBeGreaterThanOrEqual(2);
   return { clock, waitUntil, events, posts };
