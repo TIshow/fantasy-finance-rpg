@@ -35,7 +35,10 @@ async function setup(agents = ["alpha", "beta", "gamma"]) {
   return log;
 }
 
-/** 依頼の記録。既定は alpha が 11-09 16:35 に、11-10 の判断を 150（15円）の予約で依頼したもの */
+/**
+ * 依頼の記録。既定は alpha が 11-09 16:35 に、11-10 の判断を 150（15円）の予約で依頼したもの。
+ * 料金は1ドル・5ドル／100万トークン（1,000万トークンあたり 1000・5000 セント）、160円。上限のトークン数（5万・8,000）の費用は 144
+ */
 const submitted = (at: number, extra: Record<string, unknown> = {}): Draft => ({
   type: "llm.batch.submitted",
   recordedAt: at,
@@ -51,16 +54,32 @@ const submitted = (at: number, extra: Record<string, unknown> = {}): Draft => ({
     customId: "alpha-2026-11-10",
     maxCost: 150,
     tradingDate: "2026-11-10",
+    submittedAt: at,
+    yenPerUsd: 160,
+    inputCentsPer10MTok: 1000,
+    outputCentsPer10MTok: 5000,
+    maxInputTokens: 50_000,
+    maxOutputTokens: 8_000,
     ...extra,
   },
 });
 
+/** 閉じた記録。既定は入力2万・出力1,500 で、費用は 44（4.4円）。費用が分からない（costUnknown）なら料金を書かない */
 const closed = (at: number, batchSeq: number, extra: Record<string, unknown> = {}): Draft => ({
   type: "llm.batch.closed",
   recordedAt: at,
   actor: "system",
   refs: [batchSeq],
-  payload: { batchSeq, agentId: "alpha", result: "collected", cost: 40, inputTokens: 20_000, outputTokens: 1_500, ...extra },
+  payload: {
+    batchSeq,
+    agentId: "alpha",
+    result: "collected",
+    cost: 44,
+    inputTokens: 20_000,
+    outputTokens: 1_500,
+    ...("costUnknown" in extra ? {} : { inputCentsPer10MTok: 1000, outputCentsPer10MTok: 5000 }),
+    ...extra,
+  },
 });
 
 const run = (extra: Record<string, unknown>): Draft => ({
@@ -102,6 +121,17 @@ describe("llm.batch.submitted", () => {
     await ok(log, submitted(jst("2026-11-13", 16, 35), { agentId: "beta", tradingDate: "2026-11-16" }));
   });
 
+  it("取引日は依頼を決めた時刻（submittedAt）で決める。8:29:59 に決めて 8:30:01 に記録しても当日のまま。記録は1時間以内", async () => {
+    const log = await setup();
+    const at = jst("2026-11-10", 8, 29) + 59_000;
+    await ok(log, { ...submitted(at, { tradingDate: "2026-11-10" }), recordedAt: at + 2_000 });
+    const late = "submittedAt must be within an hour before recordedAt";
+    expect(await reason(log, { ...submitted(at, { agentId: "beta", tradingDate: "2026-11-10" }), recordedAt: at + 3_600_001 })).toBe(late);
+    expect(await reason(log, { ...submitted(at + 3_000, { agentId: "beta", tradingDate: "2026-11-10" }), recordedAt: at + 2_000 })).toBe(late);
+    expect(await reason(log, submitted(at + 3_000, { agentId: "beta", submittedAt: "x" }))).toBe(late);
+    await ok(log, { ...submitted(at, { agentId: "beta", tradingDate: "2026-11-10" }), recordedAt: at + 3_600_000 });
+  });
+
   it("書けるのは system だけ。登録していない AI、祝日の一覧がないときは書けない", async () => {
     const log = await setup();
     expect(await reason(log, { ...submitted(jst("2026-11-09", 16, 35)), actor: "agent:alpha" })).toBe("llm.batch.submitted must be written by system");
@@ -132,6 +162,15 @@ describe("llm.batch.submitted", () => {
     [{ maxCost: -1 }, "maxCost must be a positive integer"],
     [{ maxCost: "150" }, "maxCost must be a positive integer"],
     [{ tradingDate: "2026-11-31" }, "invalid tradingDate"],
+    [{ yenPerUsd: 0 }, "yenPerUsd must be a positive integer"],
+    [{ yenPerUsd: 160.5 }, "yenPerUsd must be a positive integer"],
+    [{ inputCentsPer10MTok: -1 }, "prices and max token counts must be non-negative integers"],
+    [{ outputCentsPer10MTok: "5000" }, "prices and max token counts must be non-negative integers"],
+    [{ maxInputTokens: 1.5 }, "prices and max token counts must be non-negative integers"],
+    [{ maxOutputTokens: null }, "prices and max token counts must be non-negative integers"],
+    // 予約は上限のトークン数から出した費用（144）以上
+    [{ maxCost: 143 }, "maxCost must be at least 144 (the cost of the max tokens)"],
+    [{ maxInputTokens: Number.MAX_SAFE_INTEGER, inputCentsPer10MTok: 10 ** 9 }, "maxCost must be at least null (the cost of the max tokens)"],
   ];
 
   it("形の合わない中身は、追記でも照合でも同じ理由で断る", async () => {
@@ -182,6 +221,19 @@ describe("llm.batch.closed", () => {
     [{ outputTokens: "1" }, "cost and token counts must be non-negative integers"],
     [{ costUnknown: true, cost: 149 }, "an unknown cost must be the reserved maxCost"],
     [{ costUnknown: false }, "an unknown cost must be the reserved maxCost"],
+    [{ cacheReadInputTokens: -1 }, "cost and token counts must be non-negative integers"],
+    [{ costUnknown: true, cost: 150, inputCentsPer10MTok: 1000 }, "an unknown cost has no price"],
+    // 実際の費用はトークン数と料金から出した値ちょうど（0 にして枠をあけることはできない）
+    [{ cost: 0, inputTokens: 100_000, outputTokens: 50_000 }, "cost must be 560 (from the tokens and the price)"],
+    [{ cost: 43 }, "cost must be 44 (from the tokens and the price)"],
+    [{ cost: 45 }, "cost must be 44 (from the tokens and the price)"],
+    [{ result: "expired", cost: 1, inputTokens: 0, outputTokens: 0 }, "cost must be 0 (from the tokens and the price)"],
+    // キャッシュへの書き込みは入力の2倍：1万トークンで 3.2円 を足す
+    [{ cacheCreationInputTokens: 10_000 }, "cost must be 76 (from the tokens and the price)"],
+    // 料金は予約の料金以下。書かないのは費用が分からないときだけ
+    [{ inputCentsPer10MTok: 1001 }, "the price must be non-negative integers not above the reserved price"],
+    [{ outputCentsPer10MTok: -1 }, "the price must be non-negative integers not above the reserved price"],
+    [{ outputCentsPer10MTok: null }, "the price must be non-negative integers not above the reserved price"],
   ];
 
   it("形の合わない中身は断る。費用が分からないときは予約した費用ちょうど（実費が予約を超えるのは書ける）", async () => {
@@ -193,8 +245,13 @@ describe("llm.batch.closed", () => {
     const log = await setup();
     const s1 = await ok(log, submitted(jst("2026-11-09", 16, 35)));
     const s2 = await ok(log, submitted(jst("2026-11-09", 16, 36), { agentId: "beta" }));
-    await ok(log, closed(jst("2026-11-10", 6, 50), s2.seq, { agentId: "beta", cost: 151 }));
+    // 入力10万・出力1万は 240。予約（150）を超えても書ける（上限の検査が挙げる）
+    await ok(log, closed(jst("2026-11-10", 6, 50), s2.seq, { agentId: "beta", cost: 240, inputTokens: 100_000, outputTokens: 10_000 }));
     await ok(log, closed(jst("2026-11-10", 8, 30), s1.seq, { result: "expired", costUnknown: true, cost: 150, inputTokens: 0, outputTokens: 0 }));
+    // 予約より安い料金（OpenAI の短い文脈など）とキャッシュの欄：(2万×500 ＋ 1万×2×500 ＋ 1,500×5000) セント/1,000万 × 160円 ＝ 4.4円
+    const log2 = await setup();
+    const s3 = await ok(log2, submitted(jst("2026-11-09", 16, 35)));
+    await ok(log2, closed(jst("2026-11-10", 6, 50), s3.seq, { inputCentsPer10MTok: 500, cost: 44, cacheCreationInputTokens: 10_000, cacheReadInputTokens: 0 }));
   });
 
   it("batchId が null の依頼は、failed・予約した費用（costUnknown）でだけ閉じられる", async () => {
@@ -211,6 +268,10 @@ describe("llm.batch.closed", () => {
     const s = await ok(log, submitted(jst("2026-11-09", 16, 35)));
     const c = await ok(log, closed(jst("2026-11-10", 6, 50), s.seq, { costUnknown: true, cost: 150 }));
     expect(await admitForged(log.events, c.seq, { ...(c.payload as object), cost: 100 })).toBe(`seq ${c.seq} (llm.batch.closed): an unknown cost must be the reserved maxCost`);
+    const log2 = await setup();
+    const s2 = await ok(log2, submitted(jst("2026-11-09", 16, 35)));
+    const c2 = await ok(log2, closed(jst("2026-11-10", 6, 50), s2.seq));
+    expect(await admitForged(log2.events, c2.seq, { ...(c2.payload as object), cost: 0 })).toBe(`seq ${c2.seq} (llm.batch.closed): cost must be 44 (from the tokens and the price)`);
   });
 });
 
@@ -235,5 +296,77 @@ describe("agent.run の費用とトークン数（任意の項目）", () => {
     expect(await reason(log, run({ purpose: "chat", maxCost: 0 }))).toBe("purpose must be post or order");
     const e = log.events.at(-1)!;
     expect(await admitForged(log.events, e.seq, { ...(e.payload as object), cost: -5 })).toBe(`seq ${e.seq} (agent.run): cost must be a non-negative integer`);
+  });
+});
+
+describe("送る前の確かめ（EventLog.canAppend）", () => {
+  /** 送る前に作る記録：batchId は null、送った本文のハッシュは仮の値 */
+  const probe = (at: number, extra: Record<string, unknown> = {}) => submitted(at, { batchId: null, sentBodyHash: "0".repeat(64), ...extra });
+
+  it("通るなら null で、何も書かない。そのあと本物の記録を書ける", async () => {
+    const log = await setup();
+    const at = jst("2026-11-09", 16, 35);
+    expect(await log.canAppend(probe(at))).toBeNull();
+    expect(log.events).toHaveLength(4);
+    await ok(log, { ...submitted(at), recordedAt: at + 5_000 });
+  });
+
+  it("送ったあとの記録が断られる場合を、送る前に挙げる：同じ晩・土曜のやり直し（一意キー）、取引日の違い、登録していないAI、祝日の一覧の範囲の外", async () => {
+    const log = await setup();
+    await ok(log, submitted(jst("2026-11-13", 16, 35), { tradingDate: "2026-11-16" }));
+    // 金曜の夕方に依頼したあと、同じ晩と土曜にやり直すと、どちらも月曜の分でキーが重なる
+    expect(await log.canAppend(probe(jst("2026-11-13", 20), { tradingDate: "2026-11-16" }))).toMatch(/duplicate key llmbatch:alpha:2026-11-16/);
+    expect(await log.canAppend(probe(jst("2026-11-14", 10), { tradingDate: "2026-11-16" }))).toMatch(/duplicate key llmbatch:alpha:2026-11-16/);
+    // 8:30 ちょうどに決めたなら、取引日は翌営業日
+    expect(await log.canAppend(probe(jst("2026-11-16", 8, 30), { agentId: "beta", tradingDate: "2026-11-16" }))).toBe("tradingDate must be the next trading date");
+    expect(await log.canAppend(probe(jst("2026-11-16", 8, 30), { agentId: "delta", tradingDate: "2026-11-17" }))).toBe("unknown agent delta");
+    expect(await log.canAppend(probe(jst("2027-12-30", 16, 35), { agentId: "beta", tradingDate: "2028-01-04" }))).toBe("submittedAt is outside the adopted holiday table");
+    expect(log.events).toHaveLength(5);
+  });
+
+  it("注文票は canAppend でも確かめられない（commitSheet を使う）", async () => {
+    const log = await setup();
+    expect(await log.canAppend({ ...probe(0), type: "order_sheet.committed" })).toBe("use commitSheet");
+  });
+});
+
+describe("agent.run の元のバッチ（batchSeq）", () => {
+  /** alpha が 11-09 16:35 に依頼し、11-10 6:50 に受け取ったログ */
+  async function collected(extra: Record<string, unknown> = {}) {
+    const log = await setup();
+    const s = await ok(log, submitted(jst("2026-11-09", 16, 35)));
+    const c = await ok(log, closed(jst("2026-11-10", 6, 50), s.seq, extra));
+    return { log, s, c };
+  }
+  const llmRun = (batchSeq: number, extra: Record<string, unknown> = {}): Draft => ({ ...run({ batchSeq, sentBodyHash: "b".repeat(64), ...extra }), refs: [batchSeq] });
+
+  it("同じAIの、受け取った（collected）閉じた記録を指し、送った本文のハッシュが依頼と同じなら書ける。照合も通る", async () => {
+    const { log, c } = await collected();
+    await ok(log, llmRun(c.seq));
+    // 規則で動くAI（batchSeq なし）とこれまでの記録はそのまま
+    await ok(log, run({}));
+    await ok(log, { ...llmRun(c.seq, { purpose: "post" }), recordedAt: jst("2026-11-10", 8, 29) });
+    await expect(replay(log.events, { get: () => undefined }, CTX)).resolves.toBeDefined();
+  });
+
+  it("指す先・ハッシュ・時刻が合わなければ断る", async () => {
+    const { log, s, c } = await collected();
+    const target = "batchSeq must be a collected llm.batch.closed of the same agent";
+    expect(await reason(log, llmRun(s.seq))).toBe(target);
+    expect(await reason(log, llmRun(2))).toBe(target);
+    expect(await reason(log, llmRun(c.seq, { agentId: "beta" }))).toBe(target);
+    expect(await reason(log, llmRun(c.seq, { sentBodyHash: "c".repeat(64) }))).toBe("sentBodyHash must match the batch submission");
+    expect(await reason(log, llmRun(c.seq, { sentBodyHash: undefined }))).toBe("sentBodyHash must match the batch submission");
+    expect(await reason(log, { ...llmRun(c.seq), recordedAt: jst("2026-11-10", 8, 30) })).toBe("the run must be recorded before the cutoff of the batch's trading date");
+    expect(await reason(log, { ...llmRun(c.seq), refs: [] })).toBe(`payload refers to ${c.seq} outside refs`);
+    const e = await ok(log, llmRun(c.seq));
+    expect(await admitForged(log.events, e.seq, { ...(e.payload as object), sentBodyHash: "d".repeat(64) })).toBe(`seq ${e.seq} (agent.run): sentBodyHash must match the batch submission`);
+  });
+
+  it("打ち切った（expired）・失敗した（failed）バッチは指せない", async () => {
+    for (const result of ["expired", "failed"]) {
+      const { log, c } = await collected({ result });
+      expect(await reason(log, llmRun(c.seq)), result).toBe("batchSeq must be a collected llm.batch.closed of the same agent");
+    }
   });
 });
