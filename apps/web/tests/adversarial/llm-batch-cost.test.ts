@@ -40,19 +40,27 @@ async function setup(agents = ["alpha", "beta", "gamma"]) {
   return log;
 }
 
+/** 1トークン＝0.1円ちょうどになる料金（1ドル160円で、1,000万トークンあたり625,000セント）。費用とトークン数を同じ数にできる */
+const PRICE = { inputCentsPer10MTok: 625_000, outputCentsPer10MTok: 625_000 };
 const sub = (at: number, agentId: string, tradingDate: string, maxCost: number, extra: Record<string, unknown> = {}): Draft => ({
   type: "llm.batch.submitted",
   recordedAt: at,
   actor: "system",
   refs: [],
-  payload: { agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: "b".repeat(64), batchId: `batch_${agentId}_${tradingDate}`, customId: `${agentId}-${tradingDate}`, maxCost, tradingDate, ...extra },
+  payload: {
+    agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: "b".repeat(64), batchId: `batch_${agentId}_${tradingDate}`, customId: `${agentId}-${tradingDate}`, maxCost, tradingDate,
+    submittedAt: at, yenPerUsd: 160, ...PRICE, maxInputTokens: 0, maxOutputTokens: 0, ...extra,
+  },
 });
 const close = (at: number, s: LogEvent, cost: number, extra: Record<string, unknown> = {}): Draft => ({
   type: "llm.batch.closed",
   recordedAt: at,
   actor: "system",
   refs: [s.seq],
-  payload: { batchSeq: s.seq, agentId: (s.payload as { agentId: string }).agentId, result: "collected", cost, inputTokens: 10, outputTokens: 10, ...extra },
+  payload: {
+    batchSeq: s.seq, agentId: (s.payload as { agentId: string }).agentId, result: "collected", cost, inputTokens: 0, outputTokens: cost,
+    ...(extra.costUnknown === true ? {} : PRICE), ...extra,
+  },
 });
 const run = (at: number, extra: Record<string, unknown> = {}): Draft => ({
   type: "agent.run",
@@ -136,7 +144,7 @@ describe("上限（1日1,000＝100円）を超えた使い方を、記録から�
     const forged = await forge([...d.slice(0, -1), { ...d.at(-1)!, payload: { ...d.at(-1)!.payload, cost: 0 } }]);
     expect(await admitAll(forged)).toMatch(/an unknown cost must be the reserved maxCost/);
     // costUnknown を消して費用を下げると、元の記録とハッシュが合わない（作り直した連鎖でも、照合は中身の検査を先にする）
-    const dropped = await forge([...d.slice(0, -1), { ...d.at(-1)!, payload: { batchSeq: a.seq, agentId: "alpha", result: "expired", cost: 0, inputTokens: 10, outputTokens: 10 } }]);
+    const dropped = await forge([...d.slice(0, -1), { ...d.at(-1)!, payload: { batchSeq: a.seq, agentId: "alpha", result: "expired", cost: 0, inputTokens: 0, outputTokens: 0, ...PRICE } }]);
     expect(await admitAll(dropped)).toBeNull(); // 中身として正しい記録なので照合は通る。費用の正しさは記録からは分からない（下の報告を参照）
     expect(llmCostUsed(dropped, DAY)).toBe(0);
   });
@@ -147,7 +155,7 @@ describe("上限（1日1,000＝100円）を超えた使い方を、記録から�
     await ok(log, close(jst("2026-11-10", 6, 50), a, 900));
     expect(await reason(log, close(jst("2026-11-10", 7, 20), a, 0, { result: "expired" }))).toMatch(new RegExp(`duplicate key llmclosed:${a.seq}$`));
     // 一意キーを付けずに2つ目を足した保存済みログ（DBに書ける者の改ざん）は、照合でキーを作り直すので落ちる
-    const second = { ...draftOf(log.events.at(-1)!), recordedAt: jst("2026-11-10", 7, 20), keys: [], payload: { ...(log.events.at(-1)!.payload as object), cost: 0 } };
+    const second = { ...draftOf(log.events.at(-1)!), recordedAt: jst("2026-11-10", 7, 20), keys: [], payload: { ...(log.events.at(-1)!.payload as object), cost: 0, outputTokens: 0 } };
     const forged = await forge([...log.events.map(draftOf), second]);
     expect(await admitAll(forged)).toMatch(new RegExp(`duplicate key llmclosed:${a.seq}$`));
     const withKey = await forge([...log.events.map(draftOf), { ...second, keys: [`llmclosed:${a.seq}`] }]);
@@ -268,7 +276,7 @@ describe("知らない項目と、オブジェクトの特別な名前", () => {
   it("依頼の中身の項目が欠けていれば断る", async () => {
     const log = await setup();
     const base = sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100).payload;
-    for (const k of ["provider", "modelId", "promptVersion", "sentBodyHash", "batchId", "customId", "maxCost"]) {
+    for (const k of ["provider", "modelId", "promptVersion", "sentBodyHash", "batchId", "customId", "maxCost", "submittedAt", "yenPerUsd", "inputCentsPer10MTok", "outputCentsPer10MTok", "maxInputTokens", "maxOutputTokens"]) {
       const payload = { ...base };
       delete payload[k];
       expect(await reason(log, { ...sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100), payload }), k).not.toBe("ok");
