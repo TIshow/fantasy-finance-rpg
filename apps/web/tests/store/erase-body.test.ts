@@ -15,7 +15,7 @@ let pg: PGlite;
 let db: SqlDb;
 beforeAll(async () => {
   ({ pg, db } = await openPglite());
-  await pg.exec("CREATE ROLE ffr_app");
+  await pg.exec("CREATE ROLE ffr_app; CREATE ROLE ffr_reader");
 }, 60_000);
 afterAll(() => db.close());
 
@@ -23,6 +23,14 @@ const g = await buildGoldenLog(20261104);
 const hex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 const posts = g.events.filter((e) => e.type === "post.published");
 const bodyOf = (seq: number) => (g.events[seq - 1]!.payload as { bodyHash: string }).bodyHash;
+/** 投稿の元になった判断（agent.run）の出力のハッシュと、同じ判断（同じ AI・同じ入力）の注文の出力のハッシュ */
+const runOf = (seq: number) => g.events[(g.events[seq - 1]!.payload as { runSeq: number }).runSeq - 1]!;
+const outputOf = (seq: number) => (runOf(seq).payload as { outputHash: string }).outputHash;
+const orderOutputOf = (seq: number) => {
+  const r = runOf(seq).payload as { agentId: string; inputSeqs: number[] };
+  const order = g.events.find((e) => e.type === "agent.run" && (e.payload as { purpose: string }).purpose === "order" && (e.payload as { agentId: string }).agentId === r.agentId && JSON.stringify((e.payload as { inputSeqs: number[] }).inputSeqs) === JSON.stringify(r.inputSeqs))!;
+  return (order.payload as { outputHash: string }).outputHash;
+};
 const has = async (hash: string) => (await db.query("SELECT 1 FROM stored_values WHERE hash = $1", [hash])).rows.length === 1;
 const erase = async (seq: number) => (await db.query<{ h: string | null }>("SELECT erase_withdrawn_body($1) AS h", [seq])).rows[0]!.h;
 
@@ -70,6 +78,9 @@ describe("erase_withdrawn_body", () => {
     const values = (await db.query<{ n: number }>("SELECT count(*)::int AS n FROM stored_values")).rows[0]!.n;
     expect(await erase(erased)).toBe(bodyOf(erased));
     expect(await has(bodyOf(erased))).toBe(false);
+    // 固定データの判断の出力（本文と同じ文）は、毎日の実行の書く形（出力の JSON の post が投稿と同じ）でないので残る（not_daily_run。#179）
+    expect(await has(outputOf(erased))).toBe(true);
+    expect(await has(orderOutputOf(erased))).toBe(true);
     expect((await db.query<{ n: number }>("SELECT count(*)::int AS n FROM stored_values")).rows[0]!.n).toBe(values - 1);
     // イベントは1行も変わらず、本文のハッシュはイベントに残る
     const after = await readAllEvents(db);
@@ -205,13 +216,14 @@ describe("erase_withdrawn_body", () => {
     const problems = async () => (await db.query<{ seq: number; problem: string }>(mismatch)).rows.map((r) => [Number(r.seq), r.problem]);
     const rows = (await db.query<{ seq: number; actor: string; reason: string }>(list)).rows;
     expect(rows.map((r) => [Number(r.seq), r.actor, r.reason])).toEqual([[erased, "operator:owner", "権利者からの申し出"]]);
-    expect(await problems()).toEqual([[erased, "not_erased"]]);
+    expect(await problems()).toEqual([[erased, "not_daily_run"], [erased, "not_erased"], [erased, "output_not_erased"]]);
     await db.query(run.replace("<seq>", String(erased)));
     expect((await db.query(list)).rows).toEqual([]);
-    expect(await problems()).toEqual([]);
+    // 固定データの判断は毎日の実行の書く形でないので、元の run の出力は残り、食い違いに出続ける
+    expect(await problems()).toEqual([[erased, "output_unverifiable"]]);
     // 本文がないのに、最後の記録が真でない（持ち主がトリガを外して消した場合など）
     await pg.exec("ALTER TABLE stored_values DISABLE TRIGGER USER");
     await db.query("DELETE FROM stored_values WHERE hash = $1", [bodyOf(kept)]);
-    expect(await problems()).toEqual([[kept, "missing"]]);
+    expect(await problems()).toEqual([[erased, "output_unverifiable"], [kept, "missing"]]);
   }, 60_000);
 });
