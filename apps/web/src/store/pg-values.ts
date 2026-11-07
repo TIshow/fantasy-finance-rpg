@@ -5,7 +5,8 @@
 import { canonicalize } from "../events/canonical";
 import { bodyHash, SALT_BYTES } from "../events/hash";
 import type { ValueStore } from "../events/replay";
-import { hasNul, type SqlRunner } from "./sql";
+import type { SqlRunner } from "./sql";
+import { hasNul } from "./text";
 
 export type Salted<T> = { salt: Uint8Array; value: T };
 
