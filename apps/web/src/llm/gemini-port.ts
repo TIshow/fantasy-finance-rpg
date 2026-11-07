@@ -5,7 +5,7 @@
 import type { LlmBatchPrice } from "../contracts";
 import { BatchPort, type BatchDriver, type BatchOutcome, type BatchPortOptions } from "./batch-port";
 import { GEMINI_PROVIDER, GeminiBatchClient, findGeminiBatchByDisplayName, geminiApiKeyFromEnv, geminiBatchBody, reconcileGeminiResults } from "./gemini-batch";
-import { geminiBatchPrice } from "./gemini-pricing";
+import { GEMINI_MAX_OUTPUT_TOKENS, geminiBatchPrice } from "./gemini-pricing";
 
 /**
  * 予約の料金。依頼を決めた時刻（submittedAt）で一度だけ選ぶ（2027-01-01 からの値上げ。作ってから48時間のうちに切り替わるなら高いほう）。
@@ -23,6 +23,8 @@ export function geminiBatchDriver(client: Client): BatchDriver {
   return {
     provider: GEMINI_PROVIDER,
     settingKeys: ["max_tokens", "thinking_level"],
+    // 考えた過程が max_tokens に入るか資料で言えないので、出力はモデルの上限まで予約する（送る max_tokens は変えない）
+    minReservedOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
     priceAt: geminiReservePrice,
     prepare(r, customId) {
       const items = [{ customId, messages: r.messages }];
@@ -54,13 +56,13 @@ export function geminiBatchDriver(client: Client): BatchDriver {
       return (await client.cancel(batchId)).ok;
     },
     /**
-     * customId の名前のバッチを、一覧の全ページから探す（findGeminiBatchByDisplayName）。since を作成を頼んだ時刻として渡すので、
-     * since から1時間たつまでは、見つからなくても unknown。
+     * customId の名前のバッチを、一覧の全ページから探す（findGeminiBatchByDisplayName）。requestedAt（前の実行が送ったかもしれない
+     * 一番遅い時刻）から1時間たつまでは、見つからなくても unknown。
      * 名前の読めない項目（AI Studio で付けた空白入りの名前など）が一覧に残っていると、いつも unknown になる。
      * そのときは運用者が AI Studio でその項目を確かめ、要らなければ消す（自動ではやり直さない）
      */
     async lookup(q) {
-      const r = await findGeminiBatchByDisplayName(client, q.customId, { requestedAt: q.since, now: q.now });
+      const r = await findGeminiBatchByDisplayName(client, q.customId, { requestedAt: q.requestedAt, now: q.now });
       switch (r.kind) {
         case "notFound":
           return { kind: "none" };

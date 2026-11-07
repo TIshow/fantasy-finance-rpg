@@ -26,14 +26,22 @@ export const GEMINI_PRICE_SWITCH_AT = Date.parse("2026-12-31T10:00:00Z");
 export const GEMINI_BATCH_MAX_LIFETIME_MS = 48 * 60 * 60 * 1000;
 
 /**
+ * Gemini 3.8 Flash の出力の上限（考えた過程を含む）。予約の出力のトークン数は、これ以上にする（gemini-port.ts の minReservedOutputTokens）。
+ * 根拠（どちらも 2026-11-08 確認）：https://ai.google.dev/gemini-api/docs/whats-new-gemini-3.8 に「64k max output tokens」、
+ * https://ai.google.dev/gemini-api/docs/thinking#token-limits に「出力の上限は考えた過程のトークンを含む」。
+ * 考えた過程の量を決める設定は thinking_level だけで（thinking_budget は 3.8 では使えない）、トークン数の上限にはならない。
+ * 「64k」は、大きいほうの 65,536 と読む
+ */
+export const GEMINI_MAX_OUTPUT_TOKENS = 65_536;
+
+/**
  * Gemini API（Developer API。API キーで使う口）のバッチの料金。有料の枠だけ（無料の枠ではバッチを使えない）。
  * 出典：https://ai.google.dev/gemini-api/docs/pricing （2026-11-07 確認）。
  * Gemini 3.8 Flash のバッチ：入力 0.375ドル・出力 1.875ドル／100万トークン（2026-12-31 まで）、
  * 2027-01-01 から入力 0.75ドル・出力 3.75ドル。出力には考えた過程のトークン（thinking）を含む。
- * 出力の上限（maxOutputTokens）も考えた過程を含む：考えた過程の資料（https://ai.google.dev/gemini-api/docs/thinking#token-limits 。
- * 2026-11-07 確認）に「max_output_tokens は、考えた過程のトークンを含めた、応答が生成できるトークン数の上限」とある。
- * ただしその節が欄の説明として指しているのは Interactions API の max_output_tokens で、この口が使う generateContent の
- * maxOutputTokens も同じだとは、資料に明記されていない（本物の API で確かめるまでは未確認）。
+ * この口が使う generateContent の maxOutputTokens が考えた過程を含むかは、資料に明記されていない
+ * （https://ai.google.dev/api/generate-content は「1つの候補に含めるトークン数の上限」。2026-11-08 確認）。
+ * そこで予約は max_tokens ではなく、モデルの出力の上限（GEMINI_MAX_OUTPUT_TOKENS）で見込む。
  * キャッシュの単価（入力の1割）は使わず、キャッシュに当たった分も入力の単価で数える（高めに数える側）。
  * 料金が変わったら、ここを PR で直す。ここにないモデルは費用を出せない（呼び出し側が maxCost を費用とする）。
  */
@@ -63,7 +71,8 @@ export function geminiBatchPrice(modelId: string, batchCreatedAt: number): Reado
  * Gemini から返ったトークン数を、cost.ts の TokenUsage に移す。
  * - 入力：promptTokenCount（キャッシュに当たった分を含む）＋ toolUsePromptTokenCount
  * - 出力：candidatesTokenCount ＋ thoughtsTokenCount（考えた過程も出力の単価で課金される）。
- *   gemini-batch.ts は、totalTokenCount がこれらの足し算より大きいとき、その差を candidatesTokens に足して渡す
+ *   gemini-batch.ts は、totalTokenCount がこれらの足し算より大きいとき、その差を candidatesTokens に足して渡す。
+ *   ツールもキャッシュも使わないので、入力の外のトークンはすべてモデルが生成したもので、合わせて GEMINI_MAX_OUTPUT_TOKENS 以下
  * - キャッシュの欄は 0（キャッシュに当たった分も入力の単価で数える）
  */
 export function geminiTokenUsage(u: { promptTokens: number; toolUsePromptTokens: number; candidatesTokens: number; thoughtsTokens: number }): TokenUsage {

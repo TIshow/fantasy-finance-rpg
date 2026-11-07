@@ -160,6 +160,8 @@ export interface BatchDriver {
   readonly settingKeys: readonly string[];
   /** 費用の式が入力の1トークンに掛ける倍率の最大（キャッシュへの書き込みを入力の欄と書き込みの欄の両方に入れるなら3）。既定は1 */
   readonly inputCostFactor?: number;
+  /** settings.max_tokens にかかわらず、予約に見込む出力のトークン数の下限（考えた過程が max_tokens に入ると資料で言えない提供元） */
+  readonly minReservedOutputTokens?: number;
   /** submittedAt の時点の料金（1,000万トークンあたりのセント）。料金表にないモデルは undefined */
   priceAt(modelId: string, submittedAt: number): LlmBatchPrice | undefined;
   /** 送る本文を決まった形で作る。決まりに合わなければ RangeError */
@@ -186,7 +188,7 @@ const UNKNOWN_PENDING: BatchOutcome = { kind: "costUnknown", result: "expired", 
 /**
  * 契約 LlmBatchPort の実装。決まりは契約のとおり。ほかに：
  * - reservePrice は、提供元の料金表の submittedAt の時点の料金と、この口の1ドルあたりの円に、ちょうど一致すること
- * - maxOutputTokens は settings.max_tokens 以上、maxInputTokens は送る本文の UTF-8 のバイト数×driver.inputCostFactor 以上であること
+ * - maxOutputTokens は settings.max_tokens と driver.minReservedOutputTokens の大きいほう以上、maxInputTokens は送る本文の UTF-8 のバイト数×driver.inputCostFactor 以上であること
  *   （トークン数はバイト数を超えないので、予約が上限として働く）。外れたら RangeError
  * - 記録の読み出しが失敗したら、送らずに budget_exceeded を返す（上限を確かめられないので、送らない側に倒す）
  * - 受け取り・打ち切りで読めなかったときは pending（打ち切りでは、課金が分からないとして maxCost）
@@ -322,7 +324,7 @@ export class BatchPort implements LlmBatchPort {
       throw new RangeError("reservePrice must be the provider's price at submittedAt");
     }
     if (!isCount(r.maxInputTokens) || !isCount(r.maxOutputTokens)) throw new RangeError("maxInputTokens and maxOutputTokens must be non-negative safe integers");
-    if (!(r.maxOutputTokens >= Number(m.settings.max_tokens))) throw new RangeError("maxOutputTokens must be at least settings.max_tokens");
+    if (!(r.maxOutputTokens >= Math.max(Number(m.settings.max_tokens), this.#driver.minReservedOutputTokens ?? 0))) throw new RangeError("maxOutputTokens must be at least settings.max_tokens and the provider's minimum");
     const bound = llmTokenCost({ inputTokens: r.maxInputTokens, outputTokens: r.maxOutputTokens }, rp);
     if (bound === null || r.maxCost < bound) throw new RangeError("maxCost must be at least the cost of maxInputTokens and maxOutputTokens");
   }
