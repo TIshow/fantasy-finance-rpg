@@ -1,0 +1,11 @@
+{
+  "id": "file-6F2ksmvXxt4VdoqmHRw6kL",
+  "object": "file",
+  "bytes": 412,
+  "created_at": 1762673700,
+  "expires_at": 1765265700,
+  "filename": "batch.jsonl",
+  "purpose": "batch",
+  "status": "processed",
+  "status_details": null
+}
