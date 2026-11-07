@@ -1,6 +1,6 @@
 // LLM の費用の上限を、記録だけから確かめる（#179）。
 // その日の使用済み ＝ 閉じたバッチ（llm.batch.closed）の実際の費用 ＋ 閉じていないバッチ（llm.batch.submitted だけ）の予約。
-// 全提供元の合計。暦日は、依頼の記録（llm.batch.submitted）の recordedAt の日本時間の日付（閉じた日ではない）。
+// 全提供元の合計。暦日は、依頼の記録（llm.batch.submitted）の submittedAt（依頼を決めた時刻）の日本時間の日付（記録した日・閉じた日ではない）。
 // 照合（replay）を通ったログに使う。中身の形は追記の処理（append.ts）が確かめている。
 import type { Deciyen } from "../ledger/types";
 import type { LogEvent } from "./types";
@@ -12,6 +12,46 @@ type Rec = Pick<LogEvent, "seq" | "type" | "recordedAt" | "payload">;
 type Payload = Record<string, unknown>;
 
 const JST_MS = 9 * 3_600_000;
+
+/**
+ * 換算に使う料金。単価は1,000万トークンあたりのセント（1ドル＝100セント）。Gemini の半セント（37.5セント／100万トークン）も整数で表せる。
+ * yenPerUsd は1ドルあたりの円（1以上の整数。既定は160。#179 の lead の決定）
+ */
+export interface LlmPrice {
+  yenPerUsd: number;
+  inputCentsPer10MTok: number;
+  outputCentsPer10MTok: number;
+}
+
+/** 費用に数えるトークン数。キャッシュの欄はなければ 0 */
+export interface LlmTokens {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+}
+
+/**
+ * トークン数から費用（0.1円単位。端数は切り上げ）を出す。安全な整数に収まらなければ null。
+ * 式は src/llm/cost.ts の batchCostDeciyen と同じ（キャッシュへの書き込みは入力の2倍、読み出しは入力と同じ単価）。
+ * src/events は src/llm を import できない（純関数の決まりと担当のパス）ので、ここに同じ式をもう一度書く。
+ * 単価を100万トークンあたりから1,000万トークンあたりにした分、分母を10倍にしている。
+ * 費用（0.1円）＝ 切り上げ(Σ(トークン数 × セント/1,000万トークン) × 円/ドル × 10 ÷ (100 × 1,000万))
+ * 引数は 0 以上の安全な整数であること（呼び出し側が確かめる）
+ */
+export function llmTokenCost(t: LlmTokens, price: LlmPrice): Deciyen | null {
+  const B = BigInt;
+  const input = B(price.inputCentsPer10MTok);
+  const centTokens =
+    B(t.inputTokens) * input +
+    B(t.cacheCreationInputTokens ?? 0) * input * 2n +
+    B(t.cacheReadInputTokens ?? 0) * input +
+    B(t.outputTokens) * B(price.outputCentsPer10MTok);
+  const numerator = centTokens * B(price.yenPerUsd) * 10n;
+  const denominator = 100n * 10_000_000n;
+  const cost = (numerator + denominator - 1n) / denominator;
+  return cost > B(Number.MAX_SAFE_INTEGER) ? null : Number(cost);
+}
 
 /** UNIXミリ秒の日本時間の日付（YYYY-MM-DD） */
 export function jstDayOf(ms: number): string {
@@ -30,7 +70,7 @@ function batchesOf(events: readonly Rec[]): Batch[] {
   const bySeq = new Map<number, Batch>();
   for (const e of events) {
     const p = e.payload as Payload;
-    if (e.type === "llm.batch.submitted") bySeq.set(e.seq, { seq: e.seq, day: jstDayOf(e.recordedAt), maxCost: p.maxCost as number, closed: null });
+    if (e.type === "llm.batch.submitted") bySeq.set(e.seq, { seq: e.seq, day: jstDayOf(p.submittedAt as number), maxCost: p.maxCost as number, closed: null });
     if (e.type === "llm.batch.closed") {
       const b = bySeq.get(p.batchSeq as number);
       if (b && !b.closed) b.closed = { seq: e.seq, cost: p.cost as number };
@@ -107,6 +147,6 @@ export function llmTicketOf(e: Rec): LlmTicketFields | null {
     customId: p.customId as string,
     maxCost: p.maxCost as number,
     tradingDate: p.tradingDate as string,
-    submittedAt: e.recordedAt,
+    submittedAt: p.submittedAt as number,
   };
 }

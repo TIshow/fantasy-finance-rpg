@@ -1,9 +1,11 @@
 // LLM の費用の上限を、記録だけから確かめる検査（#179）。
-// 使用済み ＝ 閉じたバッチの実際の費用 ＋ 閉じていないバッチの予約。暦日は依頼の記録の時刻（日本時間）。全提供元の合計。
+// 使用済み ＝ 閉じたバッチの実際の費用 ＋ 閉じていないバッチの予約。暦日は依頼を決めた時刻（submittedAt。日本時間）。全提供元の合計。
 import { describe, expect, it } from "vitest";
 import type { LlmBatchTicket } from "../../src/contracts";
-import { jstDayOf, LLM_DAILY_COST_LIMIT, llmCostProblems, llmCostUsed, llmTicketOf, openLlmBatches } from "../../src/events/llm-cost";
+import { jstDayOf, LLM_DAILY_COST_LIMIT, llmCostProblems, llmCostUsed, llmTicketOf, llmTokenCost, openLlmBatches } from "../../src/events/llm-cost";
 import type { LogEvent } from "../../src/events/types";
+import { batchCostDeciyen } from "../../src/llm/cost";
+import { geminiBatchCostDeciyen } from "../../src/llm/gemini-pricing";
 
 type Rec = Pick<LogEvent, "seq" | "type" | "recordedAt" | "payload">;
 
@@ -15,7 +17,7 @@ function log(...items: (["sub", number, number, string?] | ["close", number, num
     const seq = i + 1;
     if (it[0] === "sub") {
       const [, at, maxCost, agentId = `a${seq}`] = it;
-      return { seq, type: "llm.batch.submitted", recordedAt: at, payload: { agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: "b".repeat(64), batchId: `batch_${seq}`, customId: `c${seq}`, maxCost, tradingDate: "2026-11-10" } };
+      return { seq, type: "llm.batch.submitted", recordedAt: at, payload: { agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: "b".repeat(64), batchId: `batch_${seq}`, customId: `c${seq}`, maxCost, tradingDate: "2026-11-10", submittedAt: at } };
     }
     const [, at, batchSeq, cost] = it;
     return { seq, type: "llm.batch.closed", recordedAt: at, payload: { batchSeq, agentId: "x", result: "collected", cost, inputTokens: 1, outputTokens: 1 } };
@@ -49,6 +51,13 @@ describe("llmCostUsed", () => {
   it("実費が予約を超えても切り捨てない。費用が分からず予約を使った記録は予約のまま", () => {
     expect(llmCostUsed(log(["sub", at(16, 35), 150], ["close", at(17), 1, 180]), D)).toBe(180);
     expect(llmCostUsed(log(["sub", at(16, 35), 150], ["close", at(17), 1, 150]), D)).toBe(150);
+  });
+
+  it("暦日は記録した時刻ではなく、依頼を決めた時刻（submittedAt）で決める", () => {
+    const [sub] = log(["sub", jst(D, 23, 59), 150]);
+    const events = [{ ...sub!, recordedAt: jst("2026-11-10", 0, 10) }];
+    expect(llmCostUsed(events, D)).toBe(150);
+    expect(llmCostUsed(events, "2026-11-10")).toBe(0);
   });
 
   it("記録がなければ 0", () => {
@@ -102,5 +111,35 @@ describe("openLlmBatches と llmTicketOf", () => {
     const [sub, close] = log(["sub", at(16, 35), 150], ["close", at(16, 36), 1, 150]);
     expect(llmTicketOf({ ...sub!, payload: { ...(sub!.payload as object), batchId: null } })).toBeNull();
     expect(() => llmTicketOf(close!)).toThrow(RangeError);
+  });
+});
+
+describe("llmTokenCost", () => {
+  it("src/llm の換算（Anthropic・OpenAI の batchCostDeciyen、Gemini の geminiBatchCostDeciyen）と同じ値になる", () => {
+    // 疑似乱数（線形合同法）で、トークン数と料金を決まった並びで作る
+    let x = 12345;
+    const next = (n: number) => {
+      x = (x * 1103515245 + 12345) % 2147483648;
+      return x % n;
+    };
+    for (let i = 0; i < 500; i++) {
+      const t = { inputTokens: next(400_000), outputTokens: next(70_000), cacheCreationInputTokens: next(3) === 0 ? next(50_000) : 0, cacheReadInputTokens: next(3) === 0 ? next(50_000) : 0 };
+      const cents = { inputCentsPerMTok: next(1_000), outputCentsPerMTok: next(5_000) };
+      const yen = 100 + next(100);
+      expect(llmTokenCost(t, { yenPerUsd: yen, inputCentsPer10MTok: cents.inputCentsPerMTok * 10, outputCentsPer10MTok: cents.outputCentsPerMTok * 10 })).toBe(batchCostDeciyen(t, cents, yen));
+      const plain = { ...t, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
+      // Gemini 3.8 Flash の 2026 年の単価（1,000万トークンあたり 375・1875 セント）
+      expect(llmTokenCost(plain, { yenPerUsd: yen, inputCentsPer10MTok: 375, outputCentsPer10MTok: 1875 })).toBe(geminiBatchCostDeciyen(plain, "gemini-3.8-flash", Date.parse("2026-11-09T07:35:00Z"), yen));
+    }
+  });
+
+  it("手で計算した値：入力2万・出力1,500、1ドル・5ドル／100万トークン、160円 → 4.4円（44）。端数は切り上げ。キャッシュの欄は省ける", () => {
+    const price = { yenPerUsd: 160, inputCentsPer10MTok: 1000, outputCentsPer10MTok: 5000 };
+    expect(llmTokenCost({ inputTokens: 20_000, outputTokens: 1_500 }, price)).toBe(44);
+    expect(llmTokenCost({ inputTokens: 1, outputTokens: 0 }, price)).toBe(1);
+    expect(llmTokenCost({ inputTokens: 0, outputTokens: 0 }, price)).toBe(0);
+    // 書き込みは入力の2倍：1万トークン × 2 × 1ドル/100万 × 160円 ＝ 3.2円
+    expect(llmTokenCost({ inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 10_000 }, price)).toBe(32);
+    expect(llmTokenCost({ inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: 0 }, { ...price, inputCentsPer10MTok: 10 ** 9 })).toBeNull();
   });
 });

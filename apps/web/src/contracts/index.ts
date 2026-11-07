@@ -4,9 +4,11 @@ export type { CommitResult, DraftInput, EventReader, EventStore, OrderlessEventS
 export type { CloseObservation, MarketDataPort, MarketView, OpenObservation, PriceObservation } from "./market-data";
 export type {
   LlmBatchClosed,
+  LlmBatchPrice,
   LlmBatchPort,
   LlmBatchRequest,
   LlmBatchTicket,
+  LlmBatchUsage,
   LlmCollectResult,
   LlmErrorCode,
   LlmMessage,

@@ -120,10 +120,29 @@ export interface LlmPort {
 // 予約と依頼の控えはイベント（llm.batch.submitted・llm.batch.closed。EVENT_LOG §3.2）に残し、どの実行からも見えるようにする。
 // この口はイベントを書かない。書くのは呼び出し側（runner）で、返した値をそのまま記録に入れる。
 
-/** バッチに依頼する1件。判断を使う取引日を足す（記録の一意キー llmbatch:<agentId>:<tradingDate> になる） */
+/** 料金。単価は1,000万トークンあたりのセント（整数。Gemini の半セントも表せる）。換算は src/events/llm-cost.ts の llmTokenCost */
+export interface LlmBatchPrice {
+  inputCentsPer10MTok: number;
+  outputCentsPer10MTok: number;
+}
+
+/** バッチに依頼する1件。判断を使う取引日などを足す（記録の一意キー llmbatch:<agentId>:<tradingDate> になる） */
 export interface LlmBatchRequest extends LlmRequest {
-  /** 判断を使う取引日（YYYY-MM-DD）。依頼した時刻で締めがまだ来ていない最初の営業日 */
+  /** 判断を使う取引日（YYYY-MM-DD）。submittedAt で締めがまだ来ていない最初の営業日 */
   tradingDate: string;
+  /**
+   * 依頼を決めた時刻（UNIXミリ秒）。runner が送る直前に時計から読み、送る前の確かめ（EventLog.canAppend）と記録に同じ値を使う。
+   * 取引日と費用の暦日（日本時間）はこれで決まる。記録はこの時刻から1時間以内に書く（LLM_RECORD_WINDOW_MS）
+   */
+  submittedAt: number;
+  /** 予約に使う料金と1ドルあたりの円（既定160）。閉じたときの料金はこれ以下で、円は同じ値を使う */
+  reservePrice: LlmBatchPrice & { yenPerUsd: number };
+  /**
+   * 予約の見積もりに使うトークン数の上限。maxCost は llmTokenCost(この2つ, reservePrice) 以上（上限として見積もる）。
+   * 満たさなければ、送らずに RangeError で reject
+   */
+  maxInputTokens: number;
+  maxOutputTokens: number;
 }
 
 /**
@@ -141,7 +160,7 @@ export interface LlmBatchTicket {
   /** 予約した費用（LlmRequest.maxCost） */
   maxCost: Deciyen;
   tradingDate: string;
-  /** 依頼した時刻（UNIXミリ秒）。記録では llm.batch.submitted の recordedAt */
+  /** 依頼を決めた時刻（LlmBatchRequest.submittedAt をそのまま）。記録では llm.batch.submitted の submittedAt */
   submittedAt: number;
 }
 
@@ -163,12 +182,22 @@ export type LlmSubmitResult =
  * - collected：答えを受け取った。output と respondedModel がある
  * - expired：締め（8:30）で打ち切った、または提供元で期限が切れた
  * - failed：提供元で失敗した、結果が読めなかった
- * usage.cost は実際の費用（0.1円単位、端数は切り上げ。1ドル＝160円）。分からなければ maxCost をそのまま入れ、costUnknown: true を付ける。
+ * usage.cost は実際の費用（0.1円単位、端数は切り上げ）。llmTokenCost(usage のトークン数, price と reservePrice.yenPerUsd) ちょうど
+ * （記録の検査が同じ計算で確かめる）。price は使った料金で、reservePrice 以下（OpenAI の短い文脈の料金など）。
+ * 費用が分からなければ、price を付けず、usage.cost に maxCost をそのまま入れ、costUnknown: true を付ける。
  * 実費が maxCost を超えても切り捨てない。トークン数が分からなければ 0。
  */
-export type LlmBatchClosed =
-  | { status: "closed"; result: "collected"; output: string; respondedModel: string; usage: LlmUsage; costUnknown?: true; finishedAt: number }
-  | { status: "closed"; result: "expired" | "failed"; errorCode: Extract<LlmErrorCode, "timeout" | "rate_limited" | "provider_error">; usage: LlmUsage; costUnknown?: true; finishedAt: number };
+export type LlmBatchClosed = { status: "closed"; usage: LlmBatchUsage; finishedAt: number } & (
+  | { result: "collected"; output: string; respondedModel: string }
+  | { result: "expired" | "failed"; errorCode: Extract<LlmErrorCode, "timeout" | "rate_limited" | "provider_error"> }
+) &
+  ({ price: LlmBatchPrice; costUnknown?: never } | { price?: never; costUnknown: true });
+
+/** バッチの費用に数えるトークン数。キャッシュの欄（書き込みは入力の2倍、読み出しは入力の単価で数える）は、使わなければ省く */
+export interface LlmBatchUsage extends LlmUsage {
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+}
 
 export type LlmCollectResult = { status: "pending" } | LlmBatchClosed;
 
@@ -176,10 +205,17 @@ export type LlmCollectResult = { status: "pending" } | LlmBatchClosed;
  * まとめて依頼し、あとで受け取る口（各社のバッチ）。
  * 費用の上限：その日の使用済み ＝ 閉じたバッチの実際の費用 ＋ 閉じていないバッチの予約（maxCost）。全提供元の合計。
  * 暦日は依頼した時刻の日本時間の日付。数え方は src/events/llm-cost.ts の llmCostUsed と同じにする（記録から誰でも確かめられるように）。
+ * 暦日は依頼を決めた時刻（submittedAt）の日本時間の日付で、記録した日・閉じた日ではない。
  * 予約は llm.batch.submitted の記録で残す。依頼してから呼び出し側がそれを書くまでのあいだの予約は、実装が自分で持って数える。
+ * 送る前の確かめ（呼び出し側の義務）：runner は submit を呼ぶ前に、送ったあとに書く llm.batch.submitted の記録を、
+ * recordedAt と submittedAt を request.submittedAt に、batchId を null、sentBodyHash を仮の値（0 を64個）にして作り、
+ * 自分の EventLog の canAppend に通す。通らなければ送らない（一意キーが使用済み、取引日が submittedAt から決まる日と違う、
+ * 登録していないAI、祝日の一覧の範囲の外など。送ったあとに記録が断られて、課金されたのに記録がない依頼ができないように）。
+ * 通ったら、submit の結果の ticket と sentBodyHash を入れた記録を、submittedAt から1時間以内に書く。
  * 同じ日の依頼を、複数の実行から同時に行わない（毎日の実行は1つずつ動かす前提。記録には提供元のバッチのIDが要るので、
  * 送る前に記録で予約することはできず、実行をまたいだ判定と予約は原子的にできないため）。
  * 依頼したのに記録を書く前に止まった場合に備え、同じ AI・同じ取引日の依頼をやり直す前に、提供元の一覧で作られていないかを確かめる。
+ * あとで作られていたと分かったバッチ（記録にないもの、batchId を null にしたもの）は、提供元に取り消しを頼む。
  * 提供元の形への直し方（system の置き場所、設定の文字列から数への変換など）は、提供元ごとに決まった形にし、試験で確かめる。
  * settings と messages のほかは足さない（ツールなし。temperature は送らない。#179 の lead の決定）。
  * Promise を返す口の RangeError は reject（同期で投げない）。それ以外の失敗は reject せず、決まった結果で返す。
@@ -190,7 +226,8 @@ export interface LlmBatchPort {
   /** day（YYYY-MM-DD、日本時間）の使用済み。記録にある分と、まだ記録されていない自分の予約の合計 */
   spent(day: string): Promise<Deciyen>;
   /**
-   * 依頼。maxCost の検査（LlmRequest と同じ。外れたら RangeError で reject）→ spent(依頼の日)＋maxCost が
+   * 依頼。maxCost の検査（LlmRequest と同じ。外れたら、または maxInputTokens・maxOutputTokens・reservePrice から出した費用より小さければ
+   * RangeError で reject）→ spent(submittedAt の日)＋maxCost が
    * dailyCostLimit を超えるなら送らずに budget_exceeded → 予約して提供元に送る。dryRun でも依頼する（投稿は書くため）。
    */
   submit(request: LlmBatchRequest): Promise<LlmSubmitResult>;
