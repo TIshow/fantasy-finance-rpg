@@ -4,10 +4,13 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../../src/events/hash";
 import {
+  GEMINI_CREATE_SETTLE_MS,
   GEMINI_MAX_BODY_BYTES,
   GeminiBatchClient,
+  findGeminiBatchByDisplayName,
   geminiApiKeyFromEnv,
   toGeminiRequest,
+  type GeminiList,
 } from "../../src/llm/gemini-batch";
 
 const recorded = (name: string) => readFileSync(new URL(`./recorded/${name}`, import.meta.url), "utf8");
@@ -162,6 +165,39 @@ describe("Gemini のバッチの口", () => {
     expect(() => new GeminiBatchClient({ apiKey: "" })).toThrow(RangeError);
   });
 
+  it("一覧：pageSize・pageToken を付ける。形の違う項目（埋め込みのバッチ）は、決まりに合う id と displayName だけを返し、ほかは読む", async () => {
+    const { f, seen } = fakeFetch(() => new Response(recorded("gemini-batch-list.json")));
+    const r = await client(f).list({ pageSize: 20, pageToken: "tok/+=" });
+    expect(r).toMatchObject({ ok: true, value: { unreadable: [{ id: "embed0001", displayName: "someone-else" }], nextPageToken: "CiAKGjBpNDd2Nmp2Zml2cXRwYjBpOXA", batches: [{ id: ID, state: "running", displayName: NAME }] } });
+    expect(`${seen[0]!.init.method} ${seen[0]!.url}`).toBe("GET https://generativelanguage.googleapis.com/v1/batches?pageSize=20&pageToken=tok%2F%2B%3D");
+    const empty = fakeFetch(() => new Response("{}"));
+    expect(await client(empty.f).list()).toEqual({ ok: true, value: { batches: [], unreadable: [], unreachable: 0, nextPageToken: null } });
+    expect(empty.seen[0]!.url).toBe("https://generativelanguage.googleapis.com/v1/batches");
+    const odd = {
+      operations: [
+        { name: "batches/x1", metadata: { displayName: NAME, state: "BATCH_STATE_NEW", model: "m" } },
+        { name: "batches/x2", metadata: { displayName: "a b", model: "m", state: "BATCH_STATE_RUNNING" } },
+        { name: "operations/x3", metadata: {} },
+        "x",
+      ],
+    };
+    expect(await client(fakeFetch(() => new Response(JSON.stringify(odd))).f).list()).toEqual({ ok: true, value: { batches: [], unreadable: [{ id: "x1", displayName: NAME }, { id: "x2" }, {}, {}], unreachable: 0, nextPageToken: null } });
+    for (const bad of [{ pageSize: 0 }, { pageSize: 1001 }, { pageSize: 1.5 }, { pageToken: "" }, { pageToken: "a b" }, { pageToken: "a\nb" }]) {
+      await expect(client(f).list(bad)).rejects.toThrow(RangeError);
+    }
+  });
+
+  it("一覧：一番上の欄は operations・nextPageToken・unreachable だけ。ほかの欄・送り返せないページの印は一覧の失敗。unreachable は数だけ返す", async () => {
+    const listOf = async (body: unknown) => client(fakeFetch(() => new Response(JSON.stringify(body))).f).list();
+    const malformed = { ok: false, errorCode: "provider_error", reason: "malformed", status: 200 };
+    // operations の名前が変わった応答を「項目なし」と読まない
+    for (const bad of [{ batches: [] }, { operations: [], error: { code: 13 } }, { unreachable: "x" }, { operations: null, nextPageToken: "a b" }, { nextPageToken: "x".repeat(2049) }, { nextPageToken: 1 }]) {
+      expect(await listOf(bad), JSON.stringify(bad)).toEqual(malformed);
+    }
+    expect(await listOf({ operations: [], unreachable: ["locations/x req_secret123"], nextPageToken: "" })).toEqual({ ok: true, value: { batches: [], unreadable: [], unreachable: 1, nextPageToken: null } });
+    expect(await listOf({ operations: null, unreachable: null, nextPageToken: null })).toEqual({ ok: true, value: { batches: [], unreadable: [], unreachable: 0, nextPageToken: null } });
+  });
+
   it("HTTP の失敗は状態コードだけを返し、本文（エラー文）を入れない", async () => {
     for (const [status, errorCode] of [[429, "rate_limited"], [408, "timeout"], [504, "timeout"], [401, "provider_error"], [503, "rate_limited"], [500, "provider_error"]] as const) {
       const { f } = fakeFetch(() => new Response('{"error":{"code":1,"message":"request-id=req_secret123"}}', { status }));
@@ -181,7 +217,7 @@ describe("Gemini のバッチの口", () => {
   it("状態と結果の取り出し（終わったバッチは全文が返る）だけ、待ち時間の上限を別に決められる", async () => {
     const hang = (async (_: RequestInfo | URL, init?: RequestInit) => abortable(init)) as typeof fetch;
     const c = new GeminiBatchClient({ apiKey: KEY, fetch: hang, timeoutMs: 5, resultsTimeoutMs: 60_000 });
-    expect(await c.cancel(ID)).toEqual({ ok: false, errorCode: "timeout", reason: "timeout" });
+    expect(await c.list()).toEqual({ ok: false, errorCode: "timeout", reason: "timeout" });
     const slowOk = (async () => {
       await new Promise((resolve) => setTimeout(resolve, 30));
       return new Response(recorded("gemini-batch-succeeded.json"));
@@ -239,6 +275,7 @@ describe("Gemini のバッチの口", () => {
       const { f } = fakeFetch(() => new Response(body));
       expect(await client(f).retrieve(ID), body).toEqual({ ok: false, errorCode: "provider_error", reason: "malformed", status: 200 });
     }
+    expect(await client(fakeFetch(() => new Response('{"operations":"x"}')).f).list()).toEqual({ ok: false, errorCode: "provider_error", reason: "malformed", status: 200 });
     expect(await client(fakeFetch(() => new Response("[]")).f).cancel(ID)).toEqual({ ok: false, errorCode: "provider_error", reason: "malformed", status: 200 });
   });
 
@@ -264,6 +301,96 @@ describe("Gemini のバッチの口", () => {
     await expect(c.cancel("a:b")).rejects.toThrow(RangeError);
     expect(seen).toHaveLength(0);
     expect((await c.create(GOOGLE, NAME, [{ customId: "a".repeat(64), messages }])).ok).toBe(true);
+  });
+});
+
+describe("作られたバッチを displayName で探す（findGeminiBatchByDisplayName）", () => {
+  const status = (id: string, displayName: string) => ({
+    id,
+    state: "running" as const,
+    done: false,
+    model: "models/gemini-3.8-flash",
+    displayName,
+    counts: { requests: 1, succeeded: 0, failed: 0, pending: 1 },
+    createdAt: 0,
+    updatedAt: null,
+    endedAt: null,
+  });
+  /** ページの並びを返す一覧（null は失敗）。呼ばれた pageToken を残す */
+  const pages = (...ps: (GeminiList | null)[]) => {
+    const tokens: (string | undefined)[] = [];
+    let i = 0;
+    return {
+      tokens,
+      list: async (o: { pageToken?: string } = {}) => {
+        tokens.push(o.pageToken);
+        const p = ps[i++];
+        return p === null || p === undefined ? ({ ok: false, errorCode: "provider_error", reason: "http", status: 500 } as const) : ({ ok: true, value: p } as const);
+      },
+    };
+  };
+  const page = (batches: ReturnType<typeof status>[], unreadable: GeminiList["unreadable"], nextPageToken: string | null, unreachable = 0): GeminiList => ({ batches, unreadable, unreachable, nextPageToken });
+  const T0 = Date.parse("2026-11-09T07:35:00Z");
+  /** 作成を頼んでから十分たったあと */
+  const LATER = { requestedAt: T0, now: T0 + GEMINI_CREATE_SETTLE_MS + 1 };
+
+  it("全ページを読み、見つかれば found。2ページ目にあっても見落とさない", async () => {
+    const c = pages(page([status("b1", "other")], [{ displayName: "someone-else" }], "t1"), page([status("b2", NAME)], [], null));
+    expect(await findGeminiBatchByDisplayName(c, NAME, LATER)).toEqual({ kind: "found", batch: status("b2", NAME), maybeDuplicated: false });
+    expect(c.tokens).toEqual([undefined, "t1"]);
+  });
+
+  it("作成を頼んでから GEMINI_CREATE_SETTLE_MS がたっていなければ、見つからなくても notFound ではなく unknown（too_soon）。見つかればそのまま返す", async () => {
+    const none = () => pages(page([], [], null));
+    for (const now of [T0, T0 + 30_000, T0 + GEMINI_CREATE_SETTLE_MS, T0 - 1]) {
+      expect(await findGeminiBatchByDisplayName(none(), NAME, { requestedAt: T0, now }), String(now - T0)).toEqual({ kind: "unknown", reason: "too_soon" });
+    }
+    expect(await findGeminiBatchByDisplayName(none(), NAME, LATER)).toEqual({ kind: "notFound" });
+    expect(await findGeminiBatchByDisplayName(pages(page([status("b1", NAME)], [], null)), NAME, { requestedAt: T0, now: T0 })).toMatchObject({ kind: "found" });
+    // 一覧が「ない」に見えても、待ち時間切れ・通信断のあとに作られたバッチは、時間がたってから探すと見つかる
+    const createdLate = { ...JSON.parse(recorded("gemini-batch-list.json")), nextPageToken: undefined };
+    let calls = 0;
+    const f = (async () => new Response(JSON.stringify(calls++ === 0 ? {} : createdLate))) as typeof fetch;
+    expect(await findGeminiBatchByDisplayName(client(f), NAME, { requestedAt: T0, now: T0 + 60_000 })).toEqual({ kind: "unknown", reason: "too_soon" });
+    expect(await findGeminiBatchByDisplayName(client(f), NAME, LATER)).toMatchObject({ kind: "found", batch: { id: ID } });
+    for (const bad of [{ requestedAt: Number.NaN, now: T0 }, { requestedAt: T0, now: Number.POSITIVE_INFINITY }, { requestedAt: "x", now: T0 }, null]) {
+      await expect(findGeminiBatchByDisplayName(none(), NAME, bad as never)).rejects.toThrow(RangeError);
+    }
+  });
+
+  it("読めない項目は、displayName が別の名前なら外し、同じ名前なら foundUnreadable、名前が読めなければ notFound と決めない", async () => {
+    expect(await findGeminiBatchByDisplayName(pages(page([], [{ id: "e1", displayName: "x" }], null)), NAME, LATER)).toEqual({ kind: "notFound" });
+    expect(await findGeminiBatchByDisplayName(pages(page([], [{ id: "u1", displayName: NAME }], null)), NAME, LATER)).toEqual({ kind: "foundUnreadable", id: "u1", maybeDuplicated: false });
+    expect(await findGeminiBatchByDisplayName(pages(page([], [{ id: "u1" }], null)), NAME, LATER)).toEqual({ kind: "unknown", reason: "unreadable" });
+    expect(await findGeminiBatchByDisplayName(pages(page([status("b1", NAME)], [{}], null)), NAME, LATER)).toEqual({ kind: "found", batch: status("b1", NAME), maybeDuplicated: true });
+  });
+
+  it("同じ名前が2つ以上なら duplicated。一覧の失敗・ページが多すぎる・同じページの繰り返し・提供元が読めなかった場所があるときは unknown", async () => {
+    expect(await findGeminiBatchByDisplayName(pages(page([status("b1", NAME)], [{ id: "u1", displayName: NAME }, { displayName: NAME }], null)), NAME, LATER)).toEqual({ kind: "duplicated", ids: ["b1", "u1"] });
+    expect(await findGeminiBatchByDisplayName(pages(page([], [], "t1"), null), NAME, LATER)).toEqual({ kind: "unknown", reason: "list_failed" });
+    expect(await findGeminiBatchByDisplayName(pages(page([], [], "t1"), page([], [], "t2"), page([], [], null)), NAME, LATER, 2)).toEqual({ kind: "unknown", reason: "too_many_pages" });
+    expect(await findGeminiBatchByDisplayName(pages(page([], [], "t1"), page([], [], "t1")), NAME, LATER)).toEqual({ kind: "unknown", reason: "too_many_pages" });
+    expect(await findGeminiBatchByDisplayName(pages(page([], [], "t1"), page([], [], null, 1)), NAME, LATER)).toEqual({ kind: "unknown", reason: "unreachable" });
+    await expect(findGeminiBatchByDisplayName(pages(), "a b", LATER)).rejects.toThrow(RangeError);
+  });
+
+  it("fetch を通す：一番上に知らない欄・unreachable がある・送り返せないページの印なら unknown（reject しない）。{} は項目なしとして受け付ける", async () => {
+    const lookup = (body: unknown) => findGeminiBatchByDisplayName(client(fakeFetch(() => new Response(JSON.stringify(body))).f), NAME, LATER);
+    expect(await lookup({ batches: [] })).toEqual({ kind: "unknown", reason: "list_failed" });
+    expect(await lookup({ operations: [], unreachable: ["locations/x"] })).toEqual({ kind: "unknown", reason: "unreachable" });
+    for (const token of ["a b", "a\nb", "x".repeat(2049)]) expect(await lookup({ operations: [], nextPageToken: token }), token).toEqual({ kind: "unknown", reason: "list_failed" });
+    expect(await lookup({})).toEqual({ kind: "notFound" });
+    expect(await lookup({ operations: [], unreachable: [] })).toEqual({ kind: "notFound" });
+  });
+
+  it("記録済みの一覧の応答から、全ページを読んで探す", async () => {
+    const first = JSON.parse(recorded("gemini-batch-list.json"));
+    const { f, seen } = fakeFetch(() => new Response(JSON.stringify(seen.length === 1 ? first : { operations: [] })));
+    expect(await findGeminiBatchByDisplayName(client(f), NAME, LATER)).toMatchObject({ kind: "found", batch: { id: ID }, maybeDuplicated: false });
+    expect(seen.map((s) => s.url)).toEqual([
+      "https://generativelanguage.googleapis.com/v1/batches?pageSize=1000",
+      `https://generativelanguage.googleapis.com/v1/batches?pageSize=1000&pageToken=${first.nextPageToken}`,
+    ]);
   });
 });
 

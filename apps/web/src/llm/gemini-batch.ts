@@ -80,10 +80,38 @@ export interface GeminiBatchStatus {
 /** 作成の結果。成功でも失敗でも、送った本文を一緒に返す（監査と、課金が分からない失敗の突き合わせに使う） */
 export type GeminiCreateResult = BatchCall<GeminiBatchStatus> & { sent: SentBody };
 
+export interface GeminiListOptions {
+  /** 1〜1000 の整数。なければ提供元の既定 */
+  pageSize?: number;
+  pageToken?: string;
+}
+/** 一覧の中の、読めなかった項目（埋め込みのバッチ、知らない状態の名前、createTime がない、など）から取り出せた名前だけ */
+export interface GeminiUnreadableBatch {
+  /** batches/ のあとの部分。決まりに合うときだけ */
+  id?: string;
+  /** metadata.displayName。決まり（^[A-Za-z0-9_-]{1,128}$）に合うときだけ */
+  displayName?: string;
+}
+/**
+ * 一覧の1ページ。
+ * 注意：unreadable が空でない、unreachable が 0 でない、または nextPageToken が残っている間は、ある displayName のバッチが
+ * 「作られていない」とは決められない（読めない項目や、提供元が読めなかった場所や、まだ読んでいないページに、そのバッチがあるかもしれない）。
+ * 作成が billingUnknown で終わったあとの突き合わせには、全ページを読む findGeminiBatchByDisplayName を使う。
+ */
+export interface GeminiList {
+  batches: GeminiBatchStatus[];
+  /** 読めなかった項目。ほかの項目は batches に返す */
+  unreadable: GeminiUnreadableBatch[];
+  /** 提供元が「読めなかった場所」として返した数（応答の unreachable の件数。中身の文は持たない）。0 でなければ、一覧は欠けている */
+  unreachable: number;
+  nextPageToken: string | null;
+}
+
 const CUSTOM_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const BATCH_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const DISPLAY_NAME = /^[A-Za-z0-9_-]{1,128}$/;
 const MODEL_ID = /^[a-z0-9][a-z0-9.-]{0,63}$/;
+const PAGE_TOKEN = /^[\x21-\x7e]{1,2048}$/;
 /** 先頭が 0 でない整数（9桁まで） */
 const MAX_TOKENS = /^[1-9][0-9]{0,8}$/;
 /** int64 を文字列で返す欄（"0" か、先頭が 0 でない15桁まで） */
@@ -204,6 +232,45 @@ function parseStatus(json: unknown): GeminiBatchStatus {
   };
 }
 
+/** 読めない項目から、決まりに合う name と metadata.displayName だけを取り出す */
+function unreadableOf(op: unknown): GeminiUnreadableBatch {
+  if (!isObj(op)) return {};
+  const name = op.name;
+  const displayName = isObj(op.metadata) ? op.metadata.displayName : undefined;
+  return {
+    ...(isStr(name) && /^batches\/[A-Za-z0-9_-]{1,128}$/.test(name) ? { id: name.slice("batches/".length) } : {}),
+    ...(isStr(displayName) && DISPLAY_NAME.test(displayName) ? { displayName } : {}),
+  };
+}
+
+/** 一覧の応答の一番上に許す欄（長く続く処理の一覧の形）。ほかの欄があれば、知らない形なので一覧の失敗にする */
+const LIST_KEYS: ReadonlySet<string> = new Set(["operations", "nextPageToken", "unreachable"]);
+
+/**
+ * 一覧の1ページを読む。operations がなければ項目なし（空の {} を含む）。
+ * 一番上に知らない欄がある、unreachable が並びでない、nextPageToken がこちらから送り返せない形（PAGE_TOKEN に合わない）なら、
+ * 形が合わないとする（一覧の失敗。「項目なし」と読み違えて、作られていないと決めないように）
+ */
+function parseList(json: unknown): GeminiList {
+  need(isObj(json) && Object.keys(json).every((k) => LIST_KEYS.has(k)), null);
+  const j = json as Record<string, unknown>;
+  need(j.operations === undefined || j.operations === null || Array.isArray(j.operations), null);
+  need(j.unreachable === undefined || j.unreachable === null || Array.isArray(j.unreachable), null);
+  const token = j.nextPageToken;
+  need(token === undefined || token === null || token === "" || (isStr(token) && PAGE_TOKEN.test(token)), null);
+  const batches: GeminiBatchStatus[] = [];
+  const unreadable: GeminiUnreadableBatch[] = [];
+  for (const op of (j.operations as unknown[] | undefined) ?? []) {
+    try {
+      batches.push(parseStatus(op));
+    } catch {
+      unreadable.push(unreadableOf(op));
+    }
+  }
+  const unreachable = ((j.unreachable as unknown[] | undefined | null) ?? []).length;
+  return { batches, unreadable, unreachable, nextPageToken: isStr(token) && token !== "" ? token : null };
+}
+
 function failureOf(status: number): BatchFailure {
   // 503 は混雑のことが多いので、429 と同じく rate_limited（Anthropic の 529、OpenAI の 503 とそろえる）
   if (status === 429 || status === 503) return { ok: false, errorCode: "rate_limited", reason: "http", status };
@@ -304,6 +371,21 @@ export class GeminiBatchClient {
     return { ...r, sent };
   }
 
+  /** バッチの一覧。作成の失敗に billingUnknown が付いたときの突き合わせ（displayName）に使う */
+  async list(options: GeminiListOptions = {}): Promise<BatchCall<GeminiList>> {
+    const q = new URLSearchParams();
+    if (options.pageSize !== undefined) {
+      if (!Number.isSafeInteger(options.pageSize) || options.pageSize < 1 || options.pageSize > 1000) throw new RangeError("pageSize must be an integer from 1 to 1000");
+      q.set("pageSize", String(options.pageSize));
+    }
+    if (options.pageToken !== undefined) {
+      if (!PAGE_TOKEN.test(options.pageToken)) throw new RangeError("invalid pageToken");
+      q.set("pageToken", options.pageToken);
+    }
+    const qs = q.toString();
+    return this.#call("GET", `/${GEMINI_API_VERSION}/batches${qs === "" ? "" : `?${qs}`}`, undefined, parseList, this.#timeoutMs);
+  }
+
   /** バッチの状態 */
   async retrieve(batchId: string): Promise<BatchCall<GeminiBatchStatus>> {
     checkBatchId(batchId);
@@ -352,3 +434,94 @@ export class GeminiBatchClient {
     }
   }
 }
+
+/**
+ * 作成が billingUnknown で終わったあとの突き合わせの結果。
+ * - found：その displayName のバッチが1つだけあり、読めた
+ * - foundUnreadable：その displayName の項目が1つだけあるが、形が読めない（id は読めたときだけ）。作られたものとして扱う
+ *   どちらも、displayName の読めない項目があれば maybeDuplicated が true（同じ名前の2つ目かもしれない）
+ * - duplicated：その displayName の項目が2つ以上ある（二重に作られた）。ids は読めたものだけ
+ * - notFound：作成を頼んでから GEMINI_CREATE_SETTLE_MS より長くたっていて、全ページを読み、
+ *   提供元が読めなかった場所もなく、読めない項目もすべて別の displayName だった。このときだけ、作られていないと決めてよい
+ * - unknown：作られていないと決められない。理由は次のどれか
+ *   list_failed（一覧の失敗。形が合わない応答や、送り返せないページの印を含む）、unreadable（displayName の読めない項目がある）、
+ *   unreachable（提供元が一部を読めなかった）、too_many_pages（ページが多すぎる・同じページが繰り返された）、
+ *   too_soon（作成を頼んでから GEMINI_CREATE_SETTLE_MS がたっていない。あとで作られるかもしれないので、時間をおいて探し直す）
+ */
+export type GeminiBatchLookup =
+  | { kind: "found"; batch: GeminiBatchStatus; maybeDuplicated: boolean }
+  | { kind: "foundUnreadable"; id?: string; maybeDuplicated: boolean }
+  | { kind: "duplicated"; ids: string[] }
+  | { kind: "notFound" }
+  | { kind: "unknown"; reason: "list_failed" | "unreadable" | "unreachable" | "too_many_pages" | "too_soon" };
+
+/** 一覧の最大ページ数（1ページ 1,000 件）。超えたら unknown */
+export const GEMINI_LOOKUP_MAX_PAGES = 100;
+
+/**
+ * 作成を頼んでから、「その名前のバッチはない」と決めてよくなるまでの時間（1時間）。
+ * 作成がこちらの待ち時間切れや通信断で終わっても、提供元では処理が続き、あとからバッチが作られることがある。
+ * その前に一覧を読むと「ない」に見えるので、この時間がたつまでは notFound を返さない。
+ * 根拠：資料（https://ai.google.dev/api/batch-mode 、2026-11-07 確認）には、作成の処理が提供元でどれだけ続きうるかの上限が書かれていない。
+ * そこで、この口の作成の待ち時間の既定（30秒）より百倍以上長く、一覧への反映の遅れ（これも資料にない）も含めて余裕のある値にした。
+ * 待つ側の損は「作り直しが遅れる」だけで、二重課金よりずっと小さい。本物の API で確かめるまでは、短くしない。
+ * 呼び出し側が create の timeoutMs をこの値に近い長さにするなら、この値も長くすること。
+ */
+export const GEMINI_CREATE_SETTLE_MS = 60 * 60 * 1000;
+
+/** 突き合わせに渡す時刻（どちらも UNIX ミリ秒） */
+export interface GeminiLookupTiming {
+  /** 作成を頼んだ時刻（create を呼ぶ直前に、呼び出し側が自分の時計で取ったもの） */
+  requestedAt: number;
+  /** 今の時刻（呼び出し側の時計） */
+  now: number;
+}
+
+/**
+ * displayName で、作られたバッチを探す。一覧を全ページ読む（途中で止めない）。
+ * 読めない項目は、displayName が読めて別の名前なら無関係として外し、displayName が読めなければ unknown にする
+ * （その項目が探しているバッチかもしれないので、「作られていない」と決めない。二重課金を避ける）。
+ * 作成を頼んでから GEMINI_CREATE_SETTLE_MS がたっていなければ、見つからなくても notFound ではなく unknown（too_soon）を返す
+ * （時計が戻って now が requestedAt より前のときも同じ）。見つかったときは、時間に関係なくそのまま返す。
+ */
+export async function findGeminiBatchByDisplayName(
+  client: Pick<GeminiBatchClient, "list">,
+  displayName: string,
+  timing: GeminiLookupTiming,
+  maxPages: number = GEMINI_LOOKUP_MAX_PAGES,
+): Promise<GeminiBatchLookup> {
+  if (!DISPLAY_NAME.test(displayName)) throw new RangeError("displayName must match ^[A-Za-z0-9_-]{1,128}$");
+  if (!isObj(timing) || !Number.isFinite(timing.requestedAt) || !Number.isFinite(timing.now)) throw new RangeError("timing.requestedAt and timing.now must be finite numbers");
+  if (!Number.isSafeInteger(maxPages) || maxPages < 1) throw new RangeError("maxPages must be a positive integer");
+  const readable: GeminiBatchStatus[] = [];
+  const unreadable: GeminiUnreadableBatch[] = [];
+  let nameless = false;
+  const tokens = new Set<string>();
+  let pageToken: string | undefined;
+  for (let page = 0; ; page += 1) {
+    if (page >= maxPages) return { kind: "unknown", reason: "too_many_pages" };
+    const r = await client.list({ pageSize: 1000, ...(pageToken === undefined ? {} : { pageToken }) });
+    if (!r.ok) return { kind: "unknown", reason: "list_failed" };
+    // 提供元が一部を読めなかったなら、そこに探しているバッチがあるかもしれない
+    if (r.value.unreachable !== 0) return { kind: "unknown", reason: "unreachable" };
+    readable.push(...r.value.batches.filter((b) => b.displayName === displayName));
+    for (const u of r.value.unreadable) {
+      if (u.displayName === undefined) nameless = true;
+      else if (u.displayName === displayName) unreadable.push(u);
+    }
+    const next = r.value.nextPageToken;
+    if (next === null) break;
+    if (tokens.has(next)) return { kind: "unknown", reason: "too_many_pages" };
+    tokens.add(next);
+    pageToken = next;
+  }
+  const total = readable.length + unreadable.length;
+  if (total > 1) return { kind: "duplicated", ids: [...readable.map((b) => b.id), ...unreadable.flatMap((u) => (u.id === undefined ? [] : [u.id]))] };
+  if (readable.length === 1) return { kind: "found", batch: readable[0]!, maybeDuplicated: nameless };
+  if (unreadable.length === 1) return { kind: "foundUnreadable", ...(unreadable[0]!.id === undefined ? {} : { id: unreadable[0]!.id }), maybeDuplicated: nameless };
+  if (nameless) return { kind: "unknown", reason: "unreadable" };
+  // 時計が戻ったとき（差が負）も、待ち時間がたっていないとみなす
+  if (!(timing.now - timing.requestedAt > GEMINI_CREATE_SETTLE_MS)) return { kind: "unknown", reason: "too_soon" };
+  return { kind: "notFound" };
+}
+
