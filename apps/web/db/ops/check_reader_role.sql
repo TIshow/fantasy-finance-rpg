@@ -17,7 +17,8 @@ SELECT current_user AS who,                                                     
        has_table_privilege('stored_values', 'DELETE') AS values_can_delete,          -- false
        has_table_privilege('stored_values', 'TRUNCATE') AS values_can_truncate,      -- false
        has_any_column_privilege('stored_values', 'REFERENCES') OR has_table_privilege('stored_values', 'TRIGGER') AS values_can_reference_or_trigger,  -- false
-       has_function_privilege('erase_withdrawn_body(bigint)', 'EXECUTE') AS can_erase_body,  -- false（本文を消す関数）
+       -- 本文を消す関数と、判断の出力を消す関数（db/004）のどちらかを呼べれば true
+       has_function_privilege('erase_withdrawn_body(bigint)', 'EXECUTE') OR has_function_privilege('erase_withdrawn_outputs(bigint)', 'EXECUTE') AS can_erase_body,  -- false
        has_database_privilege(current_database(), 'TEMP') AS can_create_temp,       -- false（一時テーブル）
        has_database_privilege(current_database(), 'CREATE') AS can_create_schema,   -- false（schema を作る）
        has_schema_privilege(current_schema(), 'CREATE') AS can_create_in_schema;    -- false（表などを作る）

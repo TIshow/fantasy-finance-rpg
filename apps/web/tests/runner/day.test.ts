@@ -230,4 +230,41 @@ describe("runDay の回し直しと失敗", () => {
     expect(calls).toBe(1);
     expect(events.filter((e) => e.type === "fills.executed").length).toBe(1);
   });
+
+  it("判断と注文用の run の間に、別の書き手が投稿用の run と投稿を足したとき：出力が違えば回し直しは止まり、同じなら注文用の run の出力で確定する（#179）", async () => {
+    // 投稿しない判断。注文用の run を書く直前に、同じ AI・同じ入力の投稿用の run（出力は forged(本物の出力)）と投稿を、保管に直接足す
+    const silent: RunnerAgent = { ...scripted("ai-a"), decide: (i) => ({ ...scripted("ai-a").decide(i), post: null }) };
+    for (const [name, forged] of [["違う出力", () => JSON.stringify({ post: { board: "TSTA", text: "偽" } })], ["同じ出力", (out: string) => out]] as const) {
+      let s!: Awaited<ReturnType<typeof setup>>;
+      let done = false;
+      s = await setup([silent], (store) => ({
+        read: (a, l) => store.read(a, l),
+        last: () => store.last(),
+        commitSheet: (id, sheet) => store.commitSheet(id, sheet),
+        append: async (d) => {
+          if (!done && d.type === "agent.run" && p(d as unknown as LogEvent).purpose === "order") {
+            done = true;
+            const out = s.values.body(p(d as unknown as LogEvent).outputHash as string)!.value;
+            const run = await store.append({ ...d, payload: { ...d.payload, purpose: "post", outputHash: await s.values.putBody(forged(out)) } });
+            if (!run.ok) throw new Error(run.reason);
+            const post = await store.append({ type: "post.published", actor: "agent:ai-a", refs: [run.event.seq], payload: { agentId: "ai-a", board: "TSTA", bodyHash: await s.values.putBody("偽"), citeSeqs: [], runSeq: run.event.seq } });
+            if (!post.ok) throw new Error(post.reason);
+          }
+          return store.append(d);
+        },
+      }));
+      const t = TRADING_DAYS[0];
+      await expect(runDay(t, s.deps), name).rejects.toThrow("does not match the recorded event");
+      if (name === "違う出力") {
+        await expect(runDay(t, s.deps)).rejects.toThrow("does not match the decision of run");
+        expect((await s.all()).filter((e) => e.type.startsWith("order_sheet."))).toEqual([]);
+      } else {
+        await runDay(t, s.deps);
+        const events = await s.all();
+        const order = events.find((e) => e.type === "agent.run" && p(e).purpose === "order")!;
+        const sheets = events.filter((e) => e.type.startsWith("order_sheet."));
+        expect(sheets.map((e) => [e.type, p(e).runSeq, (p(e).orders as unknown[]).length])).toEqual([["order_sheet.committed", order.seq, 1]]);
+      }
+    }
+  });
 });

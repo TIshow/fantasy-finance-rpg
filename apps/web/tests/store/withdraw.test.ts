@@ -77,10 +77,33 @@ describe("withdrawPost", { timeout: 60_000 }, () => {
     const has = async () => (await db.query("SELECT 1 FROM stored_values WHERE hash = $1", [bodyHash])).rows.length === 1;
     expect(await has()).toBe(true);
 
+    // 判断の出力（投稿用と注文用の agent.run。毎日の実行は、同じ判断の全文を両方に書く）にも同じ文が残っている
+    const events = await readAllEvents(db);
+    const pl = (e: LogEvent) => e.payload as { agentId: string; inputSeqs: number[]; outputHash?: string; runSeq: number };
+    const source = events[pl(target).runSeq - 1]!;
+    const sameDecision = events.filter((e) => e.type === "agent.run" && pl(e).agentId === pl(source).agentId && JSON.stringify(pl(e).inputSeqs) === JSON.stringify(pl(source).inputSeqs));
+    expect(sameDecision.map((e) => (e.payload as { purpose: string }).purpose).sort()).toEqual(["order", "post"]);
+    const outputs = sameDecision.map((e) => pl(e).outputHash!);
+    const others = events.filter((e) => e.type === "agent.run" && typeof pl(e).outputHash === "string" && !sameDecision.includes(e)).map((e) => pl(e).outputHash!);
+    const stored = async (h: string) => (await db.query("SELECT 1 FROM stored_values WHERE hash = $1", [h])).rows.length === 1;
+    const text = (await PgValueStore.open(db)).body(bodyHash)!.value;
+    for (const h of outputs) expect((await PgValueStore.open(db)).body(h)!.value).toContain(JSON.stringify(text).slice(1, -1));
+
     const erased = (await db.query<{ h: string | null }>("SELECT erase_withdrawn_body($1) AS h", [target.seq])).rows[0]!.h;
     expect(erased).toBe(bodyHash);
     expect(await has()).toBe(false);
+    // 同じ判断の出力は2つとも消え、ほかの判断の出力は残る。記録（agent.run の outputHash）は残り、照合が通る
+    for (const h of outputs) expect(await stored(h)).toBe(false);
+    for (const h of others) expect(await stored(h)).toBe(true);
+    expect(others.length).toBeGreaterThan(0);
+    expect(await readAllEvents(db)).toEqual(events);
     expect((await verifyDatabase(db)).lastHash).toBe(r.hash);
+    // 次の営業日の毎日の実行も止まらずに進む
+    const next = "2026-11-11";
+    const waitUntil = async (at: number) => void (at > clock.now() && clock.set(at));
+    await runDaily(next, { db, clock, prepare: productionSetup, holidayTable, waitUntil });
+    expect((await readAllEvents(db)).some((e) => e.type === "valuation.recorded" && (e.payload as { date?: string }).date === next)).toBe(true);
+    await verifyDatabase(db);
     expect((await screen()).timeline.find((t) => t.seq === target.seq)).toMatchObject({ text: null, withdrawn: { reason: "権利者からの申し出" } });
 
     // 本文が消えたあとに、本文を残す記録で取り下げ直すことはできない（記録と保管が食い違うため）
