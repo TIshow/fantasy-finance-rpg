@@ -72,13 +72,16 @@ const EXPECTED_CHECK = {
   can_update: false,
   can_delete: false,
   can_truncate: false,
+  can_reference_or_trigger: false,
   values_can_select: true,
   values_can_insert: false,
   values_can_update: false,
   values_can_delete: false,
   values_can_truncate: false,
+  values_can_reference_or_trigger: false,
   can_erase_body: false,
   can_create_temp: false,
+  can_create_schema: false,
   can_create_in_schema: false,
 };
 
@@ -297,7 +300,7 @@ describe("確認の SQL と読む口は、読む以外の権限を見落とさ�
     expect(left).toBe(0);
   });
 
-  it.fails("【欠陥・中】列ごとに INSERT を与えられていても、確認の SQL は想定の結果のまま（直れば想定と違う値になる）", async () => {
+  it("（直った欠陥）列ごとに INSERT を与えられると、確認の SQL が想定と違う値を返す", async () => {
     const { check } = await observe(
       "GRANT INSERT (hash, kind, salt, content) ON stored_values TO ffr_reader",
       "REVOKE INSERT (hash, kind, salt, content) ON stored_values FROM ffr_reader",
@@ -305,7 +308,7 @@ describe("確認の SQL と読む口は、読む以外の権限を見落とさ�
     expect(check).not.toEqual(EXPECTED_CHECK);
   });
 
-  it.fails("【欠陥・中】列ごとに INSERT を与えられていても、読む口は警告を出さない（直れば警告が出る）", async () => {
+  it("（直った欠陥）列ごとに INSERT を与えられると、読む口が警告を出す", async () => {
     const { warnings } = await observe(
       "GRANT INSERT (seq, schema_ver, type, recorded_at, actor, keys, refs, payload, prev_hash, hash) ON events TO ffr_reader",
       "REVOKE INSERT (seq, schema_ver, type, recorded_at, actor, keys, refs, payload, prev_hash, hash) ON events FROM ffr_reader",
@@ -313,12 +316,12 @@ describe("確認の SQL と読む口は、読む以外の権限を見落とさ�
     expect(warnings).toHaveLength(1);
   });
 
-  it.fails("【欠陥・低】表の TRIGGER の権限を与えられていても、確認の SQL は想定の結果のまま", async () => {
+  it("（直った欠陥）表の TRIGGER の権限を与えられると、確認の SQL が気づく", async () => {
     const { check } = await observe("GRANT TRIGGER ON events TO ffr_reader", "REVOKE TRIGGER ON events FROM ffr_reader");
     expect(check).not.toEqual(EXPECTED_CHECK);
   });
 
-  it.fails("【欠陥・低】データベースに CREATE（schema を作る）の権限を与えられていても、確認の SQL は想定の結果のまま", async () => {
+  it("（直った欠陥）データベースに CREATE（schema を作る）の権限を与えられると、確認の SQL が気づく", async () => {
     const dbName = (await pg.query<{ d: string }>("SELECT current_database() AS d")).rows[0]!.d;
     // 前提：この権限で ffr_reader は schema を作れる
     await pg.exec(`GRANT CREATE ON DATABASE "${dbName}" TO ffr_reader`);
@@ -338,7 +341,7 @@ describe("確認の SQL と読む口は、読む以外の権限を見落とさ�
     expect(check).not.toEqual(EXPECTED_CHECK);
   });
 
-  it.fails("【欠陥・低】表の持ち主の役割に（NOINHERIT で）入れられていても、読む口は警告を出さない（SET ROLE で書ける。確認の SQL は気づく）", async () => {
+  it("（直った欠陥）表の持ち主の役割に（NOINHERIT で）入れられると、読む口が警告を出し、確認の SQL も気づく", async () => {
     const owner = (await pg.query<{ o: string }>("SELECT tableowner AS o FROM pg_tables WHERE tablename = 'events' AND schemaname = 'public'")).rows[0]!.o;
     const { check, warnings } = await observe(`GRANT "${owner}" TO ffr_reader`, `REVOKE "${owner}" FROM ffr_reader`);
     expect(check).toMatchObject({ member_of_roles: 1 });
@@ -358,11 +361,78 @@ describe("確認の SQL と読む口は、読む以外の権限を見落とさ�
       ["GRANT ffr_app TO ffr_reader", "REVOKE ffr_app FROM ffr_reader"],
       ["GRANT pg_write_all_data TO ffr_reader", "REVOKE pg_write_all_data FROM ffr_reader"],
       ["ALTER ROLE ffr_reader SUPERUSER", "ALTER ROLE ffr_reader NOSUPERUSER"],
+      // 列ごとの権限（PUBLIC への列ごとの権限も）
+      ["GRANT REFERENCES (seq) ON events TO ffr_reader", "REVOKE REFERENCES (seq) ON events FROM ffr_reader"],
+      ["GRANT REFERENCES (hash) ON stored_values TO PUBLIC", "REVOKE REFERENCES (hash) ON stored_values FROM PUBLIC"],
+      ["GRANT UPDATE (salt) ON stored_values TO PUBLIC", "REVOKE UPDATE (salt) ON stored_values FROM PUBLIC"],
+      ["GRANT INSERT (seq) ON events TO PUBLIC", "REVOKE INSERT (seq) ON events FROM PUBLIC"],
+      ["GRANT TRIGGER ON stored_values TO PUBLIC", "REVOKE TRIGGER ON stored_values FROM PUBLIC"],
+      // schema の持ち主になる（schema の持ち主は、その中の表を消せる）
+      ["ALTER SCHEMA public OWNER TO ffr_reader", "ALTER SCHEMA public OWNER TO pg_database_owner; GRANT USAGE ON SCHEMA public TO ffr_reader"],
     ];
     for (const [grant, revoke] of cases) {
       const { check } = await observe(grant, revoke);
       expect(check, grant).not.toEqual(EXPECTED_CHECK);
     }
     expect(await asReader(readerCheck)).toEqual(EXPECTED_CHECK);
+  });
+
+  it("書ける役割に、間に別の役割を挟んで（入れ子で、NOINHERIT で）入れられても、確認の SQL と読む口が気づく", async () => {
+    const owner = (await pg.query<{ o: string }>("SELECT tableowner AS o FROM pg_tables WHERE tablename = 'events' AND schemaname = 'public'")).rows[0]!.o;
+    await pg.exec("CREATE ROLE ffr_mid NOINHERIT; GRANT ffr_mid TO ffr_reader");
+    try {
+      for (const target of [owner, "pg_write_all_data", "ffr_app"]) {
+        const { check, warnings } = await observe(`GRANT "${target}" TO ffr_mid`, `REVOKE "${target}" FROM ffr_mid`);
+        expect(check, target).toMatchObject({ member_of_roles: 1 });
+        // ffr_app は書ける役割だが、読む口は ffr_app を名前で知らない。ffr_app の権限は NOINHERIT の先なので、表の権限にも出ない
+        if (target !== "ffr_app") expect(warnings, target).toHaveLength(1);
+      }
+    } finally {
+      await pg.exec("REVOKE ffr_mid FROM ffr_reader; DROP ROLE ffr_mid");
+    }
+    expect(await asReader(readerCheck)).toEqual(EXPECTED_CHECK);
+  });
+
+  /** 持ち主のトランザクションの中で setup を流し、ffr_reader で fn を動かし、最後にすべて取り消す */
+  async function inRolledBack<T>(setup: string, fn: () => Promise<T>): Promise<T> {
+    await pg.exec(`BEGIN; ${setup}; SET LOCAL ROLE ffr_reader`);
+    try {
+      return await fn();
+    } finally {
+      await pg.exec("ROLLBACK");
+    }
+  }
+
+  it("前提：表の MAINTAIN の権限（Postgres 17 から）を与えると、ffr_reader は表全体を締め出す鍵（ACCESS EXCLUSIVE）を取れる（書き手を止められる）", async () => {
+    await inRolledBack("GRANT MAINTAIN ON events TO ffr_reader", () => pg.exec("LOCK TABLE events IN ACCESS EXCLUSIVE MODE"));
+  });
+
+  it.fails("【欠陥・低】表の MAINTAIN の権限を与えられていても、確認の SQL は想定の結果のまま（直れば想定と違う値になる）", async () => {
+    expect(await inRolledBack("GRANT MAINTAIN ON events TO ffr_reader", readerCheck)).not.toEqual(EXPECTED_CHECK);
+  });
+
+  it("前提：見張りのトリガの関数の持ち主が ffr_reader になっていると、ffr_reader は関数を消し、一緒に見張りのトリガを消せる", async () => {
+    const left = await inRolledBack("ALTER FUNCTION events_refuse_change() OWNER TO ffr_reader", async () => {
+      await pg.exec("DROP FUNCTION events_refuse_change() CASCADE");
+      return (await pg.query("SELECT tgname FROM pg_trigger WHERE tgrelid = 'events'::regclass AND tgname IN ('events_refuse_row_change', 'events_refuse_truncate')")).rows;
+    });
+    expect(left).toEqual([]);
+    // 取り消したので、見張りは残っている
+    expect((await pg.query("SELECT tgname FROM pg_trigger WHERE tgrelid = 'events'::regclass AND tgname = 'events_refuse_row_change'")).rows).toHaveLength(1);
+  });
+
+  it.fails("【欠陥・低】見張りのトリガの関数の持ち主が ffr_reader になっていても、確認の SQL は想定の結果のまま（直れば想定と違う値になる）", async () => {
+    expect(await inRolledBack("ALTER FUNCTION events_refuse_change() OWNER TO ffr_reader", readerCheck)).not.toEqual(EXPECTED_CHECK);
+  });
+
+  it("参考：関数の持ち主の誤りは、migrate を流し直しても直らない（CREATE OR REPLACE は持ち主を変えない）", async () => {
+    await pg.exec("BEGIN; ALTER FUNCTION events_refuse_change() OWNER TO ffr_reader");
+    try {
+      await migrate(db).catch(() => undefined);
+      const o = (await pg.query<{ o: string }>("SELECT pg_get_userbyid(proowner) AS o FROM pg_proc WHERE proname = 'events_refuse_change'")).rows[0]!.o;
+      expect(o).toBe("ffr_reader");
+    } finally {
+      await pg.exec("ROLLBACK");
+    }
   });
 });
