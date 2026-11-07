@@ -72,9 +72,33 @@ describe("Anthropic のバッチの口", () => {
   });
 
   it("baseUrl は https: だけ", () => {
-    for (const bad of ["http://api.anthropic.com", "ftp://x", "not a url", "https://user:pw@api.anthropic.com", "https://api.anthropic.com?x=1"]) {
+    for (const bad of ["http://api.anthropic.com", "ftp://x", "not a url", "https://user:pw@api.anthropic.com", "https://api.anthropic.com?x=1", "https://api.anthropic.com?", "https://api.anthropic.com/#"]) {
       expect(() => new AnthropicBatchClient({ apiKey: KEY, baseUrl: bad })).toThrow(RangeError);
     }
+  });
+
+  it("API キーに見出しに使えない文字（改行など）があれば、値を含まない RangeError で作れない", () => {
+    for (const bad of ["sk-ant\nx", "sk ant", "鍵"]) {
+      expect(() => new AnthropicBatchClient({ apiKey: bad })).toThrow(RangeError);
+      expect(() => new AnthropicBatchClient({ apiKey: bad })).not.toThrow(bad);
+      expect(() => anthropicApiKeyFromEnv({ ANTHROPIC_API_KEY: bad })).toThrow("ANTHROPIC_API_KEY has characters not allowed in a header");
+    }
+  });
+
+  it("作成：型をすり抜けた余分な欄（tools など）は送らず、決まった欄・順に組み立て直す", async () => {
+    const { f, seen } = fakeFetch(() => new Response(recorded("anthropic-batch-created.json")));
+    const sneaky = { ...params, tools: [{ name: "x" }], messages: [{ role: "user", content: "入力", extra: 1 }] } as unknown as typeof params;
+    await client(f).create([{ customId: "run-a", params: sneaky }]);
+    expect(seen[0]!.init.body).toBe('{"requests":[{"custom_id":"run-a","params":{"model":"claude-sonnet-5-5","max_tokens":2000,"temperature":0.2,"system":"あなたは投資家です","messages":[{"role":"user","content":"入力"}]}}]}');
+    for (const bad of [{ ...params, max_tokens: 0 }, { ...params, messages: [] }, { ...params, messages: [{ role: "system", content: "x" }] }, { ...params, temperature: 2 }]) {
+      await expect(client(f).create([{ customId: "run-a", params: bad as typeof params }])).rejects.toThrow(RangeError);
+    }
+  });
+
+  it("結果の取り出しは、ほかより長い待ち時間（resultsTimeoutMs）", async () => {
+    const { f } = fakeFetch((url) => (url.endsWith("/results") ? new Promise<Response>((r) => setTimeout(() => r(new Response("")), 30)) : new Response("")));
+    const c = new AnthropicBatchClient({ apiKey: KEY, fetch: f, timeoutMs: 1, resultsTimeoutMs: 1000 });
+    expect(await c.results(ID)).toEqual({ ok: true, value: [] });
   });
 
   it("一覧：limit・after_id・before_id を付け、data・has_more・first_id・last_id を読む", async () => {
@@ -214,6 +238,12 @@ describe("結果の突き合わせ（reconcileResults）", () => {
     expect(r.missing).toEqual(["c", "d"]);
     expect(r.unexpected).toBe(1);
     expect(r.malformed).toBe(1);
+  });
+
+  it("同じ customId が正しい行と形が合わない行の両方に出たら、重なりとして扱う", () => {
+    const r = reconcileResults(["a"], [{ customId: "a", type: "expired" }, { type: "malformed", line: 2, customId: "a" }]);
+    expect(r.matched.size).toBe(0);
+    expect(r.duplicated).toEqual(["a"]);
   });
 });
 
