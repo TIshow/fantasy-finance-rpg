@@ -139,6 +139,26 @@ describe("erase_withdrawn_body", () => {
     expect(await has(bodyOf(kept))).toBe(true);
   }, 60_000);
 
+  it("投稿の本文の項目のほかに、そのハッシュを指す記録があれば断る（判断の出力・訂正の新しい本文など）", async () => {
+    const { erased } = await setUp();
+    const run = g.events.find((e) => e.type === "agent.run" && typeof (e.payload as { outputHash?: unknown }).outputHash === "string")!;
+    const output = (run.payload as { outputHash: string }).outputHash;
+    // 判断の出力のハッシュを本文に持つ投稿を足し、本文ごと非表示にしても、出力の行は消えない
+    await insertRaw("post.published", "agent:alpha", { bodyHash: output });
+    const forged = g.events.length + 3;
+    await insertRaw("content.withdrawn", "operator:owner", { targetSeq: forged, reason: "偽", bodyErased: true });
+    await expect(erase(forged)).rejects.toThrow("may not be erased");
+    await expect(db.transaction(async (tx) => {
+      await tx.query("SELECT set_config('ffr.erase_body', $1, true)", [output]);
+      await tx.query("DELETE FROM stored_values WHERE hash = $1", [output]);
+    })).rejects.toThrow(/stored_values is append-only/);
+    expect(await has(output)).toBe(true);
+    // 消してよい本文でも、別の記録（ここでは訂正）が同じハッシュを指せば断る
+    await insertRaw("correction.issued", "operator:owner", { refSeq: erased, kind: "post", newBodyHash: bodyOf(erased) });
+    await expect(erase(erased)).rejects.toThrow("may not be erased");
+    expect(await has(bodyOf(erased))).toBe(true);
+  }, 60_000);
+
   it("アプリの役割（ffr_app）は関数を呼べず、表から削除もできない", async () => {
     const { erased } = await setUp();
     try {
