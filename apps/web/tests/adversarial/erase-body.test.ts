@@ -44,7 +44,7 @@ async function as<T>(role: string, fn: () => Promise<T>): Promise<T> {
     await pg.exec("RESET ROLE; RESET search_path; DISCARD TEMP");
   }
 }
-/** 断られても先へ進める手順（欠陥の試験では、どこで直しても結果だけで判定するため） */
+/** 断られても先へ進める手順（どの段で断っても、結果だけで判定するため） */
 const attempt = async <T>(fn: () => Promise<T>): Promise<T | undefined> => {
   try {
     return await fn();
@@ -82,10 +82,8 @@ async function golden() {
 }
 
 describe("消せる行の範囲（ゴールデンログ）", { timeout: 60_000 }, () => {
-  // 欠陥の試験は2つに分ける。前半（通常の it）が前提を確かめて手順を進め、結果を残す。後半（it.fails）は結果だけを見る。
-  // 前提が崩れれば前半が赤になる。直れば（関数の側でも保管の側でも）後半が成功に変わり、it.fails が赤になって気づける
-  const forgedOutput: { output?: string; kept?: boolean; rowsBefore?: number; rowsAfter?: number } = {};
-  it("【欠陥の前提】判断の出力を本文に指す投稿を足して非表示にし、関数を呼ぶ（手順は断られても先へ進む）", async () => {
+  // PR #163 で直った欠陥（関数が判断の出力の行を消せた）の試験。途中の手順は断られても先へ進み、結果（行が残る）で判定する
+  it("判断の出力（agent.run の outputHash）を本文に指す投稿を足して非表示にしても、関数は出力の行を消さない", async () => {
     const { append, withdraw } = await golden();
     // ai-a の投稿用の run を runSeq にし、本文のハッシュに、ai-a の注文用の run の出力のハッシュを書く
     const postRun = goldenRuns.find((r) => p(r).agentId === "ai-a" && p(r).purpose === "post");
@@ -94,20 +92,15 @@ describe("消せる行の範囲（ゴールデンログ）", { timeout: 60_000 }
     const output = p(orderRun!).outputHash as string;
     expect(await has(output), "出力の行が最初からない").toBe(true);
     await verifyDatabase(db, FIXTURE_HOLIDAYS);
-    forgedOutput.output = output;
-    forgedOutput.rowsBefore = await bodyRows();
+    const rowsBefore = await bodyRows();
     const forged = await attempt(() => append("post.published", "agent:ai-a", [postRun!.seq], { agentId: "ai-a", board: "TSTB", bodyHash: output, citeSeqs: [], runSeq: postRun!.seq }));
     if (forged !== undefined) {
       await attempt(() => withdraw(forged));
       await attempt(() => erase(forged));
     }
-    forgedOutput.kept = await has(output);
-    forgedOutput.rowsAfter = await bodyRows();
-  });
-  it.fails("【欠陥】判断の出力（agent.run の outputHash）を本文に指す投稿を足して非表示にすると、関数が出力の行を消す（直れば行が残る）", () => {
-    expect(forgedOutput.output, "前提の試験が動いていない").toBeDefined();
-    expect(forgedOutput.kept).toBe(true);
-    expect(forgedOutput.rowsAfter).toBe(forgedOutput.rowsBefore);
+    expect(await has(output)).toBe(true);
+    expect(await bodyRows()).toBe(rowsBefore);
+    await verifyDatabase(db, FIXTURE_HOLIDAYS);
   });
 
   it("価格などの値のハッシュを本文に指す投稿を作って非表示にしても、値の行は消えない（関数は本文の行だけを消す）", async () => {
@@ -154,6 +147,80 @@ describe("消せる行の範囲（ゴールデンログ）", { timeout: 60_000 }
     const n = (await db.query<{ n: number }>("SELECT count(*)::int AS n FROM stored_values")).rows[0]!.n;
     await expect(pg.exec("DELETE FROM stored_values")).rejects.toThrow(/append-only/);
     expect((await db.query<{ n: number }>("SELECT count(*)::int AS n FROM stored_values")).rows[0]!.n).toBe(n);
+  });
+});
+
+/** 検査を通さずに、連鎖だけが続く行を直接入れる（ffr_app でもできること。ハッシュは正しくない）。payload は JSON の文字列 */
+async function insertRaw(type: string, actor: string, payloadJson: string, keys: string[] = []) {
+  const last = (await db.query<{ seq: string; hash: string; recorded_at: string }>("SELECT seq, hash, recorded_at FROM events ORDER BY seq DESC LIMIT 1")).rows[0]!;
+  const seq = Number(last.seq) + 1;
+  await db.query("INSERT INTO events (seq, schema_ver, type, recorded_at, actor, keys, refs, payload, prev_hash, hash) VALUES ($1, 1, $2, $3, $4, $5::jsonb, '[]'::jsonb, $6::jsonb, $7, $8)", [seq, type, Number(last.recorded_at), actor, JSON.stringify(keys), payloadJson, last.hash, seq.toString(16).padStart(64, "f")]);
+  return seq;
+}
+
+describe("PR #163 の守り（ほかの記録が指す本文は消せない）を突く", { timeout: 60_000 }, () => {
+  // 前半（通常の it）が前提を確かめて手順を進め、結果を残す。後半（it.fails）は結果だけを見る。前提が崩れれば前半が赤になる
+  const crafted: { ran?: boolean; kept?: boolean } = {};
+  it("【欠陥・低の前提】本文の項目に、別の書き方（接頭辞つき・入れ子）で同じハッシュを持つ投稿を足し、本物の投稿だけを非表示にして関数を呼ぶ", async () => {
+    const { append, withdraw } = await golden();
+    const target = goldenPosts[0]!;
+    const h = p(target).bodyHash as string;
+    const postRun = goldenRuns.find((r) => p(r).agentId === "ai-a" && p(r).purpose === "post")!;
+    // 検査を通る形で足せる（本文のハッシュの形は検査されない）。daily verify も通る
+    const seqs: number[] = [];
+    for (const bodyHash of [`sha256:${h}`, { x: h }]) {
+      const seq = await attempt(() => append("post.published", "agent:ai-a", [postRun.seq], { agentId: "ai-a", board: "TSTB", bodyHash, citeSeqs: [], runSeq: postRun.seq }));
+      if (seq !== undefined) seqs.push(seq);
+    }
+    expect(seqs, "細工した投稿を足せなかった（試験の前提が崩れた）").toHaveLength(2);
+    await verifyDatabase(db, FIXTURE_HOLIDAYS);
+    // 細工した投稿は非表示にしない。本物の投稿だけを、本文を消すとして非表示にする
+    await withdraw(target.seq);
+    await attempt(() => erase(target.seq));
+    crafted.kept = await has(h);
+    crafted.ran = true;
+  });
+  it.fails("【欠陥・低】上の状態で、別の書き方の投稿は件数にもほかの記録にも数えられず、本文が消える（直れば本文が残る）", () => {
+    expect(crafted.ran, "前提の試験が動いていない").toBe(true);
+    expect(crafted.kept).toBe(true);
+  });
+
+  it("（上の欠陥の影響の範囲）別の書き方の投稿は、消す前から本文を引けない。画面と読むだけの口は、ハッシュと完全に一致するときだけ本文を引くため", async () => {
+    const { append } = await golden();
+    const h = p(goldenPosts[0]!).bodyHash as string;
+    const postRun = goldenRuns.find((r) => p(r).agentId === "ai-a" && p(r).purpose === "post")!;
+    await append("post.published", "agent:ai-a", [postRun.seq], { agentId: "ai-a", board: "TSTB", bodyHash: `sha256:${h}`, citeSeqs: [], runSeq: postRun.seq });
+    const snap = await readSnapshot(db, { holidayTables: [FIXTURE_HOLIDAYS], warn: () => undefined });
+    expect(snap.bodyOf(h)).toBeDefined();
+    expect(snap.bodyOf(`sha256:${h}`)).toBeUndefined();
+  });
+
+  it("投稿でない記録の、オブジェクトでない中身（文字列・配列）や keys に同じハッシュがあれば断る。オブジェクトでない行が混じっても関数は止まらない", async () => {
+    const { withdraw } = await golden();
+    const [a, b, c] = goldenPosts as [LogEvent, LogEvent, LogEvent];
+    for (const t of [a, b, c]) await withdraw(t.seq);
+    const ha = p(a).bodyHash as string;
+    const hb = p(b).bodyHash as string;
+    // 関数が止まらないこと：中身が null・数・真偽値の行
+    for (const j of ["null", "123", "true", '"text"', "[]"]) await insertRaw("source.captured", "system", j);
+    await insertRaw("post.published", "agent:ai-a", "null");
+    await insertRaw("source.captured", "system", JSON.stringify(`copy of ${ha}`));
+    await insertRaw("agent.run", "system", JSON.stringify([{ nested: [ha] }]));
+    await insertRaw("source.captured", "system", "{}", [`body:${hb}`]);
+    await expect(erase(a.seq)).rejects.toThrow("may not be erased");
+    await expect(erase(b.seq)).rejects.toThrow("may not be erased");
+    expect(await has(ha)).toBe(true);
+    expect(await has(hb)).toBe(true);
+    expect(await erase(c.seq)).toBe(p(c).bodyHash);
+  });
+
+  it("（いまの決まり）運営者が非表示の理由にその本文のハッシュを書くと、その本文は二度と消せなくなる", async () => {
+    const { append } = await golden();
+    const t = goldenPosts[0]!;
+    const h = p(t).bodyHash as string;
+    await append("content.withdrawn", "operator:owner", [t.seq], { targetSeq: t.seq, reason: `本文 ${h} の権利者からの申し出`, bodyErased: true });
+    await expect(erase(t.seq)).rejects.toThrow("may not be erased");
+    expect(await has(h)).toBe(true);
   });
 });
 
@@ -314,9 +381,8 @@ describe("消したあとも毎日の実行を続けられる", { timeout: 120_0
     await verifyDatabase(db, holidayTable);
   });
 
-  // 前半（通常の it）が前提を確かめて手順を進め、回し直しの結果を残す。後半（it.fails）は結果だけを見る
-  const rerun: { ran?: boolean; error?: string; finished?: boolean } = {};
-  it("【欠陥の影響の前提】注文票の確定の前に落とし、その日の最初の run の出力を指す偽の投稿を非表示にして関数を呼び、回し直す", async () => {
+  // PR #163 で直った欠陥の影響（判断の出力が消され、同じ日の回し直しが止まった）の試験
+  it("注文票の確定の前に落ち、その間にその日の判断の出力を指す偽の投稿を非表示にして関数を呼ばれても、同じ日の回し直しが最後まで進む", async () => {
     // 1回目：投稿がある最初の日と、その日に投稿する AI を探す（規則の AI なので、毎回同じ）
     await resetSchema(pg);
     await migrate(db);
@@ -355,17 +421,8 @@ describe("消したあとも毎日の実行を続けられる", { timeout: 120_0
       await attempt(() => store.append({ type: "content.withdrawn", actor: "operator:owner", refs: [forged.seq], payload: { targetSeq: forged.seq, reason: "権利者からの申し出", bodyErased: true } }));
       await attempt(() => erase(forged.seq));
     }
-    try {
-      await runDaily(d, opts(w)); // いまは "output of run N is not available" で止まる
-      rerun.finished = (await readAllEvents(db)).some((e) => e.type === "valuation.recorded" && p(e).date === d);
-    } catch (err) {
-      rerun.error = String(err);
-    }
-    rerun.ran = true;
-  });
-  it.fails("【欠陥の影響】上の状態から、同じ日の回し直しが最後まで進む（いまは止まる。直れば進む）", () => {
-    expect(rerun.ran, "前提の試験が動いていない").toBe(true);
-    expect(rerun.error).toBeUndefined();
-    expect(rerun.finished).toBe(true);
+    await runDaily(d, opts(w));
+    expect((await readAllEvents(db)).some((e) => e.type === "valuation.recorded" && p(e).date === d)).toBe(true);
+    await verifyDatabase(db, holidayTable);
   });
 });
