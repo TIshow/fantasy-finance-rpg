@@ -2,6 +2,7 @@
 -- 価格・分割・配当の内容（kind = 'value'）と、投稿の本文・LLM の出力（kind = 'body'）を、ハッシュを鍵にして追記だけで残す。
 -- ハッシュは SHA-256(salt ‖ 中身)。アプリが開くときに全行を照合する（本文は SQL の制約でも確かめる。値の正規化は SQL で再現しない）。
 -- 更新・削除・TRUNCATE は、events と同じく、表の持ち主でもトリガが断る。ffr_app には SELECT と INSERT だけを許す。
+-- ただし、非表示にした投稿の本文だけは、運営者が erase_withdrawn_body で消せる（db/003_erase_body.sql が削除の見張りを差し替える）。
 
 CREATE TABLE IF NOT EXISTS stored_values (
   hash    text PRIMARY KEY CHECK (hash ~ '^[0-9a-f]{64}$'),
