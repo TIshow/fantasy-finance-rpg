@@ -2,8 +2,10 @@
 -- 消せるのは、stored_values の本文（kind = 'body'）のうち、次をすべて満たすものだけ。乱数（salt）は同じ行にあるので一緒に消える。
 --   * その本文を bodyHash に持つ post.published があり、それらすべてについて、最後の content.withdrawn（運営者が書いたもの）の bodyErased が真
 -- イベントの表は変えない。本文のハッシュはイベントに残るので、ハッシュの連鎖は壊れない。
--- 消すのは erase_withdrawn_body(投稿の seq) だけ。表の持ち主（運営者）の接続から呼ぶ。ffr_app は、この関数を実行する権限も、
--- stored_values を削除する権限も持たない。上の条件に合わない削除と、この関数を通らない削除は、持ち主でもトリガが断る。
+-- 運営者は erase_withdrawn_body(投稿の seq) を、表の持ち主の接続から呼ぶ。ffr_app は、この関数を実行する権限も、
+-- stored_values を削除する権限も持たない。上の条件に合わない行は、持ち主でもトリガが断る（誰も消せない）。
+-- 守りの範囲：持ち主は守りの対象外。持ち主は、設定 ffr.erase_body を自分で入れれば、条件に合う本文を関数を通らずに直接消せる
+-- （消せる行は関数と同じ）。トリガを外すこともできる。関数だけに絞るには、専用の役割と SECURITY DEFINER が要る（この版では作らない）。
 -- 運営者の手順は db/ops/erase_body.sql。
 
 -- 本文 h を消してよいか（上の条件）。表は schema を指定して引く（呼ぶ側の search_path に左右されない）
@@ -21,7 +23,8 @@ BEGIN
   RETURN posts > 0 AND posts = erasable;
 END $$;
 
--- stored_values の削除の見張り。erase_withdrawn_body が、消す本文のハッシュをこのトランザクションだけの設定（ffr.erase_body）に入れたときだけ通す
+-- stored_values の削除の見張り。消す本文のハッシュがこのトランザクションだけの設定（ffr.erase_body）に入っていて、条件に合う本文のときだけ通す。
+-- 設定は erase_withdrawn_body が入れる。うっかりした DELETE を止めるための印で、持ち主が自分で入れることは防げない
 CREATE OR REPLACE FUNCTION stored_values_guard_delete() RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 DECLARE
   ok boolean := false;

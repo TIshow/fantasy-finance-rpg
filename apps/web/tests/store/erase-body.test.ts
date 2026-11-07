@@ -42,8 +42,26 @@ async function setUp() {
     const r = await store.append({ type: "content.withdrawn", actor: "operator:owner", refs: [p.seq], payload: { targetSeq: p.seq, reason: "権利者からの申し出", bodyErased } });
     expect(r.ok).toBe(true);
   }
-  return { open, erased: posts[0]!.seq, kept: posts[1]!.seq, untouched: posts[2]!.seq };
+  const withdraw = async (p: number, bodyErased: boolean) => expect((await store.append({ type: "content.withdrawn", actor: "operator:owner", refs: [p], payload: { targetSeq: p, reason: "再度の申し出", bodyErased } })).ok).toBe(true);
+  return { open, withdraw, erased: posts[0]!.seq, kept: posts[1]!.seq, untouched: posts[2]!.seq };
 }
+
+/** 検査を通さずに、連鎖だけが続く行を直接入れる（ffr_app でもできること。ハッシュは正しくない） */
+async function insertRaw(type: string, actor: string, payload: unknown) {
+  const last = (await db.query<{ seq: string; hash: string; recorded_at: string }>("SELECT seq, hash, recorded_at FROM events ORDER BY seq DESC LIMIT 1")).rows[0]!;
+  const seq = Number(last.seq) + 1;
+  await db.query("INSERT INTO events (seq, schema_ver, type, recorded_at, actor, keys, refs, payload, prev_hash, hash) VALUES ($1, 1, $2, $3, $4, '[]'::jsonb, '[]'::jsonb, $5::jsonb, $6, $7)", [seq, type, Number(last.recorded_at), actor, JSON.stringify(payload), last.hash, seq.toString(16).padStart(64, "f")]);
+}
+
+/** 運営者の手順の SQL の文（コメントの行を除き、; で分ける） */
+const opsStatements = () =>
+  readFileSync(new URL("../../db/ops/erase_body.sql", import.meta.url), "utf8")
+    .split("\n")
+    .filter((l) => !l.startsWith("--"))
+    .join("\n")
+    .split(";")
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
 
 describe("erase_withdrawn_body", () => {
   it("bodyErased が真の投稿の本文と乱数だけを消し、連鎖は壊れず、保管を開き直せて照合も通る", async () => {
@@ -78,7 +96,7 @@ describe("erase_withdrawn_body", () => {
     expect(await has(bodyOf(untouched))).toBe(true);
   }, 60_000);
 
-  it("関数を通らない削除は、持ち主でも断る（消してよい本文・値・設定を自分で入れた削除を含む）", async () => {
+  it("条件に合わない行は、持ち主が設定を自分で入れても消せない。設定のない直接の DELETE も断る", async () => {
     const { erased } = await setUp();
     const valueHash = (await db.query<{ hash: string }>("SELECT hash FROM stored_values WHERE kind = 'value' LIMIT 1")).rows[0]!.hash;
     await expect(db.query("DELETE FROM stored_values WHERE hash = $1", [bodyOf(erased)])).rejects.toThrow(/stored_values is append-only/);
@@ -93,6 +111,34 @@ describe("erase_withdrawn_body", () => {
     await expect(pg.exec("TRUNCATE stored_values")).rejects.toThrow(/stored_values is append-only/);
   }, 60_000);
 
+  it("持ち主は守りの対象外：設定を自分で入れれば、条件に合う本文だけは関数を通らずに消せる", async () => {
+    const { erased } = await setUp();
+    await db.transaction(async (tx) => {
+      await tx.query("SELECT set_config('ffr.erase_body', $1, true)", [bodyOf(erased)]);
+      await tx.query("DELETE FROM stored_values WHERE hash = $1", [bodyOf(erased)]);
+    });
+    expect(await has(bodyOf(erased))).toBe(false);
+  }, 60_000);
+
+  it("最後の非表示の記録だけを見る：真のあとに偽なら断る。偽のあとに真なら消せる", async () => {
+    const { withdraw, erased, kept } = await setUp();
+    await withdraw(erased, false);
+    await withdraw(kept, true);
+    await expect(erase(erased)).rejects.toThrow("may not be erased");
+    expect(await erase(kept)).toBe(bodyOf(kept));
+  }, 60_000);
+
+  it("同じ本文を持つ投稿のうち1つでも bodyErased が真でなければ断る。運営者でない書き手の非表示の記録は数えない", async () => {
+    const { erased, kept } = await setUp();
+    await insertRaw("content.withdrawn", "system", { targetSeq: kept, reason: "装った記録", bodyErased: true });
+    await insertRaw("content.withdrawn", "agent:alpha", { targetSeq: kept, reason: "装った記録", bodyErased: true });
+    await expect(erase(kept)).rejects.toThrow("may not be erased");
+    await insertRaw("post.published", "agent:alpha", { bodyHash: bodyOf(erased) });
+    await expect(erase(erased)).rejects.toThrow("may not be erased");
+    expect(await has(bodyOf(erased))).toBe(true);
+    expect(await has(bodyOf(kept))).toBe(true);
+  }, 60_000);
+
   it("アプリの役割（ffr_app）は関数を呼べず、表から削除もできない", async () => {
     const { erased } = await setUp();
     try {
@@ -105,12 +151,21 @@ describe("erase_withdrawn_body", () => {
     expect(await has(bodyOf(erased))).toBe(true);
   }, 60_000);
 
-  it("運営者の手順の SQL（db/ops/erase_body.sql）の確かめる文は、消してよい本文が残っている投稿だけを返す", async () => {
-    const { erased } = await setUp();
-    const sql = readFileSync(new URL("../../db/ops/erase_body.sql", import.meta.url), "utf8");
-    const check = sql.slice(sql.indexOf("SELECT p.seq"), sql.indexOf(";", sql.indexOf("SELECT p.seq")));
-    expect((await db.query<{ seq: number }>(check)).rows.map((r) => Number(r.seq))).toEqual([erased]);
-    await db.query(sql.slice(sql.lastIndexOf("SELECT erase_withdrawn_body")).replace("<seq>", String(erased)));
-    expect((await db.query(check)).rows).toEqual([]);
+  it("運営者の手順の SQL（db/ops/erase_body.sql）：一覧は記録の書き手と理由つきで、食い違いの確かめも働く", async () => {
+    const { erased, kept } = await setUp();
+    const statements = opsStatements();
+    expect(statements).toHaveLength(3);
+    const [list, mismatch, run] = statements as [string, string, string];
+    const problems = async () => (await db.query<{ seq: number; problem: string }>(mismatch)).rows.map((r) => [Number(r.seq), r.problem]);
+    const rows = (await db.query<{ seq: number; actor: string; reason: string }>(list)).rows;
+    expect(rows.map((r) => [Number(r.seq), r.actor, r.reason])).toEqual([[erased, "operator:owner", "権利者からの申し出"]]);
+    expect(await problems()).toEqual([[erased, "not_erased"]]);
+    await db.query(run.replace("<seq>", String(erased)));
+    expect((await db.query(list)).rows).toEqual([]);
+    expect(await problems()).toEqual([]);
+    // 本文がないのに、最後の記録が真でない（持ち主がトリガを外して消した場合など）
+    await pg.exec("ALTER TABLE stored_values DISABLE TRIGGER USER");
+    await db.query("DELETE FROM stored_values WHERE hash = $1", [bodyOf(kept)]);
+    expect(await problems()).toEqual([[kept, "missing"]]);
   }, 60_000);
 });
