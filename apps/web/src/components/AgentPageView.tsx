@@ -38,7 +38,7 @@ function Decisions({ days }: { days: DecisionDay[] }) {
   return (
     <div className="flex flex-col gap-3">
       {days.map((d) => (
-        <div key={d.dateText} className="border-2 border-line bg-[#120826]">
+        <div key={d.date} className="border-2 border-line bg-[#120826]">
           <h3 className="border-b border-line px-3 py-1.5 font-num text-xs tracking-widest text-sub">{d.dateText}</h3>
           <ul className="m-0 list-none p-0 text-sm">
             {d.items.map((i) => (
@@ -47,6 +47,7 @@ function Decisions({ days }: { days: DecisionDay[] }) {
                   <span className={i.kind === "rejected" ? "font-bold text-neon-pink" : "font-bold text-ink"}>{i.label}</span>
                   <span>{i.timeText}</span>
                   {i.tags.map((t) => <span key={t} className="border border-line px-1.5">{t}</span>)}
+                  {i.model && <span>{i.model.text}</span>}
                   {i.runSeq !== null && <span className="ml-auto">判断の実行 #{i.runSeq}</span>}
                 </div>
                 {i.note ? <p className="m-0 italic text-sub">{i.note}</p> : <p className="m-0 whitespace-pre-wrap">{i.text}</p>}

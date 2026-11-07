@@ -5,7 +5,7 @@ import type { LogEvent } from "../events/types";
 import { INITIAL_CASH, type Deciyen, type Fill, type ParticipantKind } from "../ledger/types";
 import { buildMarket } from "./market";
 import { formatJst, formatMonthDay, formatSignedYen, formatYen } from "./format";
-import type { AgentDay, AgentModel, AgentPerformance, Evidence, SymbolThread, TimelineItem, View } from "./types";
+import type { AgentDay, AgentModel, AgentPerformance, Evidence, RunModel, SymbolThread, TimelineItem, View } from "./types";
 
 type P = Record<string, any>; // 連鎖の検査を通ったイベントの中身
 
@@ -19,6 +19,8 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
   const kinds = new Map<string, ParticipantKind>();
   const timeline: TimelineItem[] = [];
   const models = new Map<string, AgentModel>();
+  const variants = new Map<string, Set<string>>();
+  const runs: RunModel[] = [];
   const evidence: Evidence[] = [];
   const last = new Map<string, Deciyen>();
   const days = new Map<string, AgentDay[]>();
@@ -48,8 +50,18 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
         kinds.set(p.agentId, p.kind ?? "investor");
         break;
       case "agent.run":
-        // 最後の記録のモデルを残す。形が違う記録は読み飛ばす（画面を止めない）
-        if (typeof p.agentId === "string" && typeof p.model?.provider === "string" && typeof p.model?.modelId === "string") models.set(p.agentId, { agentId: p.agentId, provider: p.model.provider, modelId: p.model.modelId });
+        // 形が違う記録は読み飛ばす（画面を止めない）
+        if (typeof p.agentId === "string" && typeof p.model?.provider === "string" && typeof p.model?.modelId === "string") {
+          // 判断ごとのモデルを引くため、成功・失敗を問わず全件を残す
+          runs.push({ seq: e.seq, agentId: p.agentId, provider: p.model.provider, modelId: p.model.modelId });
+          // 「最後のモデル」は、成功した判断（ok が false でないもの）だけで決める。失敗した判断は、投稿も注文票も出していないため
+          if (p.ok !== false) {
+            const variant = `${p.model.provider}\u0000${p.model.modelId}`;
+            const seen = variants.get(p.agentId) ?? variants.set(p.agentId, new Set()).get(p.agentId)!;
+            seen.add(variant);
+            models.set(p.agentId, { agentId: p.agentId, provider: p.model.provider, modelId: p.model.modelId, at: e.recordedAt, changed: seen.size > 1 });
+          }
+        }
         break;
       case "post.published":
         {
@@ -122,5 +134,5 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
     initialCash: initial.get(agentId) ?? INITIAL_CASH,
     days: (days.get(agentId) ?? []).sort((a, b) => lessThan(a.date, b.date)),
   }));
-  return { timeline, evidence, market: buildMarket(events), participants: [...kinds].map(([agentId, kind]) => ({ agentId, kind })).sort((a, b) => lessThan(a.agentId, b.agentId)), threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)), models: [...models.values()].sort((a, b) => lessThan(a.agentId, b.agentId)) };
+  return { timeline, evidence, market: buildMarket(events), participants: [...kinds].map(([agentId, kind]) => ({ agentId, kind })).sort((a, b) => lessThan(a.agentId, b.agentId)), threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)), models: [...models.values()].sort((a, b) => lessThan(a.agentId, b.agentId)), runs };
 }

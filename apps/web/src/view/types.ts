@@ -72,8 +72,20 @@ export interface Evidence {
   fetchedAt: number | null;
 }
 
-/** 判断の記録（agent.run）に残ったモデル。AIごとに、最後の記録のもの */
+/** 判断の記録（agent.run）に残ったモデル。AIごとに、最後に成功した判断（ok が false でないもの）のもの */
 export interface AgentModel {
+  agentId: string;
+  provider: string;
+  modelId: string;
+  /** その判断を記録した時刻（UNIXミリ秒） */
+  at: number;
+  /** 成功した判断の中で、提供元かモデルIDが途中で変わったことがあるか */
+  changed: boolean;
+}
+
+/** 判断の記録1件（成功・失敗を問わない）。投稿や注文票の runSeq から、そのときのモデルを引くのに使う */
+export interface RunModel {
+  seq: number;
   agentId: string;
   provider: string;
   modelId: string;
@@ -90,4 +102,6 @@ export interface View {
   agents: AgentPerformance[];
   /** 判断の記録のあるAIのモデル（AIのID順） */
   models: AgentModel[];
+  /** 判断の記録の全件（seq の順）。判断ごとのモデルを引く */
+  runs: RunModel[];
 }

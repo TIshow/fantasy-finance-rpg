@@ -1,5 +1,6 @@
 // AIのモデル（提供元と版）の表示。判断の記録（agent.run）の model を読むだけ。
 // 規則で動くAIは provider が "rule"。LLM の提供元は anthropic・openai・google。それ以外の値は、書かれたまま出す。
+import { formatJst, formatMonthDay } from "./format";
 import type { View } from "./types";
 
 export type ModelKind = "llm" | "rule" | "script" | "other";
@@ -13,6 +14,10 @@ export interface ModelLabel {
   modelId: string;
   /** "Anthropic · モデルID" */
   text: string;
+  /** "最後の判断（11/09）のモデル"。AIごとの表示でだけ入る。1件ごとの判断のモデルでは null */
+  lastText: string | null;
+  /** 成功した判断の途中で、モデルが変わったことがあるか */
+  changed: boolean;
 }
 
 const PROVIDERS: Record<string, { name: string; kind: ModelKind; kindText: string }> = {
@@ -27,10 +32,17 @@ const PROVIDERS: Record<string, { name: string; kind: ModelKind; kindText: strin
 export function labelModel(provider: string, modelId: string): ModelLabel {
   const known = Object.hasOwn(PROVIDERS, provider) ? PROVIDERS[provider]! : null;
   const providerText = known?.name ?? provider;
-  return { kind: known?.kind ?? "other", kindText: known?.kindText ?? "提供元は未登録", providerText, modelId, text: `${providerText} · ${modelId}` };
+  return { kind: known?.kind ?? "other", kindText: known?.kindText ?? "提供元は未登録", providerText, modelId, text: `${providerText} · ${modelId}`, lastText: null, changed: false };
 }
 
-/** AIごとの、最後の判断の記録のモデル。判断の記録がないAIは含まない */
+/** AIごとの、最後に成功した判断のモデル（失敗した判断は数えない）。判断の記録がないAIは含まない */
 export function modelsOf(view: View): Map<string, ModelLabel> {
-  return new Map(view.models.map((m) => [m.agentId, labelModel(m.provider, m.modelId)] as const));
+  return new Map(view.models.map((m) => [m.agentId, { ...labelModel(m.provider, m.modelId), lastText: `最後の判断（${formatMonthDay(formatJst(m.at).slice(0, 10))}）のモデル`, changed: m.changed }] as const));
+}
+
+/** 判断の記録の番号（runSeq）から、そのときのモデル。記録がなければ null */
+export function runModelOf(view: View, runSeq: number | null): ModelLabel | null {
+  if (runSeq === null) return null;
+  const r = view.runs.find((x) => x.seq === runSeq);
+  return r ? labelModel(r.provider, r.modelId) : null;
 }

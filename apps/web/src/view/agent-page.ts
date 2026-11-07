@@ -5,7 +5,7 @@ import { dir, latestPost, MARK, settledDates, type Direction } from "./arena";
 import { characterOf, handleOf, type Character } from "./characters";
 import { formatBp, formatJst, formatJstShort, formatMonthDay, formatSignedYenMark, formatYenMark, roundedRatio } from "./format";
 import { INTENT_LABEL, REASON, STANCE_LABEL, STATUS } from "./labels";
-import { modelsOf, type ModelLabel } from "./models";
+import { modelsOf, runModelOf, type ModelLabel } from "./models";
 import type { View } from "./types";
 
 export const CHART_W = 600;
@@ -54,9 +54,13 @@ export interface DecisionItem {
   /** 投稿の種類と見立て（"戦略"・"▲ 強気"） */
   tags: string[];
   runSeq: number | null;
+  /** この判断をしたときのモデル（判断の記録の runSeq から）。記録がなければ null */
+  model: ModelLabel | null;
 }
 export interface DecisionDay {
-  /** "11/18" */
+  /** "2026-11-18"（日本時間。見出しの key） */
+  date: string;
+  /** "11/18"。表示する日が年をまたぐときは "2025/12/30" */
   dateText: string;
   items: DecisionItem[];
 }
@@ -115,7 +119,7 @@ export const fillKey = (seq: number, fillIndex: number) => `f${seq}-${fillIndex}
  * その日の判断：投稿と注文票を、記録された日（日本時間）ごとにまとめる。
  * 記録にある項目（投稿の本文・種類・見立て、注文票の中身、拒否の理由）だけを出す。LLM が書く「判断の理由」は、出力の形が決まってから足す
  */
-export function decisionsOf(mine: View["timeline"]): DecisionDay[] {
+export function decisionsOf(mine: View["timeline"], modelOf: (runSeq: number | null) => ModelLabel | null = () => null): DecisionDay[] {
   const byDay = new Map<string, (DecisionItem & { at: number; seq: number })[]>();
   const add = (at: number, item: DecisionItem & { at: number; seq: number }) => (byDay.get(formatJst(at).slice(0, 10)) ?? byDay.set(formatJst(at).slice(0, 10), []).get(formatJst(at).slice(0, 10))!).push(item);
   for (const t of mine) {
@@ -123,15 +127,17 @@ export function decisionsOf(mine: View["timeline"]): DecisionDay[] {
     if (t.kind === "post") {
       const tags = [...(t.intent ? [INTENT_LABEL[t.intent]] : []), ...(t.stance ? [`${STANCE_LABEL[t.stance].mark} ${STANCE_LABEL[t.stance].text}`] : [])];
       const note = t.withdrawn ? `非表示（${t.withdrawn.reason || "理由の記載なし"}）` : t.text === null ? "本文が保管にありません" : null;
-      add(t.at, { at: t.at, seq: t.seq, key: `p${t.seq}`, timeText: time, kind: "post", label: "投稿", text: t.text ?? "", note, symbol: t.symbol, tags, runSeq: t.runSeq });
+      add(t.at, { at: t.at, seq: t.seq, key: `p${t.seq}`, timeText: time, kind: "post", label: "投稿", text: t.text ?? "", note, symbol: t.symbol, tags, runSeq: t.runSeq, model: modelOf(t.runSeq) });
     } else if (t.kind === "order_sheet") {
       const text = t.orders.length === 0 ? "注文なし" : t.orders.map((o) => `${SIDE[o.side]} ${o.symbol} ${o.qty}株`).join("、");
-      add(t.at, { at: t.at, seq: t.seq, key: `s${t.seq}`, timeText: time, kind: "orders", label: `注文票（約定日 ${formatMonthDay(t.tradingDate)}）`, text, note: null, symbol: null, tags: [], runSeq: t.runSeq });
+      add(t.at, { at: t.at, seq: t.seq, key: `s${t.seq}`, timeText: time, kind: "orders", label: `注文票（約定日 ${formatMonthDay(t.tradingDate)}）`, text, note: null, symbol: null, tags: [], runSeq: t.runSeq, model: modelOf(t.runSeq) });
     } else if (t.kind === "rejected") {
-      add(t.at, { at: t.at, seq: t.seq, key: `r${t.seq}`, timeText: time, kind: "rejected", label: "注文票を拒否", text: REASON[t.reason] ?? t.reason, note: null, symbol: null, tags: [], runSeq: t.runSeq });
+      add(t.at, { at: t.at, seq: t.seq, key: `r${t.seq}`, timeText: time, kind: "rejected", label: "注文票を拒否", text: REASON[t.reason] ?? t.reason, note: null, symbol: null, tags: [], runSeq: t.runSeq, model: modelOf(t.runSeq) });
     }
   }
-  return [...byDay].sort((x, y) => (x[0] < y[0] ? 1 : -1)).slice(0, DECISION_DAYS).map(([day, items]) => ({ dateText: formatMonthDay(day), items: items.sort((p, q) => p.at - q.at || p.seq - q.seq).map(({ at: _a, seq: _s, ...rest }) => rest) }));
+  const days = [...byDay].sort((x, y) => (x[0] < y[0] ? 1 : -1)).slice(0, DECISION_DAYS);
+  const crossesYear = new Set(days.map(([day]) => day.slice(0, 4))).size > 1;
+  return days.map(([day, items]) => ({ date: day, dateText: crossesYear ? `${day.slice(0, 4)}/${formatMonthDay(day)}` : formatMonthDay(day), items: items.sort((p, q) => p.at - q.at || p.seq - q.seq).map(({ at: _a, seq: _s, ...rest }) => rest) }));
 }
 
 export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account>, agentId: string): AgentPage | null {
@@ -214,7 +220,7 @@ export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account
   const history = rows.sort((p, q) => (key(p.date) < key(q.date) ? 1 : key(p.date) > key(q.date) ? -1 : p.seq - q.seq || p.idx - q.idx)).map((r) => r.row);
 
   const suspended = suspensionOf(view, agentId);
-  const decisions = decisionsOf(mine);
+  const decisions = decisionsOf(mine, (n) => runModelOf(view, n));
 
   return {
     agentId, character, model: modelsOf(view).get(agentId) ?? null, loggedName: a.agentName, handle: handleOf(agentId), rank: settledDays.at(-1)?.rank ?? null, rankAsOf: settledDays.at(-1) ? formatMonthDay(settledDays.at(-1)!.date) : null, suspended, badges, latestPost: latestPost(view, agentId), chart, holdings, cash, history, decisions,
