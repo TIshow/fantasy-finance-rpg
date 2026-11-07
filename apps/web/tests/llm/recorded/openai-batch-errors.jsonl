@@ -1,0 +1,4 @@
+{"id":"batch_req_c1","custom_id":"run-c","response":{"status_code":400,"request_id":"req_secret789","body":{"error":{"message":"request-id=req_secret789 Unsupported parameter: 'temperature'","type":"invalid_request_error","param":"temperature","code":null}}},"error":null}
+{"id":"batch_req_d1","custom_id":"run-d","response":null,"error":{"code":"batch_expired","message":"This request could not be executed before the completion window expired."}}
+
+{"id":"batch_req_e1","custom_id":"run-e","response":{"status_code":500,"request_id":"req_secret000","body":{"error":{"message":"x","type":"made_up_error req_secret123","param":null,"code":"made_up_code"}}},"error":null}
