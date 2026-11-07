@@ -14,6 +14,8 @@
 import type { LlmMessage, LlmModel } from "../contracts";
 import { sha256Hex } from "../events/hash";
 import type { BatchCall, BatchFailure, SentBody } from "./anthropic-batch";
+import type { TokenUsage } from "./cost";
+import { geminiTokenUsage } from "./gemini-pricing";
 
 /**
  * 使うモデル：Gemini 3.8 Flash（安定版。バッチに対応）。Flash は Google のモデルの中くらいの性能・価格の帯
@@ -80,6 +82,31 @@ export interface GeminiBatchStatus {
 /** 作成の結果。成功でも失敗でも、送った本文を一緒に返す（監査と、課金が分からない失敗の突き合わせに使う） */
 export type GeminiCreateResult = BatchCall<GeminiBatchStatus> & { sent: SentBody };
 
+/**
+ * 1件の結果。succeeded は応答が返ったもの（トークン数があり、課金される）。
+ * errored は、その1件の失敗（google.rpc.Code が 0〜16 のときだけ errorCode を持つ。エラー文は持たない）。
+ * 失敗した1件が課金されるかは資料に書かれていないので、呼び出し側は maxCost を費用として残す。
+ * malformed は、その1件の形が合わなかったもの（index は結果の並びの何番目か。1から）。customId は決まりに合うときだけ持つ。
+ */
+export type GeminiItemResult =
+  | {
+      customId: string;
+      type: "succeeded";
+      output: string;
+      respondedModel: string | null;
+      finishReason: string | null;
+      blockReason: string | null;
+      usage: TokenUsage;
+    }
+  | { customId: string; type: "errored"; errorCode?: number }
+  | { type: "malformed"; index: number; customId?: string };
+
+export interface GeminiResults {
+  status: GeminiBatchStatus;
+  /** 終わる前（pending・running）は空 */
+  items: GeminiItemResult[];
+}
+
 export interface GeminiListOptions {
   /** 1〜1000 の整数。なければ提供元の既定 */
   pageSize?: number;
@@ -114,6 +141,8 @@ const MODEL_ID = /^[a-z0-9][a-z0-9.-]{0,63}$/;
 const PAGE_TOKEN = /^[\x21-\x7e]{1,2048}$/;
 /** 先頭が 0 でない整数（9桁まで） */
 const MAX_TOKENS = /^[1-9][0-9]{0,8}$/;
+/** 提供元の列挙の値（大文字と下線だけ）。自由な文は入れない */
+const ENUM = /^[A-Z][A-Z_]{0,63}$/;
 /** int64 を文字列で返す欄（"0" か、先頭が 0 でない15桁まで） */
 const INT64_STR = /^(0|[1-9][0-9]{0,14})$/;
 const THINKING: Readonly<Record<string, ThinkingLevel>> = Object.freeze({ low: "LOW", medium: "MEDIUM", high: "HIGH" });
@@ -180,6 +209,7 @@ const count = (v: unknown): number => {
   if (isCount(v)) return v;
   return need(isStr(v) && INT64_STR.test(v), Number(v));
 };
+const optEnum = (v: unknown): string | null => (v === undefined || v === null ? null : need(isStr(v) && ENUM.test(v), v as string));
 /** google.rpc.Code（0〜16）のときだけ返す */
 const rpcCode = (v: unknown): number | undefined => (isObj(v) && isCount(v.code) && v.code <= 16 ? v.code : undefined);
 
@@ -232,6 +262,106 @@ function parseStatus(json: unknown): GeminiBatchStatus {
   };
 }
 
+/** 1件の結果を読む。形が合わなければ Malformed を投げる */
+function parseItem(json: unknown): GeminiItemResult {
+  need(isObj(json) && isObj(json.metadata) && isStr(json.metadata.key) && CUSTOM_ID.test(json.metadata.key), null);
+  const j = json as Record<string, unknown>;
+  const customId = (j.metadata as Record<string, unknown>).key as string;
+  if (j.error !== undefined) {
+    need(isObj(j.error) && j.response === undefined, null);
+    // コード 0 は「成功」の意味なので、失敗の1件としては形が合わない
+    need((j.error as Record<string, unknown>).code !== 0, null);
+    const errorCode = rpcCode(j.error);
+    return errorCode === undefined ? { customId, type: "errored" } : { customId, type: "errored", errorCode };
+  }
+  need(isObj(j.response), null);
+  const r = j.response as Record<string, unknown>;
+  const candidates = r.candidates ?? [];
+  // 候補は1つまで（候補の数は指定しないので、既定の1つ）
+  need(Array.isArray(candidates) && candidates.length <= 1 && isObj(r.usageMetadata), null);
+  const u = r.usageMetadata as Record<string, unknown>;
+  need(isCount(u.promptTokenCount), null);
+  const c = (candidates as unknown[])[0];
+  let output = "";
+  let finishReason: string | null = null;
+  if (c !== undefined) {
+    need(isObj(c), null);
+    const cand = c as Record<string, unknown>;
+    finishReason = optEnum(cand.finishReason);
+    const parts = isObj(cand.content) ? cand.content.parts : undefined;
+    need(parts === undefined || Array.isArray(parts), null);
+    // 出力は text の部分だけをつなぐ（考えた過程の要約（thought: true）などは入れない）
+    output = ((parts as unknown[] | undefined) ?? [])
+      .filter((p) => isObj(p) && p.thought !== true && p.text !== undefined)
+      .map((p) => need(isStr((p as Record<string, unknown>).text), (p as Record<string, unknown>).text as string))
+      .join("");
+  }
+  const feedback = r.promptFeedback;
+  need(feedback === undefined || isObj(feedback), null);
+  const respondedModel = r.modelVersion === undefined ? null : need(isStr(r.modelVersion), r.modelVersion as string);
+  const promptTokens = u.promptTokenCount as number;
+  const toolUsePromptTokens = count(u.toolUsePromptTokenCount);
+  const candidatesTokens = count(u.candidatesTokenCount);
+  const thoughtsTokens = count(u.thoughtsTokenCount);
+  // 合計（totalTokenCount）が、入力・候補・考えた過程の足し算より大きいときは、差を出力に足す
+  // （資料にない種類のトークンも、高いほうの出力の単価で数える側）
+  const total = count(u.totalTokenCount);
+  const extra = Math.max(0, total - (promptTokens + toolUsePromptTokens + candidatesTokens + thoughtsTokens));
+  return {
+    customId,
+    type: "succeeded",
+    output,
+    respondedModel,
+    finishReason,
+    blockReason: isObj(feedback) ? optEnum(feedback.blockReason) : null,
+    usage: geminiTokenUsage({ promptTokens, toolUsePromptTokens, candidatesTokens: candidatesTokens + extra, thoughtsTokens }),
+  };
+}
+
+/**
+ * 結果の並び（inlinedResponses）を探す。資料の中で置き場所の書き方が3通りある：
+ * metadata.output（バッチの資料の欄）、response.output（作成の応答の例）、response（使い方の例）。3つとも読む。
+ * 2か所以上にあって中身（件数を含む）が食い違えば、どれを信じるか決められないので Malformed（黙って結果を失わない）。
+ * どこにもなければ undefined。見つかったのに形が合わなければ Malformed。
+ * TODO：本物の API で応答の形を確かめたら、置き場所を1か所に絞る（#179）。
+ */
+function findInlined(op: Record<string, unknown>): unknown[] | undefined {
+  const m = op.metadata as Record<string, unknown>;
+  const r = isObj(op.response) ? op.response : undefined;
+  const places = [isObj(m.output) ? m.output : undefined, r !== undefined && isObj(r.output) ? r.output : undefined, r];
+  const found: unknown[][] = [];
+  for (const p of places) {
+    if (p === undefined || p.inlinedResponses === undefined) continue;
+    const box = p.inlinedResponses;
+    need(isObj(box) && (box.inlinedResponses === undefined || Array.isArray(box.inlinedResponses)), null);
+    found.push(((box as Record<string, unknown>).inlinedResponses as unknown[] | undefined) ?? []);
+  }
+  if (found.length === 0) return undefined;
+  const first = JSON.stringify(found[0]);
+  need(found.every((f) => JSON.stringify(f) === first), null);
+  return found[0];
+}
+
+function parseResults(json: unknown): GeminiResults {
+  const status = parseStatus(json);
+  if (!TERMINAL.has(status.state)) return { status, items: [] };
+  const list = findInlined(json as Record<string, unknown>);
+  // 成功で終わったのに結果がない（ファイルで返った場合を含む。この口はファイルの結果を読まない）
+  if (list === undefined) return need(status.state !== "succeeded" || status.counts.requests === 0, { status, items: [] });
+  // 成功で終わったなら、結果の件数は依頼の件数と同じはず。違えば黙って結果を失わないよう、形が合わないとする
+  // （requestCount が省かれて 0 と読んだときも、結果があれば合わないので形が合わないとする。本物の API で確かめる）
+  need(status.state !== "succeeded" || list.length === status.counts.requests, null);
+  const items = list.map((it, i): GeminiItemResult => {
+    try {
+      return parseItem(it);
+    } catch {
+      const key = isObj(it) && isObj(it.metadata) ? it.metadata.key : undefined;
+      return isStr(key) && CUSTOM_ID.test(key) ? { type: "malformed", index: i + 1, customId: key } : { type: "malformed", index: i + 1 };
+    }
+  });
+  return { status, items };
+}
+
 /** 読めない項目から、決まりに合う name と metadata.displayName だけを取り出す */
 function unreadableOf(op: unknown): GeminiUnreadableBatch {
   if (!isObj(op)) return {};
@@ -269,6 +399,52 @@ function parseList(json: unknown): GeminiList {
   }
   const unreachable = ((j.unreachable as unknown[] | undefined | null) ?? []).length;
   return { batches, unreadable, unreachable, nextPageToken: isStr(token) && token !== "" ? token : null };
+}
+
+export interface ReconciledGeminiResults {
+  /** 依頼した customId ごとの結果（1回だけ出て、形が合ったもの） */
+  matched: Map<string, Exclude<GeminiItemResult, { type: "malformed" }>>;
+  /** 依頼したのに結果がない customId（形が合わない1件だけのものを含む） */
+  missing: string[];
+  /** 結果に2回以上出た customId（形が合わない1件も数える）。どれを信じるか決められないので matched に入れない */
+  duplicated: string[];
+  /** 依頼にない customId の結果の数 */
+  unexpected: number;
+  /** 形が合わなかった1件の数 */
+  malformed: number;
+}
+
+/**
+ * 依頼した customId と結果を突き合わせる。資料では結果は依頼の順だが、並びは信じず customId で突き合わせる。
+ * 重なり・依頼にない ID・形が合わない1件は、信じずに数だけ返す（呼び出し側は missing と duplicated を maxCost のまま残す）。
+ */
+export function reconcileGeminiResults(requested: readonly string[], items: readonly GeminiItemResult[]): ReconciledGeminiResults {
+  const wanted = new Set(requested);
+  if (wanted.size !== requested.length) throw new RangeError("requested customIds must be unique");
+  const seen = new Map<string, GeminiItemResult[]>();
+  let unexpected = 0;
+  let malformed = 0;
+  for (const it of items) {
+    if (it.type === "malformed") malformed += 1;
+    const id = it.customId;
+    if (id === undefined) continue;
+    if (!wanted.has(id)) {
+      if (it.type !== "malformed") unexpected += 1;
+      continue;
+    }
+    seen.set(id, [...(seen.get(id) ?? []), it]);
+  }
+  const matched = new Map<string, Exclude<GeminiItemResult, { type: "malformed" }>>();
+  const duplicated: string[] = [];
+  const missing: string[] = [];
+  for (const id of wanted) {
+    const got = seen.get(id) ?? [];
+    const only = got[0];
+    if (got.length > 1) duplicated.push(id);
+    else if (only !== undefined && only.type !== "malformed") matched.set(id, only);
+    else missing.push(id);
+  }
+  return { matched, missing, duplicated, unexpected, malformed };
 }
 
 function failureOf(status: number): BatchFailure {
@@ -399,6 +575,15 @@ export class GeminiBatchClient {
   async cancel(batchId: string): Promise<BatchCall<null>> {
     checkBatchId(batchId);
     return this.#call("POST", `/${GEMINI_API_VERSION}/batches/${batchId}:cancel`, undefined, (json) => need(json === EMPTY_BODY || isObj(json), null), this.#timeoutMs);
+  }
+
+  /**
+   * 状態と結果（作成のときの inline の依頼の結果）。終わる前は items が空。
+   * 1件の形が合わないときは、その1件だけ malformed にして、ほかの1件は返す。reconcileGeminiResults で突き合わせる。
+   */
+  async results(batchId: string): Promise<BatchCall<GeminiResults>> {
+    checkBatchId(batchId);
+    return this.#call("GET", `/${GEMINI_API_VERSION}/batches/${batchId}`, undefined, parseResults, this.#resultsTimeoutMs);
   }
 
   async #call<T>(method: string, path: string, body: string | undefined, parse: (json: unknown) => T, timeoutMs: number): Promise<BatchCall<T>> {
