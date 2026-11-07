@@ -9,7 +9,7 @@ import { priceBand } from "../../ledger/auction";
 import type { Deciyen, Order } from "../../ledger/types";
 import type { DecisionInput, ListedInput, RunnerAgent } from "../day";
 import { COMPANIES, type Company, fairPrice } from "./companies";
-import { type LiquidityOrder, MAKER_PARAMS, NOISE_PARAMS, makerOrders, noiseOrders } from "./liquidity";
+import { type LiquidityOrder, MAKER_PARAMS, NOISE_PARAMS, dayFair, makerOrders, noiseOrders } from "./liquidity";
 
 /** 最初の持ち株と現金（#113 の lead の決定）。現金は0.1円単位 */
 export const ALLOTMENT = {
@@ -57,6 +57,19 @@ export async function setUpParticipants(store: EventStore, startDate: string, co
 }
 
 const refPrice = (x: ListedInput): Deciyen => x.refPrice.price;
+/** 目安の価格：締めより前に発表済みの決算（直近4四半期）から fairPrice で出す。発表がまだなければ上場の価格 */
+const fairOf = (company: Company, x: ListedInput): Deciyen => (x.disclosures.length > 0 ? fairPrice(company, x.disclosures.map((q, index) => ({ index, ...q }))) : x.listing.price);
+/**
+ * その日の値幅と目安の価格。前の営業日（記録された直近の板寄せの結果）に値段がつかなかった銘柄では、目安の価格を値幅の中まで
+ * 寄せる（dayFair。#139 の lead の決定）。マーケットメイカーとばらばらの参加者は、どちらもこの価格で値幅の端の日を決める
+ */
+const targetOf = (company: Company, x: ListedInput) => {
+  const band = priceBand(refPrice(x));
+  const prevUnpriced = x.auctions.at(-1)?.price === null;
+  return { band, ...dayFair(fairOf(company, x), band, prevUnpriced) };
+};
+/** 寄せた日の、判断の記録に残す説明（寄せたことと、寄せる前と後の価格） */
+const pulledNote = (symbol: string, from: Deciyen, to: Deciyen) => `${symbol} had no price on the previous business day, so the fair price was pulled into the price band: before ${from}, after ${to}`;
 /** 仮の注文の形（成行は limit: null）を、注文票の形（成行は limit を書かない）にする */
 const toOrder = ({ limit, ...o }: LiquidityOrder): Order => (limit === null ? o : { ...o, limit });
 /**
@@ -80,39 +93,54 @@ export async function makerAgent(company: Company): Promise<RunnerAgent> {
   const id = makerId(company.symbol);
   const text =
     "Quote buy and sell limits around the fair price from disclosed results; lean against the inventory. " +
-    "When the center is outside the daily price band, quote both a buy and a sell at the band edge so that a price forms and moves toward the fair price.";
+    "When the previous business day had no price, pull the fair price to the nearest edge of the daily price band for that day. " +
+    "When the fair price is outside the daily price band, quote only the side toward the fair price at the band edge (sell at the upper limit, buy at the lower limit); otherwise keep the center inside the band. " +
+    "Never quote a buy that can trade against its own sell.";
   return {
     id,
     ...(await ruleModel("market-maker", text, { ...MAKER_PARAMS, target: ALLOTMENT.maker.target })),
     decide(input: DecisionInput) {
       const x = input.listed.find((l) => l.symbol === company.symbol);
       if (!x) return { orders: [], post: null, note: `${company.symbol} is not in the universe` };
-      const fair = x.disclosures.length > 0 ? fairPrice(company, x.disclosures.map((q, index) => ({ index, ...q }))) : x.listing.price;
+      const { band, fair, pulledFrom } = targetOf(company, x);
       const held = input.account.holdings[company.symbol]?.qty ?? 0;
-      const orders = makerOrders({ symbol: company.symbol, fair, band: priceBand(refPrice(x)), held, target: ALLOTMENT.maker.target, cash: input.account.cash });
-      return { orders: orders.map(toOrder), post: null, note: `fair ${fair} from ${x.disclosures.length} disclosed quarters, held ${held}` };
+      const orders = makerOrders({ symbol: company.symbol, fair, band, held, target: ALLOTMENT.maker.target, cash: input.account.cash });
+      const pulled = pulledFrom === null ? "" : `; ${pulledNote(company.symbol, pulledFrom, fair)}`;
+      return { orders: orders.map(toOrder), post: null, note: `fair ${pulledFrom ?? fair} from ${x.disclosures.length} disclosed quarters, held ${held}${pulled}` };
     },
   };
 }
 
 /** ばらばらに売買する参加者。前日の価格（値幅の基準の価格）のまわりに、固定シードの乱数で小さい注文を出す */
-export async function noiseAgent(seed: number): Promise<RunnerAgent> {
+export async function noiseAgent(seed: number, companies: readonly Company[] = COMPANIES): Promise<RunnerAgent> {
   const text =
     "Place small random market and limit orders around the previous price with a fixed seed. " +
-    "Lean toward buying when shares fall below the first allotment and toward selling when cash falls below the first cash, keeping a random part.";
+    "Lean toward buying when shares fall below the first allotment and toward selling when cash falls below the first cash, keeping a random part. " +
+    "When the fair price from disclosed results is outside the daily price band, lean toward buying above the upper limit and selling below the lower limit instead. " +
+    "Use the same fair price as the market maker, pulled into the band after a business day without a price.";
   return {
     id: NOISE_ID,
     ...(await ruleModel("noise", text, { ...NOISE_PARAMS, seed })),
     decide(input: DecisionInput) {
-      const markets = input.listed.map((x) => ({ symbol: x.symbol, prevPrice: refPrice(x), band: priceBand(refPrice(x)) }));
+      const pulled: string[] = [];
+      const markets = input.listed.map((x) => {
+        // 値幅の端の日：その日の目安の価格（発表済みの決算から。前の営業日に値段がつかなければ値幅の中まで寄せたもの）が、
+        // 値幅の外にある銘柄。マーケットメイカーも同じ価格・同じ決め方をする
+        const company = companies.find((c) => c.symbol === x.symbol);
+        if (!company) return { symbol: x.symbol, prevPrice: refPrice(x), band: priceBand(refPrice(x)) };
+        const { band, fair, pulledFrom } = targetOf(company, x);
+        if (pulledFrom !== null) pulled.push(pulledNote(x.symbol, pulledFrom, fair));
+        const edge = fair > band.upper ? ("upper" as const) : fair < band.lower ? ("lower" as const) : undefined;
+        return { symbol: x.symbol, prevPrice: refPrice(x), band, ...(edge ? { edge } : {}) };
+      });
       const holdings = Object.fromEntries(Object.entries(input.account.holdings).map(([s, h]) => [s, h.qty]));
       // 片寄りの基準は、記録された最初の現金と配分（コードの定数ではなく。あとから上場した企業や、配分の数字を変えたときも合うように）
       const baseline = { shares: input.start.shares, cash: input.start.cash };
       const orders = noiseOrders({ seed, tradingDate: input.tradingDate, markets, holdings, cash: input.account.cash, baseline });
-      return { orders: orders.map(toOrder), post: null, note: `random orders with seed ${seed}` };
+      return { orders: orders.map(toOrder), post: null, note: [`random orders with seed ${seed}`, ...pulled].join("; ") };
     },
   };
 }
 
 /** 企業ごとのマーケットメイカーと、ばらばらに売買する参加者（runner の agents に、AI と一緒に渡す） */
-export const liquidityAgents = async (seed: number, companies: readonly Company[] = COMPANIES) => [...(await Promise.all(companies.map(makerAgent))), await noiseAgent(seed)];
+export const liquidityAgents = async (seed: number, companies: readonly Company[] = COMPANIES) => [...(await Promise.all(companies.map(makerAgent))), await noiseAgent(seed, companies)];

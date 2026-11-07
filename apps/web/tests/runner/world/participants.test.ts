@@ -8,11 +8,11 @@ import { IngestedMarketData, type SourceQuote } from "../../../src/ingest/market
 import { priceBand } from "../../../src/ledger/auction";
 import { cutoffOf } from "../../../src/ledger/ledger";
 import type { Order } from "../../../src/ledger/types";
-import { runDay, scheduleOf } from "../../../src/runner/day";
+import { type DecisionInput, type ListedInput, runDay, scheduleOf } from "../../../src/runner/day";
 import { RunnerValues } from "../../../src/runner/values";
 import { COMPANIES, fairPrice, listingPrice, quarters } from "../../../src/runner/world/companies";
 import { listCompanies } from "../../../src/runner/world/listing";
-import { ALLOTMENT, NOISE_ID, liquidityAgents, makerId, setUpParticipants } from "../../../src/runner/world/participants";
+import { ALLOTMENT, NOISE_ID, liquidityAgents, makerAgent, makerId, noiseAgent, setUpParticipants } from "../../../src/runner/world/participants";
 import { InMemoryEventStore } from "../../../src/store/memory-store";
 import { FakeClock } from "../../contracts/fakes";
 import { FIXTURE_HOLIDAYS } from "../../fixtures/golden";
@@ -135,15 +135,12 @@ describe("runDay（売買役の毎日の注文）", async () => {
 
   it("マーケットメイカーは自分の銘柄の指値を、値幅の内側に出し、入力に上場の記録と前の日までの板寄せを入れる", () => {
     const sheets = of("order_sheet.committed").filter((e) => p(e).agentId === makerId("VRN1"));
-    // 初日は買いと売りを3段ずつ。決算の発表で目安の価格が値幅の下限より下がった日は、下限の値段で売りと買いの両方（#139）
+    // 初日は買いと売りを3段ずつ。決算の発表で目安の価格が値幅の下限より下がった日は、下限の値段で買いだけ（目安に向かう側だけ。自己約定しない。#139）
     expect((p(sheets[0]!).orders as Order[]).map((o) => o.side)).toEqual(["sell", "sell", "sell", "buy", "buy", "buy"]);
     // 値幅は、2日目の前で価格のついた直近の板寄せ（なければ上場の価格）から決まる
     const day1 = of("auction.cleared").find((e) => p(e).symbol === "VRN1" && p(e).date === p(sheets[0]!).tradingDate)!;
     const ref = (p(day1).price as number | null) ?? listingPrice(SEED, VRN1);
-    expect(p(sheets[1]!).orders).toEqual([
-      { symbol: "VRN1", side: "sell", qty: 900, limit: priceBand(ref).lower },
-      { symbol: "VRN1", side: "buy", qty: 900, limit: priceBand(ref).lower },
-    ]);
+    expect(p(sheets[1]!).orders).toEqual([{ symbol: "VRN1", side: "buy", qty: 900, limit: priceBand(ref).lower }]);
     for (const s of sheets) {
       const orders = p(s).orders as Order[];
       const prev = of("auction.cleared").filter((e) => p(e).symbol === "VRN1" && (p(e).date as string) < (p(s).tradingDate as string));
@@ -175,5 +172,46 @@ describe("runDay（売買役の毎日の注文）", async () => {
     await w.deps.waitUntil(scheduleOf(TRADING_DAYS.at(-1)!).closeAt + 3_600_000);
     await runDay(TRADING_DAYS.at(-1)!, w.deps);
     expect((await w.all()).length).toBe(events.length);
+  });
+});
+
+describe("値段がつかなかった次の日は、目安の価格を値幅の中まで寄せる（#139 の lead の決定）", async () => {
+  // VRN1 の目安の価格は上場の価格（決算の発表がない）。前の日の価格は上場の価格の4倍（＝目安は値幅の下限より下）
+  const listing = listingPrice(SEED, VRN1);
+  const ref = listing * 4;
+  const band = priceBand(ref);
+  const input = (prevPrice: number | null): DecisionInput => {
+    const x: ListedInput = {
+      symbol: "VRN1",
+      listing: { seq: 1, price: listing, sharesOutstanding: VRN1.sharesOutstanding },
+      refPrice: { seq: 2, price: ref },
+      auctions: [
+        { seq: 2, date: "2026-11-05", price: ref, volume: 300 },
+        { seq: 3, date: "2026-11-06", price: prevPrice, volume: prevPrice === null ? 0 : 300 },
+      ],
+      disclosures: [],
+    };
+    return { agentId: "x", tradingDate: "2026-11-09", at: 0, closes: [], splits: [], account: { cash: 500_000_000, holdings: { VRN1: { qty: 5000, cost: 0 } } }, listed: [x], start: { cash: 300_000_000, shares: { VRN1: 1000 } } };
+  };
+  const maker = await makerAgent(VRN1);
+  const noise = await noiseAgent(SEED, [VRN1]);
+
+  it("前の営業日に値段がつかなければ、マーケットメイカーは値幅の下限を目安にして売りと買いの両方を出し、記録に寄せる前と後の価格を残す", async () => {
+    expect(listing).toBeLessThan(band.lower);
+    const d = await maker.decide(input(null));
+    expect(d.note).toContain(`VRN1 had no price on the previous business day, so the fair price was pulled into the price band: before ${listing}, after ${band.lower}`);
+    expect(d.orders.some((o) => o.side === "buy")).toBe(true);
+    expect(d.orders.some((o) => o.side === "sell")).toBe(true);
+    for (const o of d.orders) expect(o.limit).toBeGreaterThanOrEqual(band.lower);
+    // ばらばらの参加者も同じ寄せた価格で決める（記録にも残す）
+    expect((await noise.decide(input(null))).note).toContain(`before ${listing}, after ${band.lower}`);
+  });
+
+  it("前の営業日に値段がついていれば寄せない（値幅の端の日のまま。マーケットメイカーは下限で買いだけを出す）", async () => {
+    const d = await maker.decide(input(ref));
+    expect(d.note).not.toContain("pulled");
+    expect(d.orders.length).toBeGreaterThan(0);
+    expect(d.orders.every((o) => o.side === "buy" && o.limit === band.lower)).toBe(true);
+    expect((await noise.decide(input(ref))).note).not.toContain("pulled");
   });
 });
