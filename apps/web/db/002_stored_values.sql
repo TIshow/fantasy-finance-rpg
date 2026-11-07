@@ -1,7 +1,7 @@
 -- ログの外に置く値と本文の表（docs/EVENT_LOG.md §5.2。lead の指示 #25）。何度流しても同じ結果になる（冪等）。
 -- 価格・分割・配当の内容（kind = 'value'）と、投稿の本文・LLM の出力（kind = 'body'）を、ハッシュを鍵にして追記だけで残す。
 -- ハッシュは SHA-256(salt ‖ 中身)。アプリが開くときに全行を照合する（本文は SQL の制約でも確かめる。値の正規化は SQL で再現しない）。
--- 更新・削除・TRUNCATE は、events と同じく、表の持ち主でもトリガが断る。ffr_app には SELECT と INSERT だけを許す。
+-- 更新・削除・TRUNCATE は、events と同じく、表の持ち主でもトリガが断る。ffr_app には SELECT と INSERT だけを、ffr_reader には SELECT だけを許す。
 -- ただし、非表示にした投稿の本文だけは、運営者が erase_withdrawn_body で消せる（db/003_erase_body.sql が削除の見張りを差し替える）。
 
 CREATE TABLE IF NOT EXISTS stored_values (
@@ -31,5 +31,10 @@ BEGIN
     GRANT SELECT, INSERT ON stored_values TO ffr_app;
   ELSE
     RAISE NOTICE 'role ffr_app does not exist: no privileges were granted (see the header of 001_events.sql)';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ffr_reader') THEN
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO ffr_reader', current_schema());
+    REVOKE ALL ON stored_values FROM ffr_reader;
+    GRANT SELECT ON stored_values TO ffr_reader;
   END IF;
 END $$;
