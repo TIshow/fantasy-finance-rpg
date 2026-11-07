@@ -17,7 +17,7 @@ import { listCompanies } from "../src/runner/world/listing";
 import { liquidityAgents, setUpParticipants } from "../src/runner/world/participants";
 import { PgEventStore, readAllEvents } from "../src/store/pg-store";
 import { PgValueStore } from "../src/store/pg-values";
-import type { SqlDb } from "../src/store/sql";
+import type { SqlDb, SqlRunner } from "../src/store/sql";
 import type { EventStore } from "../src/contracts";
 
 /** 架空の世界の乱数の種。変えると、上場の価格とばらばらの参加者の注文が変わるので、動かし始めたら変えない */
@@ -152,4 +152,80 @@ export async function verifyDatabase(db: SqlDb, holidayTable: HolidayTable = bun
   await replay(events, values, { holidayTables: new Map([[holidayTable.contentSha256, holidayTable]]) });
   const agents = [...new Set(events.filter((e) => e.type === "agent.registered").map((e) => (e.payload as { agentId: string }).agentId))];
   return { events: events.length, lastHash: events.at(-1)?.hash ?? null, agents };
+}
+
+/** 取り下げ（content.withdrawn）の頼み。運営者が daily withdraw で書く（EVENT_LOG §3.4・§6.1） */
+export interface WithdrawRequest {
+  /** 取り下げる投稿の seq（post.published の通し番号） */
+  targetSeq: number;
+  /** 理由（画面に「非表示（理由）」として出る）。空・空白だけは断る */
+  reason: string;
+  /** 本文も消すか。真なら bodyErased = true で記録する（本文そのものは、このあと運営者が erase_withdrawn_body で消す） */
+  eraseBody: boolean;
+  /** 書き手の名前（actor は operator:<名前>）。既定は owner */
+  operator?: string;
+}
+
+export interface WithdrawResult {
+  seq: number;
+  hash: string;
+  targetSeq: number;
+  bodyErased: boolean;
+}
+
+/** 理由の長さの上限（画面の1行に収まる程度） */
+export const WITHDRAW_REASON_MAX = 200;
+const OPERATOR_NAME = /^[a-z0-9_-]{1,32}$/;
+/** ハッシュに見える文字列（16進で32文字以上）。erase_body.sql のとおり、理由にハッシュがあると、その本文を消せなくなる */
+const HASH_LIKE = /[0-9a-f]{32,}/i;
+
+/** 理由の誤りを返す（なければ null）。誤りは使い方の誤りとして扱う */
+export function withdrawReasonProblem(reason: string | undefined): string | null {
+  const r = (reason ?? "").trim();
+  if (r.length === 0) return "--reason is required";
+  if (r.length > WITHDRAW_REASON_MAX) return `--reason must be at most ${WITHDRAW_REASON_MAX} characters`;
+  if (HASH_LIKE.test(r)) return "--reason must not contain a hash-like string (32 or more hex digits); it would block erasing a body";
+  return null;
+}
+
+/** いまの接続が、events の表の持ち主（またはスーパーユーザー）か。アプリの接続（ffr_app）なら false */
+export async function isTableOwner(db: SqlRunner): Promise<boolean> {
+  const { rows } = await db.query<{ ok: boolean | null }>(
+    `SELECT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)
+            OR pg_has_role(current_user, (SELECT tableowner FROM pg_tables WHERE tablename = 'events' AND schemaname = current_schema()), 'USAGE') AS ok`,
+  );
+  return rows[0]?.ok === true;
+}
+
+/**
+ * 投稿の取り下げ（content.withdrawn）を書く。表の持ち主の接続だけで動く（アプリの接続なら例外）。
+ * 対象が投稿でない・存在しない、理由が空・長すぎる・ハッシュを含む、本文がもう消えているのに本文を残す記録にしようとした、
+ * ときは例外で何も書かない。本文は消さない（消すのは db/ops/erase_body.sql の erase_withdrawn_body）
+ */
+export async function withdrawPost(db: SqlDb, req: WithdrawRequest, o: { clock: Clock; holidayTable?: HolidayTable }): Promise<WithdrawResult> {
+  const reasonProblem = withdrawReasonProblem(req.reason);
+  if (reasonProblem) throw new RangeError(reasonProblem);
+  if (!Number.isSafeInteger(req.targetSeq) || req.targetSeq < 1) throw new RangeError("targetSeq must be a positive integer");
+  const operator = req.operator ?? "owner";
+  if (!OPERATOR_NAME.test(operator)) throw new RangeError("operator must match [a-z0-9_-]{1,32}");
+  if (!(await isTableOwner(db))) throw new Error("withdraw needs the table owner's connection (DATABASE_ADMIN_URL), not the app's connection");
+
+  const holidayTable = o.holidayTable ?? bundledHolidays;
+  const values = await PgValueStore.open(db);
+  const store = await PgEventStore.open(db, { values, holidayTables: new Map([[holidayTable.contentSha256, holidayTable]]), clock: o.clock });
+  const target = (await store.read(req.targetSeq - 1, 1))[0];
+  if (target?.seq !== req.targetSeq) throw new Error(`event ${req.targetSeq} does not exist`);
+  if (target.type !== "post.published") throw new Error(`event ${req.targetSeq} is ${target.type}, not post.published`);
+  const bodyHash = String((target.payload as { bodyHash?: unknown }).bodyHash);
+  const { rows } = await db.query("SELECT 1 FROM stored_values WHERE hash = $1 AND kind = 'body'", [bodyHash]);
+  if (rows.length === 0 && !req.eraseBody) throw new Error(`the body of ${req.targetSeq} is already gone; use --erase-body so that the record matches`);
+
+  const r = await store.append({
+    type: "content.withdrawn",
+    actor: `operator:${operator}`,
+    refs: [req.targetSeq],
+    payload: { targetSeq: req.targetSeq, reason: req.reason.trim(), bodyErased: req.eraseBody },
+  });
+  if (!r.ok) throw new Error(`content.withdrawn: ${r.reason}`);
+  return { seq: r.event.seq, hash: r.event.hash, targetSeq: req.targetSeq, bodyErased: req.eraseBody };
 }
