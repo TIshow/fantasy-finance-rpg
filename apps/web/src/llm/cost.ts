@@ -9,7 +9,10 @@ export interface BatchPrice {
 }
 
 /**
- * Anthropic の Message Batches API の料金（標準の半額）。2026-11-07 に公式の料金表で確かめた値。
+ * Anthropic の Message Batches API の料金（標準の半額）。
+ * 出典：https://platform.claude.com/docs/en/about-claude/pricing （2026-11-07 確認）。
+ * Sonnet 5.5 は標準で入力2ドル・出力10ドル/100万トークン、バッチはその半額の1ドル・5ドル。
+ * D-041 の試算にある3ドル・15ドルは、古い Sonnet 4.x の標準の料金。
  * 料金が変わったら、ここを PR で直す。ここにないモデルは費用を出せない（呼び出し側が maxCost を費用とする）。
  */
 export const ANTHROPIC_BATCH_PRICES: Readonly<Record<string, Readonly<BatchPrice>>> = Object.freeze({
@@ -37,6 +40,8 @@ const isCount = (v: number) => Number.isSafeInteger(v) && v >= 0;
  * 費用（0.1円）＝ Σ(トークン数 × セント/100万トークン) × 円/ドル × 10 ÷ (100 × 100万)
  * キャッシュの単価は実際より高めに数える（上限を超えにくい側に倒す）。
  * トークン数・料金が 0 以上の安全な整数でない、yenPerUsd が 1 以上の安全な整数でないときは RangeError。
+ * yenPerUsd は整数だけ受け付ける。換算の値が小数のとき（例：152.3円）は、呼び出し側で切り上げて渡す（153）。
+ * 切り上げは費用を高めに数える側なので、上限を超えにくい。
  */
 export function batchCostDeciyen(usage: TokenUsage, price: Readonly<BatchPrice>, yenPerUsd: number): Deciyen {
   const counts = [usage.inputTokens, usage.outputTokens, usage.cacheCreationInputTokens, usage.cacheReadInputTokens];

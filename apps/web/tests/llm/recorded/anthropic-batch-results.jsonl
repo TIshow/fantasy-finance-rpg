@@ -1,5 +1,6 @@
 {"custom_id":"run-b","result":{"type":"errored","error":{"type":"error","error":{"type":"invalid_request_error","message":"request-id=req_secret123 max_tokens too large"}}}}
 {"custom_id":"run-a","result":{"type":"succeeded","message":{"id":"msg_014VwiXbi91y3JMjcpyGBHX5","type":"message","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"thinking","thinking":"考えた過程","signature":"abc"},{"type":"text","text":"{\"post\":null,"},{"type":"text","text":"\"orders\":[]}"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":20000,"output_tokens":1500,"cache_creation_input_tokens":null,"cache_read_input_tokens":0}}}}
 {"custom_id":"run-c","result":{"type":"canceled"}}
+{"custom_id":"run-e","result":{"type":"errored","error":{"type":"error","error":{"type":"made_up_error req_secret123","message":"x"}}}}
 
 {"custom_id":"run-d","result":{"type":"expired"}}

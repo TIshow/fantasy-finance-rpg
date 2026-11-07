@@ -30,6 +30,13 @@ describe("トークン数から費用（0.1円単位）への換算", () => {
     for (const bad of [0, -1, 150.5, NaN]) expect(() => batchCostDeciyen(usage(1, 0), sonnet, bad)).toThrow(RangeError);
   });
 
+  it("料金が負・小数なら RangeError", () => {
+    for (const bad of [-1, 0.5, NaN, Infinity]) {
+      expect(() => batchCostDeciyen(usage(1, 0), { inputCentsPerMTok: bad, outputCentsPerMTok: 500 }, 160)).toThrow(RangeError);
+      expect(() => batchCostDeciyen(usage(1, 0), { inputCentsPerMTok: 100, outputCentsPerMTok: bad }, 160)).toThrow(RangeError);
+    }
+  });
+
   it("料金表にないモデルは undefined（プロトタイプの名前も拾わない）", () => {
     expect(anthropicBatchPrice("claude-opus-5-5")).toBeUndefined();
     expect(anthropicBatchPrice("toString")).toBeUndefined();
