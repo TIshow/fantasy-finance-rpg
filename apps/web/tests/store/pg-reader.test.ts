@@ -154,6 +154,7 @@ const expectedCheck = {
   who: "ffr_reader",
   superuser: false,
   write_all_data: false,
+  member_of_roles: 0,
   can_select: true,
   can_insert: false,
   can_update: false,
@@ -191,6 +192,47 @@ describe("画面用の読むだけの役割（ffr_reader。db/ops/create_reader_
       }
     });
   }
+
+  it("誤って与えた書く権限は、migrate を流し直すと外れ、確認の SQL が想定どおりに戻る", async () => {
+    await writeDays(createReaderRole);
+    await pg.exec("GRANT INSERT, UPDATE, DELETE, TRUNCATE ON events, stored_values TO ffr_reader; GRANT EXECUTE ON FUNCTION erase_withdrawn_body(bigint) TO ffr_reader");
+    try {
+      await pg.exec("SET ROLE ffr_reader");
+      expect(await readerCheck()).toMatchObject({ can_insert: true, values_can_delete: true, can_erase_body: true });
+    } finally {
+      await pg.exec("RESET ROLE");
+    }
+    await migrate(db);
+    try {
+      await pg.exec("SET ROLE ffr_reader");
+      expect(await readerCheck()).toEqual(expectedCheck);
+    } finally {
+      await pg.exec("RESET ROLE");
+    }
+  });
+
+  it("誤って書ける役割（pg_write_all_data・表の持ち主）に入れられていれば、確認の SQL が気づく（NOINHERIT でも）", async () => {
+    await writeDays(createReaderRole);
+    const owner = (await pg.query<{ o: string }>("SELECT tableowner AS o FROM pg_tables WHERE tablename = 'events'")).rows[0]!.o;
+    for (const [role, expected] of [
+      ["pg_write_all_data", { write_all_data: true, member_of_roles: 1 }],
+      [owner, { member_of_roles: 1 }],
+    ] as const) {
+      await pg.exec(`GRANT "${role}" TO ffr_reader`);
+      try {
+        await pg.exec("SET ROLE ffr_reader");
+        expect(await readerCheck(), role).toMatchObject(expected);
+      } finally {
+        await pg.exec(`RESET ROLE; REVOKE "${role}" FROM ffr_reader`);
+      }
+    }
+    await pg.exec("SET ROLE ffr_reader");
+    try {
+      expect(await readerCheck()).toEqual(expectedCheck);
+    } finally {
+      await pg.exec("RESET ROLE");
+    }
+  });
 
   it("書く・消す・本文を消す関数・表や一時テーブルを作ることは、権限で断られる", async () => {
     await writeDays(createReaderRole);

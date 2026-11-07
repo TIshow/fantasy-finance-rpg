@@ -1,7 +1,9 @@
 -- ffr_reader の権限を確かめる（ffr_reader の接続で、migrate のあとに流す）。想定の結果はコメントのとおり。読むだけで、何も変えない。
 SELECT current_user AS who,                                                          -- ffr_reader
        (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser,    -- false
-       pg_has_role(current_user, 'pg_write_all_data', 'USAGE') AS write_all_data,   -- false
+       -- NOINHERIT の役割では USAGE で確かめると、役割に入れられていても false になる（SET ROLE で書ける）ので MEMBER で確かめる
+       pg_has_role(current_user, 'pg_write_all_data', 'MEMBER') AS write_all_data,  -- false
+       (SELECT count(*)::int FROM pg_auth_members WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user)) AS member_of_roles,  -- 0（どの役割にも属さない）
        has_table_privilege('events', 'SELECT') AS can_select,                        -- true
        has_table_privilege('events', 'INSERT') AS can_insert,                        -- false
        has_table_privilege('events', 'UPDATE') AS can_update,                        -- false
