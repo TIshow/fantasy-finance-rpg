@@ -179,11 +179,16 @@ const OPERATOR_NAME = /^[a-z0-9_-]{1,32}$/;
 /** ハッシュに見える文字列（16進で32文字以上）。erase_body.sql のとおり、理由にハッシュがあると、その本文を消せなくなる */
 const HASH_LIKE = /[0-9a-f]{32,}/i;
 
+/** 改行などの制御文字と、文字の向きを変える文字（画面で理由の見え方をすり替えられる） */
+const BAD_CHARS = /[\p{Cc}‪-‮⁦-⁩]/u;
+const BODY_HASH = /^[0-9a-f]{64}$/;
+
 /** 理由の誤りを返す（なければ null）。誤りは使い方の誤りとして扱う */
 export function withdrawReasonProblem(reason: string | undefined): string | null {
   const r = (reason ?? "").trim();
   if (r.length === 0) return "--reason is required";
-  if (r.length > WITHDRAW_REASON_MAX) return `--reason must be at most ${WITHDRAW_REASON_MAX} characters`;
+  if ([...r].length > WITHDRAW_REASON_MAX) return `--reason must be at most ${WITHDRAW_REASON_MAX} characters`;
+  if (BAD_CHARS.test(r)) return "--reason must not contain line breaks, control characters or bidirectional control characters";
   if (HASH_LIKE.test(r)) return "--reason must not contain a hash-like string (32 or more hex digits); it would block erasing a body";
   return null;
 }
@@ -199,8 +204,9 @@ export async function isTableOwner(db: SqlRunner): Promise<boolean> {
 
 /**
  * 投稿の取り下げ（content.withdrawn）を書く。表の持ち主の接続だけで動く（アプリの接続なら例外）。
- * 対象が投稿でない・存在しない、理由が空・長すぎる・ハッシュを含む、本文がもう消えているのに本文を残す記録にしようとした、
- * ときは例外で何も書かない。本文は消さない（消すのは db/ops/erase_body.sql の erase_withdrawn_body）
+ * 対象が投稿でない・存在しない、理由が空・長すぎる・制御文字やハッシュを含む、本文の行がないのに本文を残す記録にしようとした、
+ * 本文を消す印つきなのに、その本文が消せない（ほかの記録が同じハッシュを指す）、ときは例外で何も書かない。
+ * 本文は消さない（消すのは db/ops/erase_body.sql の erase_withdrawn_body）
  */
 export async function withdrawPost(db: SqlDb, req: WithdrawRequest, o: { clock: Clock; holidayTable?: HolidayTable }): Promise<WithdrawResult> {
   const reasonProblem = withdrawReasonProblem(req.reason);
@@ -210,15 +216,33 @@ export async function withdrawPost(db: SqlDb, req: WithdrawRequest, o: { clock: 
   if (!OPERATOR_NAME.test(operator)) throw new RangeError("operator must match [a-z0-9_-]{1,32}");
   if (!(await isTableOwner(db))) throw new Error("withdraw needs the table owner's connection (DATABASE_ADMIN_URL), not the app's connection");
 
+  // 本文を消す印つきで書くときは、書いたのと同じトランザクションの中で、DB の判定（stored_values_erasable）で消せるかを確かめ、
+  // 消せなければ取り消す。書く前は対象の投稿にまだ印がないので、判定は書いたあとでないと真にならない
+  let mustBeErasable: string | null = null;
+  const guarded: SqlDb = {
+    ...db,
+    transaction: (fn) =>
+      db.transaction(async (tx) => {
+        let inserted = false;
+        const r = await fn({ ...tx, query: (t, p) => ((inserted ||= t.startsWith("INSERT INTO events")), tx.query(t, p)) });
+        if (inserted && mustBeErasable !== null) {
+          const ok = (await tx.query<{ ok: boolean }>("SELECT stored_values_erasable(current_schema(), $1) AS ok", [mustBeErasable])).rows[0]?.ok;
+          if (ok !== true) throw new Error(`the body of ${req.targetSeq} cannot be erased (another record refers to the same hash); nothing was written`);
+        }
+        return r;
+      }),
+  };
   const holidayTable = o.holidayTable ?? bundledHolidays;
   const values = await PgValueStore.open(db);
-  const store = await PgEventStore.open(db, { values, holidayTables: new Map([[holidayTable.contentSha256, holidayTable]]), clock: o.clock });
+  const store = await PgEventStore.open(guarded, { values, holidayTables: new Map([[holidayTable.contentSha256, holidayTable]]), clock: o.clock });
   const target = (await store.read(req.targetSeq - 1, 1))[0];
   if (target?.seq !== req.targetSeq) throw new Error(`event ${req.targetSeq} does not exist`);
   if (target.type !== "post.published") throw new Error(`event ${req.targetSeq} is ${target.type}, not post.published`);
-  const bodyHash = String((target.payload as { bodyHash?: unknown }).bodyHash);
+  const bodyHash = (target.payload as { bodyHash?: unknown }).bodyHash;
+  if (typeof bodyHash !== "string" || !BODY_HASH.test(bodyHash)) throw new Error(`the bodyHash of ${req.targetSeq} is not a 64-digit hex string`);
   const { rows } = await db.query("SELECT 1 FROM stored_values WHERE hash = $1 AND kind = 'body'", [bodyHash]);
-  if (rows.length === 0 && !req.eraseBody) throw new Error(`the body of ${req.targetSeq} is already gone; use --erase-body so that the record matches`);
+  if (rows.length === 0 && !req.eraseBody) throw new Error(`the body of ${req.targetSeq} has no stored row (already erased, or never stored); use --erase-body so that the record matches`);
+  if (rows.length > 0 && req.eraseBody) mustBeErasable = bodyHash;
 
   const r = await store.append({
     type: "content.withdrawn",

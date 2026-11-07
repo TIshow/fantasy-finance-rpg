@@ -68,6 +68,8 @@ async function main(argv: string[]): Promise<number> {
     const db = adminDb();
     try {
       const withdrawn = await withdrawPost(db, { targetSeq: Number(values.seq), reason: values.reason!, eraseBody, operator: values.operator }, { clock });
+      // 照合が失敗しても、書けたことが分かるように先に出す（もう一度流して二重に書かないため）
+      stderr.write(`daily: wrote content.withdrawn seq=${withdrawn.seq} targetSeq=${withdrawn.targetSeq} bodyErased=${withdrawn.bodyErased}; verifying...\n`);
       const verify = await verifyDatabase(db);
       stdout.write(`${JSON.stringify({ withdrawn, verify })}\n`);
       if (eraseBody) stderr.write(eraseSteps(withdrawn.targetSeq));

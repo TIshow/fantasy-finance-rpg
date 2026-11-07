@@ -8,7 +8,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { holidayTable } from "../../src/holidays";
 import type { LogEvent } from "../../src/events/types";
 import { readSnapshot } from "../../src/store/pg-reader";
-import { readAllEvents } from "../../src/store/pg-store";
+import { PgEventStore, readAllEvents } from "../../src/store/pg-store";
+import { PgValueStore } from "../../src/store/pg-values";
 import { migrate, type SqlDb } from "../../src/store/sql";
 import { buildBoard } from "../../src/view/board";
 import { buildView } from "../../src/view/build";
@@ -83,7 +84,7 @@ describe("withdrawPost", { timeout: 60_000 }, () => {
     expect((await screen()).timeline.find((t) => t.seq === target.seq)).toMatchObject({ text: null, withdrawn: { reason: "権利者からの申し出" } });
 
     // 本文が消えたあとに、本文を残す記録で取り下げ直すことはできない（記録と保管が食い違うため）
-    await expect(withdrawPost(db, { targetSeq: target.seq, reason: "理由の言い直し", eraseBody: false }, { clock })).rejects.toThrow(/already gone/);
+    await expect(withdrawPost(db, { targetSeq: target.seq, reason: "理由の言い直し", eraseBody: false }, { clock })).rejects.toThrow(/no stored row/);
     // 本文を消す印つきなら書ける
     await withdrawPost(db, { targetSeq: target.seq, reason: "理由の言い直し", eraseBody: true }, { clock });
     await verifyDatabase(db);
@@ -120,12 +121,65 @@ describe("withdrawPost", { timeout: 60_000 }, () => {
   });
 });
 
+describe("withdrawPost の追加の守り", { timeout: 60_000 }, () => {
+  const openStore = async (clock: FakeClock) => PgEventStore.open(db, { values: await PgValueStore.open(db), holidayTables: new Map([[holidayTable.contentSha256, holidayTable]]), clock });
+
+  it("本文を消す印つきでも、ほかの記録が同じハッシュを指していて消せない本文なら、断って何も書かない", async () => {
+    const { clock, posts } = await setUp();
+    const target = posts[0]!;
+    const hash = (target.payload as { bodyHash: string }).bodyHash;
+    // コマンドを通さずに、理由にハッシュを書いた記録を足す（アプリの接続でもできること）
+    const w = await (await openStore(clock)).append({ type: "content.withdrawn", actor: "operator:owner", refs: [target.seq], payload: { targetSeq: target.seq, reason: `本文 ${hash}`, bodyErased: false } });
+    expect(w.ok).toBe(true);
+    const before = await count();
+    await expect(withdrawPost(db, { targetSeq: target.seq, reason: "権利者からの申し出", eraseBody: true }, { clock })).rejects.toThrow(/cannot be erased/);
+    expect(await count()).toBe(before);
+    await verifyDatabase(db);
+    // 本文を残す取り下げなら書ける
+    await withdrawPost(db, { targetSeq: target.seq, reason: "事実と異なる内容", eraseBody: false }, { clock });
+    expect(await count()).toBe(before + 1);
+  });
+
+  it("投稿の bodyHash が64文字の16進でなければ断る", async () => {
+    const { clock, posts } = await setUp();
+    const src = posts[0]!;
+    const forged = await (await openStore(clock)).append({ type: "post.published", actor: src.actor, refs: src.refs, payload: { ...(src.payload as Record<string, unknown>), bodyHash: "not-a-hash" } });
+    if (!forged.ok) return expect.unreachable(`could not write the forged post: ${forged.reason}`);
+    const before = await count();
+    await expect(withdrawPost(db, { targetSeq: forged.event.seq, reason: "誤り", eraseBody: true }, { clock })).rejects.toThrow(/64-digit hex/);
+    expect(await count()).toBe(before);
+  });
+
+  it("スーパーユーザーでない表の持ち主の接続でも書ける", async () => {
+    const { clock, posts } = await setUp();
+    await pg.exec("DROP ROLE IF EXISTS ffr_owner; CREATE ROLE ffr_owner NOSUPERUSER; GRANT USAGE, CREATE ON SCHEMA public TO ffr_owner; ALTER TABLE events OWNER TO ffr_owner; ALTER TABLE stored_values OWNER TO ffr_owner");
+    await pg.exec("SET ROLE ffr_owner");
+    try {
+      expect(await isTableOwner(db)).toBe(true);
+      await withdrawPost(db, { targetSeq: posts[0]!.seq, reason: "誤り", eraseBody: false }, { clock });
+    } finally {
+      await pg.exec("RESET ROLE");
+    }
+    await verifyDatabase(db);
+  });
+});
+
 describe("withdrawReasonProblem", () => {
-  it("空・空白・ハッシュに見える文字列を断り、ふつうの理由は通す", () => {
+  it("空・空白・改行や制御文字・文字の向きを変える文字・ハッシュに見える文字列を断り、ふつうの理由は通す", () => {
     expect(withdrawReasonProblem(undefined)).toMatch(/required/);
     expect(withdrawReasonProblem("　")).toMatch(/required/); // 全角の空白だけ
     expect(withdrawReasonProblem("A".repeat(32).replace(/A/g, "f"))).toMatch(/hash-like/);
+    expect(withdrawReasonProblem("事実と\n異なる")).toMatch(/control/);
+    expect(withdrawReasonProblem("誤り\u0007")).toMatch(/control/);
+    expect(withdrawReasonProblem("誤り‮りま")).toMatch(/bidirectional/);
+    expect(withdrawReasonProblem("誤り⁦x⁩")).toMatch(/bidirectional/);
     expect(withdrawReasonProblem("2026年11月9日の投稿の誤り（seq 12345）")).toBeNull();
+  });
+
+  it("長さは文字の数で数え、ちょうど200文字は通り、201文字は断る", () => {
+    expect(withdrawReasonProblem("あ".repeat(200))).toBeNull();
+    expect(withdrawReasonProblem("😀".repeat(200))).toBeNull(); // UTF-16 では400単位だが、200文字
+    expect(withdrawReasonProblem("😀".repeat(201))).toMatch(/at most 200/);
   });
 });
 
