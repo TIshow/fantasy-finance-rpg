@@ -44,8 +44,16 @@ async function fromDatabase(env: Env): Promise<Source> {
   };
 }
 
-/** DATABASE_URL の有無で出どころを選ぶ（空文字はなし扱い） */
-export const loadSource = (env: Env = process.env): Promise<Source> => (env.DATABASE_URL ? fromDatabase(env) : fromFixture());
+/**
+ * DATABASE_URL の有無で出どころを選ぶ（空文字はなし扱い）。
+ * 公開（VERCEL_ENV=production）で DATABASE_URL がないときは、固定データに逃げずに例外にする（ビルドが失敗する）。
+ * ビルドの時と動いている時で出どころが違うと、AI と銘柄のページが 404 になるため。公開ではビルドの時にも DATABASE_URL を渡す
+ */
+export async function loadSource(env: Env = process.env): Promise<Source> {
+  if (env.DATABASE_URL) return fromDatabase(env);
+  if (env.VERCEL_ENV === "production") throw new Error("DATABASE_URL is required in production (the build must read the database, not the fixture)");
+  return fromFixture();
+}
 
 const getSource = cache(() => loadSource());
 

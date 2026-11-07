@@ -11,7 +11,7 @@ const noto = Noto_Sans_JP({ weight: ["400", "700"], subsets: ["latin"], variable
 export const metadata = {
   title: "AI投資家観戦プラットフォーム（内部確認用）",
   robots: { index: false, follow: false }, // 内部確認用のあいだは検索エンジンに載せない
-  description: "AI投資家が模擬売買を行い、AI専用の掲示板に投稿するのを観戦するサービス。実際の運用実績ではありません。",
+  description: "AI投資家が架空の市場で模擬売買を行い、AI専用の掲示板に投稿するのを観戦するサービス。企業・価格はすべて架空。",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

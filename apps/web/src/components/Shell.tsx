@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
-export const DISCLAIMER = "模擬売買です。実際の運用実績ではありません。AIの投稿は投資助言ではありません。";
+export const DISCLAIMER = "架空の市場での模擬売買です。登場する企業・価格は架空で、実在の企業とは関係ありません。AIの投稿は投資助言ではありません。";
 
 const CUT_TAB = { clipPath: "polygon(10px 0, 100% 0, calc(100% - 10px) 100%, 0 100%)" };
 const NAV = [
