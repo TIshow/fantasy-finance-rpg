@@ -153,6 +153,8 @@ export interface BatchDriver {
   readonly provider: string;
   /** model.settings に許す鍵（temperature は入れない。#179 の lead の決定） */
   readonly settingKeys: readonly string[];
+  /** 費用の式が入力の1トークンに掛ける倍率の最大（キャッシュへの書き込みを入力の欄と書き込みの欄の両方に入れるなら3）。既定は1 */
+  readonly inputCostFactor?: number;
   /** submittedAt の時点の料金（1,000万トークンあたりのセント）。料金表にないモデルは undefined */
   priceAt(modelId: string, submittedAt: number): LlmBatchPrice | undefined;
   /** 送る本文を決まった形で作る。決まりに合わなければ RangeError */
@@ -179,7 +181,7 @@ const UNKNOWN_PENDING: BatchOutcome = { kind: "costUnknown", result: "expired", 
 /**
  * 契約 LlmBatchPort の実装。決まりは契約のとおり。ほかに：
  * - reservePrice は、提供元の料金表の submittedAt の時点の料金と、この口の1ドルあたりの円に、ちょうど一致すること
- * - maxOutputTokens は settings.max_tokens 以上、maxInputTokens は送る本文の UTF-8 のバイト数以上であること
+ * - maxOutputTokens は settings.max_tokens 以上、maxInputTokens は送る本文の UTF-8 のバイト数×driver.inputCostFactor 以上であること
  *   （トークン数はバイト数を超えないので、予約が上限として働く）。外れたら RangeError
  * - 記録の読み出しが失敗したら、送らずに budget_exceeded を返す（上限を確かめられないので、送らない側に倒す）
  * - 受け取り・打ち切りで読めなかったときは pending（打ち切りでは、課金が分からないとして maxCost）
@@ -212,7 +214,7 @@ export class BatchPort implements LlmBatchPort {
     const customId = await batchCustomIdOf(r.agentId, r.tradingDate);
     const prepared = this.#driver.prepare(r, customId);
     const bytes = new TextEncoder().encode(prepared.body);
-    if (r.maxInputTokens < bytes.length) throw new RangeError("maxInputTokens must be at least the byte length of the body sent");
+    if (r.maxInputTokens < bytes.length * (this.#driver.inputCostFactor ?? 1)) throw new RangeError("maxInputTokens must be at least the byte length of the body sent times inputCostFactor");
     const sentBodyHash = await sha256Hex(bytes);
     const submittedAt = r.submittedAt;
     const key = batchKeyOf(r.agentId, r.tradingDate);

@@ -135,13 +135,14 @@ describe("送る前の確かめ（RangeError で reject し、送らない）", 
     ["料金表にないモデル", { model: { provider: "fake", modelId: "m2", settings: { max_tokens: "2000" } } }],
     ["maxOutputTokens が max_tokens より小さい", { maxOutputTokens: 1999, maxCost: 1000 }],
     ["maxInputTokens が送る本文のバイト数より小さい", { maxInputTokens: 10 }],
+    ["maxInputTokens が送る本文のバイト数×inputCostFactor より小さい", { maxInputTokens: 60, maxCost: 1000 }],
     ["取引日の形が違う", { tradingDate: "2026/11/10" }],
     ["submittedAt が今から5分より前", { submittedAt: AT - 300_000 }],
     ["submittedAt が今から5分より後", { submittedAt: AT + 302_000 }],
     ["messages が配列でない", { messages: "入力" as never }],
     ["messages の content が文字列でない・role が決まりの外", { messages: [{ role: "user", content: 1 }, { role: "tool", content: "x" }] as never }],
   ])("%s", async (_name, over) => {
-    const { driver, calls } = fakeDriver();
+    const { driver, calls } = fakeDriver({ inputCostFactor: 3 });
     await expect(port(driver).submit(req(over))).rejects.toThrow(RangeError);
     expect(calls.send).toBe(0);
   });
