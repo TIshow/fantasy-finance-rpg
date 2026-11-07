@@ -170,47 +170,50 @@ describe("理由の検査", () => {
     expect(withdrawReasonProblem("f".repeat(31))).toBeNull();
   });
 
-  // 欠陥（低）：U+2028（行の区切り）・U+2029（段落の区切り）は改行として表示されるが、\p{Cc} に入らないので通る。
-  // 断る理由の文（line breaks）と食い違い、画面の1行の理由が複数行に見える
-  it.fails("行の区切り U+2028・段落の区切り U+2029 を断る", () => {
+  // 以下3件は、PR #172 で欠陥として it.fails にしたもの。a50b80c で直った
+  it("行の区切り U+2028・段落の区切り U+2029 を断る", () => {
     expect(withdrawReasonProblem("事実と 異なる")).not.toBeNull();
     expect(withdrawReasonProblem("事実と 異なる")).not.toBeNull();
   });
 
-  // 欠陥（低）：Unicode の Bidi_Control のうち、U+200E（LRM）・U+200F（RLM）・U+061C（ALM）が抜けている。
-  // RLM などで、数字や記号まわりの並びの見え方を変えられる
-  it.fails("文字の向きを変える印 U+200E・U+200F・U+061C を断る", () => {
+  it("文字の向きを変える印 U+200E・U+200F・U+061C を断る", () => {
     for (const c of ["‎", "‏", "؜"]) expect(withdrawReasonProblem(`seq 12${c}34 の誤り`), `U+${c.codePointAt(0)!.toString(16)}`).not.toBeNull();
   });
 
-  // 欠陥（低）：見えない文字（ゼロ幅の空白 U+200B・語をつなぐ印 U+2060・ハングルの埋め字 U+3164）だけの理由が、空と見なされずに通る。
-  // 画面には「非表示（）」のように理由のない非表示が出る（--reason は必須、という決まりをすり抜ける）
-  it.fails("見えない文字だけの理由を、空として断る", () => {
-    for (const r of ["​", "⁠⁠", "ㅤ", " ​ "]) expect(withdrawReasonProblem(r), JSON.stringify(r)).not.toBeNull();
+  it("見えない文字だけの理由を、空として断る", () => {
+    for (const r of ["​", "⁠⁠", "ㅤ", " ​ ", "﻿ "]) expect(withdrawReasonProblem(r), JSON.stringify(r)).not.toBeNull();
   });
 });
 
 describe("--erase-body の取り消しと、保管の状態", { timeout: 180_000 }, () => {
-  /** 対象と同じ bodyHash の偽の投稿を足す（アプリの接続でもできる）。これで対象の本文は消せなくなる */
+  /** 対象と同じ bodyHash の写しの投稿を足す（アプリの接続でもできる） */
   async function forgeTwin(clock: FakeClock, src: LogEvent) {
     const r = await (await openStore(clock)).append({ type: "post.published", actor: src.actor, refs: src.refs, payload: { ...(src.payload as Record<string, unknown>) } } as never);
     if (!r.ok) throw new Error(`could not write the twin: ${r.reason}`);
     return r.event;
   }
+  /** 投稿以外の記録に、対象の本文のハッシュを入れる（理由にハッシュを書いた取り下げを、コマンドを通さずに保管へ直接足す）。これで対象の本文は消せなくなる */
+  async function poison(clock: FakeClock, src: LogEvent, other: LogEvent) {
+    const r = await (await openStore(clock)).append({ type: "content.withdrawn", actor: "operator:owner", refs: [other.seq], payload: { targetSeq: other.seq, reason: `参考 ${bodyHashOf(src)}`, bodyErased: false } });
+    if (!r.ok) throw new Error(`could not write the poisoned record: ${r.reason}`);
+    return r.event;
+  }
+  const erase = async (seq: number) => (await db.query<{ h: string | null }>("SELECT erase_withdrawn_body($1) AS h", [seq])).rows[0]!.h;
+  const go = (targetSeq: number, eraseBody: boolean, clock: FakeClock, reason = "権利者からの申し出") => withdrawPost(db, { targetSeq, reason, eraseBody }, { clock });
 
   it("取り消したあと、前から開いていた保管（毎日の実行が持つもの）で書き足しても、連鎖が続き、次の日の実行と照合も通る", async () => {
     const { clock, waitUntil, posts } = await setUp();
     const t = posts[0]!;
-    await forgeTwin(clock, t);
+    await poison(clock, t, posts[1]!);
     // 毎日の実行と同じく、取り下げの前から開いている保管
     const longLived = await openStore(clock);
     const before = await readAllEvents(db);
-    await expect(withdrawPost(db, { targetSeq: t.seq, reason: "権利者からの申し出", eraseBody: true }, { clock })).rejects.toThrow(/cannot be erased/);
+    await expect(go(t.seq, true, clock)).rejects.toThrow(/cannot be erased/);
     expect(await readAllEvents(db)).toEqual(before);
     expect(await hasBody(bodyHashOf(t))).toBe(true);
 
     // 同じ対象を、本文を残す記録で取り下げる：直前の記録に続く seq とハッシュになる
-    const ok = await withdrawPost(db, { targetSeq: t.seq, reason: "権利者からの申し出", eraseBody: false }, { clock });
+    const ok = await go(t.seq, false, clock);
     expect(ok.seq).toBe(before.length + 1);
     expect((await readAllEvents(db)).at(-1)!.prevHash).toBe(before.at(-1)!.hash);
 
@@ -224,72 +227,145 @@ describe("--erase-body の取り消しと、保管の状態", { timeout: 180_000
     await chainIsIntact();
   });
 
-  it("断られた取り消しを何度繰り返しても、DB の末尾は変わらない（取り消しの途中の状態が残らない）", async () => {
+  it("断られた取り消しを何度繰り返しても、DB の末尾は変わらない（写しの投稿の側から書いても断る）", async () => {
     const { clock, posts } = await setUp();
     const t = posts[0]!;
     const twin = await forgeTwin(clock, t);
+    await poison(clock, t, posts[1]!);
     const before = await readAllEvents(db);
-    for (let i = 0; i < 3; i++) await expect(withdrawPost(db, { targetSeq: t.seq, reason: `申し出${i}`, eraseBody: true }, { clock })).rejects.toThrow(/cannot be erased/);
-    for (let i = 0; i < 3; i++) await expect(withdrawPost(db, { targetSeq: twin.seq, reason: `申し出${i}`, eraseBody: true }, { clock })).rejects.toThrow(/cannot be erased/);
+    for (let i = 0; i < 3; i++) await expect(go(t.seq, true, clock, `申し出${i}`)).rejects.toThrow(/cannot be erased/);
+    for (let i = 0; i < 3; i++) await expect(go(twin.seq, true, clock, `申し出${i}`)).rejects.toThrow(/cannot be erased/);
     expect(await readAllEvents(db)).toEqual(before);
     await chainIsIntact();
   });
 
-  // 欠陥（低）：同じ bodyHash の投稿が2つあると（偽の投稿が本物の本文のハッシュを写したとき。erase_body.sql の手順1が想定する形）、
-  // DB の決まりでは「両方を bodyErased 真で取り下げれば消せる」のに、コマンドはどちらを先に書いても
-  // 「もう片方がまだ取り下げられていない」ので消せないと判定して断る。コマンドだけでは、その本文を消す状態にできない
-  // （アプリの接続や SQL で記録を直接書くしかない）
-  it.fails("同じ本文を指す2つの投稿を、コマンドで順に本文を消す印つきで取り下げられ、そのあと本文を消せる", async () => {
+  // PR #172 で欠陥として it.fails にしたもの。a50b80c（案 b）で直った
+  it("同じ本文を指す2つの投稿を、コマンドで順に本文を消す印つきで取り下げられ、そのあと本文を消せる", async () => {
     const { clock, posts } = await setUp();
     const t = posts[0]!;
     const twin = await forgeTwin(clock, t);
-    await withdrawPost(db, { targetSeq: twin.seq, reason: "偽の投稿", eraseBody: true }, { clock });
-    await withdrawPost(db, { targetSeq: t.seq, reason: "権利者からの申し出", eraseBody: true }, { clock });
-    expect((await db.query<{ h: string }>("SELECT erase_withdrawn_body($1) AS h", [t.seq])).rows[0]!.h).toBe(bodyHashOf(t));
+    expect((await go(twin.seq, true, clock, "写しの投稿")).pendingSeqs).toEqual([t.seq]);
+    expect((await go(t.seq, true, clock)).pendingSeqs).toEqual([]);
+    expect(await erase(t.seq)).toBe(bodyHashOf(t));
     await chainIsIntact();
+  });
+
+  it("pendingSeqs：3つの写しで、残りを seq の順に返す。取り下げ直しで印を外した投稿は、残りに戻る", async () => {
+    const { clock, posts } = await setUp();
+    const t = posts[0]!;
+    const a = await forgeTwin(clock, t);
+    const b = await forgeTwin(clock, t);
+    expect((await go(b.seq, true, clock)).pendingSeqs).toEqual([t.seq, a.seq]);
+    expect((await go(t.seq, true, clock)).pendingSeqs).toEqual([a.seq]);
+    // a を本文を残す記録で取り下げても、a は残りのまま
+    expect((await go(a.seq, false, clock)).pendingSeqs).toEqual([]);
+    expect((await go(b.seq, true, clock)).pendingSeqs).toEqual([a.seq]);
+    // 残りがあるうちは、本文を消す関数も断る（写しの投稿の側から消すこともできない）
+    for (const s of [t.seq, a.seq, b.seq]) await expect(erase(s)).rejects.toThrow();
+    expect(await hasBody(bodyHashOf(t))).toBe(true);
+    expect((await go(a.seq, true, clock)).pendingSeqs).toEqual([]);
+    // t の印を外すと、t が残りに戻る
+    expect((await go(t.seq, false, clock)).pendingSeqs).toEqual([]);
+    expect((await go(a.seq, true, clock)).pendingSeqs).toEqual([t.seq]);
+    await expect(erase(t.seq)).rejects.toThrow();
+    expect((await go(t.seq, true, clock)).pendingSeqs).toEqual([]);
+    expect(await erase(b.seq)).toBe(bodyHashOf(t));
+    await chainIsIntact();
+  });
+
+  it("写しの投稿があっても、投稿以外の記録がハッシュを指していれば、印つきの取り下げは断る（残りを返して書く道に入らない）", async () => {
+    const { clock, posts } = await setUp();
+    const t = posts[0]!;
+    const twin = await forgeTwin(clock, t);
+    await go(twin.seq, true, clock);
+    await poison(clock, t, posts[1]!);
+    const before = await count();
+    await expect(go(t.seq, true, clock)).rejects.toThrow(/other records refer/);
+    expect(await count()).toBe(before);
+  });
+
+  it("写しの投稿がまだ残っていて（pendingSeqs が空でない状態）、投稿以外の記録もハッシュを指すとき、どちらの投稿の印つきの取り下げも断り、記録は変わらない。DB の判定と食い違わない", async () => {
+    const { clock, posts } = await setUp();
+    const t = posts[0]!;
+    const twin = await forgeTwin(clock, t);
+    await poison(clock, t, posts[1]!);
+    const before = await readAllEvents(db);
+    await expect(go(t.seq, true, clock)).rejects.toThrow(/other records refer/);
+    await expect(go(twin.seq, true, clock)).rejects.toThrow(/other records refer/);
+    expect(await readAllEvents(db)).toEqual(before);
+    // コマンドを通さずに両方へ印をつけても、DB の判定（stored_values_erasable）は消せないと言う（コマンドの判定と同じ側）
+    const store = await openStore(clock);
+    for (const s of [t.seq, twin.seq]) expect((await store.append({ type: "content.withdrawn", actor: "operator:owner", refs: [s], payload: { targetSeq: s, reason: "直接", bodyErased: true } })).ok).toBe(true);
+    expect((await db.query<{ ok: boolean }>("SELECT stored_values_erasable(current_schema(), $1) AS ok", [bodyHashOf(t)])).rows[0]!.ok).toBe(false);
+    await expect(erase(t.seq)).rejects.toThrow();
+    await expect(go(t.seq, true, clock)).rejects.toThrow(/other records refer/);
+    expect(await hasBody(bodyHashOf(t))).toBe(true);
+  });
+
+  it("投稿の中身の bodyHash 以外の項目にハッシュがあれば（写しの投稿の別の項目）、投稿以外の記録と同じく断る", async () => {
+    const { clock, posts } = await setUp();
+    const t = posts[0]!;
+    const r = await (await openStore(clock)).append({ type: "post.published", actor: t.actor, refs: t.refs, payload: { ...(t.payload as Record<string, unknown>), bodyHash: bodyHashOf(posts[1]!), board: bodyHashOf(t) } } as never);
+    // 掲示板の名前として断られたら、この道はもともとない
+    if (!r.ok) return;
+    const before = await count();
+    await expect(go(t.seq, true, clock)).rejects.toThrow(/other records refer/);
+    expect(await count()).toBe(before);
   });
 
   it("毎日の実行と同時に、成功する取り下げと断られる取り下げを流しても、連鎖が壊れず、書けたのは成功した1件だけ", async () => {
     const { clock, waitUntil, posts } = await setUp();
     const [a, b] = [posts[0]!, posts[1]!];
-    await forgeTwin(clock, b); // b の本文は消せない
+    const poisoned = await poison(clock, b, a); // b の本文は消せない（a を指す取り下げの理由に b のハッシュ）
     clock.set(jst(NEXT_DAY, 7));
     const results = await Promise.allSettled([
       runDaily(NEXT_DAY, { db, clock, prepare: productionSetup, holidayTable, waitUntil }),
-      withdrawPost(db, { targetSeq: a.seq, reason: "権利者からの申し出", eraseBody: true }, { clock }),
-      withdrawPost(db, { targetSeq: b.seq, reason: "権利者からの申し出", eraseBody: true }, { clock }),
+      go(a.seq, true, clock),
+      go(b.seq, true, clock),
     ]);
     expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled", "rejected"]);
     const events = await chainIsIntact();
-    const ws = events.filter((e) => e.type === "content.withdrawn");
-    expect(ws.map((e) => (e.payload as { targetSeq: number }).targetSeq)).toEqual([a.seq]);
-    expect((await db.query<{ h: string }>("SELECT erase_withdrawn_body($1) AS h", [a.seq])).rows[0]!.h).toBe(bodyHashOf(a));
+    const ws = events.filter((e) => e.type === "content.withdrawn" && e.seq !== poisoned.seq);
+    expect(ws.map((e) => (e.payload as { targetSeq: number; bodyErased: boolean }).targetSeq)).toEqual([a.seq]);
+    expect(await erase(a.seq)).toBe(bodyHashOf(a));
+    await expect(erase(b.seq)).rejects.toThrow();
     await chainIsIntact();
   });
 
-  // 欠陥（低）：本文の行があるかの確かめ（SELECT 1 FROM stored_values）が、追記のトランザクションの外にある。
-  // 確かめたあと、書く前に本文が消されると、本文がないのに bodyErased = false の記録が書かれる（関数の説明では「何も書かない」）。
-  // 運営者が erase_withdrawn_body と取り下げを同時に流したときだけ起きる。erase_body.sql の2つ目の文に missing として出る
-  it.fails("本文を残す取り下げの確かめと書き込みの間に本文が消されたら、何も書かない", async () => {
+  // PR #172 で欠陥として it.fails にしたもの。a50b80c で、本文の行の確かめが追記のトランザクションの中（FOR SHARE）に移った。
+  // PGlite は接続が1つなので、ほかの接続が割り込む形は作れない。追記のトランザクションが鍵（advisory lock）を取った直後に、
+  // 同じトランザクションで本文を消す（＝鍵を取る直前に、別の運営者の手順が本文を消して確定したのと、確かめが見る状態は同じ）
+  it("本文を残す取り下げの確かめと書き込みの間に本文が消されたら、何も書かない", async () => {
     const { clock, posts } = await setUp();
     const t = posts[0]!;
-    await withdrawPost(db, { targetSeq: t.seq, reason: "一つ目", eraseBody: true }, { clock });
-    // 本文の行を確かめた直後に、別の運営者の手順が本文を消す
+    await go(t.seq, true, clock, "一つ目");
+    const before = await readAllEvents(db);
+    let erasedInside = false;
     const racing: SqlDb = {
       ...db,
-      query: async (text, params) => {
-        const r = await db.query(text, params);
-        if (text.startsWith("SELECT 1 FROM stored_values")) await db.query("SELECT erase_withdrawn_body($1)", [t.seq]);
-        return r as never;
-      },
+      transaction: (fn) =>
+        db.transaction((tx) =>
+          fn({
+            ...tx,
+            query: async (text, params) => {
+              const r = await tx.query(text, params);
+              if (text.includes("pg_advisory_xact_lock") && !erasedInside) {
+                erasedInside = (await tx.query<{ h: string | null }>("SELECT erase_withdrawn_body($1) AS h", [t.seq])).rows[0]!.h !== null;
+              }
+              return r as never;
+            },
+          }),
+        ),
     };
-    await withdrawPost(racing, { targetSeq: t.seq, reason: "本文を残す", eraseBody: false }, { clock }).catch(() => undefined);
-    const last = (await readAllEvents(db)).at(-1)!;
-    // 書かれていれば、本文の行がないのに bodyErased = false の記録になっている
-    expect(await hasBody(bodyHashOf(t))).toBe(false);
-    expect(last.payload).not.toMatchObject({ bodyErased: false });
+    await expect(withdrawPost(racing, { targetSeq: t.seq, reason: "本文を残す", eraseBody: false }, { clock })).rejects.toThrow(/no stored row/);
+    expect(erasedInside).toBe(true);
+    // トランザクションごと取り消されるので、記録も本文の削除も残らない
+    expect(await readAllEvents(db)).toEqual(before);
+    expect(await hasBody(bodyHashOf(t))).toBe(true);
+    await chainIsIntact();
   });
 });
+
 
 describe("書いたあとの照合と画面", { timeout: 120_000 }, () => {
   it("--erase-body で書き、erase_withdrawn_body で消したあと、照合が通り、読むだけの口は本文を持たず、画面と掲示板は非表示（理由）", async () => {
