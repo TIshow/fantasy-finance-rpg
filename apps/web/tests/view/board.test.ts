@@ -35,7 +35,7 @@ describe("buildBoard（手で組んだ小さなログ）", () => {
     post("ai-hold", "X2", "h5", { replyTo: 5 }, 14), // 9 親が別の掲示板 → 根
     post("ai-hold", "X1", "h6", { intent: "news", stance: "bear" }, 15), // 10 根（新しい）。のちに非表示
     ev("fills.executed", { agentId: "ai-ma5", sheetSeq: 10, tradingDate: "2026-11-10", fills: [{ symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }, { symbol: "X2", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }] }, T("2026-11-10", 9)), // 11
-    ev("content.withdrawn", { targetSeq: 10, reason: "誤り", textRemoved: false }, T("2026-11-10", 10)), // 12
+    ev("content.withdrawn", { targetSeq: 10, reason: "誤り", bodyErased: false }, T("2026-11-10", 10)), // 12
     ev("valuation.recorded", { agentId: "ai-ma5", date: "2026-11-10", cash: 0, positions: [{ symbol: "X1", qty: 100, price: 120, closeSeq: 4 }], total: 12_000 }, T("2026-11-10", 16)),
     ev("valuation.recorded", { agentId: "ai-hold", date: "2026-11-10", cash: 1000, positions: [{ symbol: "X1", qty: 300, price: 120, closeSeq: 4 }, { symbol: "X3", qty: 0, price: 1, closeSeq: 4 }], total: 1000 }, T("2026-11-10", 16)),
     // 投稿（seq 5〜10）より前に確定した注文票（seq 2）の約定。seq は投稿より後でも、「このあとの売買」にしない

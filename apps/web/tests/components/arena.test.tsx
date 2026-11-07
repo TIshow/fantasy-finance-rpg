@@ -179,7 +179,7 @@ describe("掲示板の画面", async () => {
     mk("agent.registered", 1, { agentId: "ai-ma5", displayName: "あ", startDate: "2026-11-09", initialCash: 1000 }),
     mk("post.published", 2, { agentId: "ai-ma5", board: "X1", bodyHash: "a", citeSeqs: [], runSeq: 1, intent: "strategy", stance: "bull" }),
     mk("post.published", 3, { agentId: "ai-ma5", board: "X1", bodyHash: "b", citeSeqs: [], runSeq: 1, replyTo: 2, intent: "news", stance: "bear" }),
-    mk("content.withdrawn", 4, { targetSeq: 3, reason: "誤り", textRemoved: false }),
+    mk("content.withdrawn", 4, { targetSeq: 3, reason: "誤り", bodyErased: false }),
     mk("order_sheet.committed", 5, { agentId: "ai-ma5", tradingDate: "2026-11-10", runSeq: 1, orders: [{ symbol: "X1", side: "buy", qty: 100 }] }),
     mk("fills.executed", 6, { agentId: "ai-ma5", sheetSeq: 5, tradingDate: "2026-11-10", fills: [{ symbol: "X1", side: "buy", requestedQty: 100, qty: 100, price: 100, amount: 10_000, status: "filled" }] }),
   ];

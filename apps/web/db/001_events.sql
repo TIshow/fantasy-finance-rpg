@@ -1,5 +1,5 @@
 -- 追記だけのイベントの表（docs/EVENT_LOG.md §4・§8の4、D-040）。何度流しても同じ結果になる（冪等）。
--- アプリの役割（ffr_app）には SELECT と INSERT だけを許す。役割は運営者が作る（Neon のコンソールなど）。
+-- アプリの役割（ffr_app）には SELECT と INSERT だけを、画面用の役割（ffr_reader）には SELECT だけを許す。役割は運営者が db/ops/ の SQL で作る。
 -- トリガは、表の持ち主を含めて、更新・削除・TRUNCATE と、連鎖が続かない追記を断る。
 --
 -- 運営者の手順（アプリの接続には、表の持ち主ではなく ffr_app を使う。持ち主はトリガを外せる）：
@@ -60,5 +60,10 @@ BEGIN
     GRANT SELECT, INSERT ON events TO ffr_app;
   ELSE
     RAISE NOTICE 'role ffr_app does not exist: no privileges were granted (see the header of this file)';
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ffr_reader') THEN
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO ffr_reader', current_schema());
+    REVOKE ALL ON events FROM ffr_reader;
+    GRANT SELECT ON events TO ffr_reader;
   END IF;
 END $$;

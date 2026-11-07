@@ -79,16 +79,23 @@ class FrozenMap<K, V> implements ReadonlyMap<K, V> {
   }
 }
 
-/** 接続の役割が、events・stored_values に書ける（INSERT・UPDATE・DELETE）なら、その一覧を返す */
+/**
+ * 接続の役割が、events・stored_values に書ける（INSERT・UPDATE・DELETE。INSERT・UPDATE は列ごとの権限も見る）なら、その一覧を返す。
+ * 書ける役割（表の持ち主・pg_write_all_data）に属していれば、NOINHERIT でも SET ROLE で書けるので、それも返す
+ */
 async function writablePrivileges(tx: SqlRunner): Promise<string[]> {
   const out: string[] = [];
   for (const table of TABLES) {
     const { rows } = await tx.query<Record<string, boolean>>(
-      "SELECT has_table_privilege($1, 'INSERT') AS insert, has_table_privilege($1, 'UPDATE') AS update, has_table_privilege($1, 'DELETE') AS delete",
+      `SELECT has_any_column_privilege($1, 'INSERT') AS insert, has_any_column_privilege($1, 'UPDATE') AS update, has_table_privilege($1, 'DELETE') AS delete,
+              (SELECT c.relowner <> r.oid AND pg_has_role(r.oid, c.relowner, 'MEMBER') FROM pg_class c, pg_roles r WHERE c.oid = $1::regclass AND r.rolname = current_user) AS owner`,
       [table],
     );
     for (const op of ["insert", "update", "delete"]) if (rows[0]?.[op]) out.push(`${op.toUpperCase()} ${table}`);
+    if (rows[0]?.owner) out.push(`member of the owner of ${table}`);
   }
+  const { rows } = await tx.query<{ m: boolean }>("SELECT pg_has_role(current_user, 'pg_write_all_data', 'MEMBER') AS m");
+  if (rows[0]?.m) out.push("member of pg_write_all_data");
   return out;
 }
 

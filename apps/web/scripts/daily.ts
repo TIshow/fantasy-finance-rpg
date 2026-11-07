@@ -2,6 +2,8 @@
 //   daily run [--date YYYY-MM-DD] [--wait]   その日の分を、済んでいない段から進める（同じ日を何度回しても二重にならない。同時に2つは動かない）
 //   daily verify                                         記録だけから台帳を作り直して照合する
 //   daily migrate                                        表を作る（DATABASE_ADMIN_URL。表の持ち主の接続。アプリの接続では流さない）
+//   daily withdraw --seq <n> --reason <理由> [--erase-body] [--operator <名前>]
+//                                                        投稿を取り下げる記録（content.withdrawn）を書き、照合する（DATABASE_ADMIN_URL だけ。本文は消さない）
 // 環境変数：DATABASE_URL（アプリの役割 ffr_app の接続）、DATABASE_SCHEMA（任意）、ALLOW_OWNER_ROLE=1（手元の試験だけ。
 // 追記だけの権限の確認を飛ばす。GitHub Actions では無視して失敗にする）。接続の文字列は出力しない。
 // 終了コード：0 成功、1 失敗、2 使い方の誤り、3 判断が締めに間に合わなかった（その日の全員の判断がなくなった）
@@ -11,30 +13,72 @@ import { cutoffOf, isValidDate } from "../src/ledger/ledger";
 import { scheduleOf } from "../src/runner/day";
 import { pgDb, pgDbFromEnv } from "../src/store/pg-db";
 import { migrate } from "../src/store/sql";
-import { jstDate, missedCutoff, runDaily, verifyDatabase } from "./daily-lib";
+import { jstDate, missedCutoff, runDaily, verifyDatabase, withdrawPost, withdrawReasonProblem } from "./daily-lib";
 
-const USAGE = "usage: daily run [--date YYYY-MM-DD] [--wait] | daily verify | daily migrate";
+const USAGE = "usage: daily run [--date YYYY-MM-DD] [--wait] | daily verify | daily migrate | daily withdraw --seq <n> --reason <text> [--erase-body] [--operator <name>]";
 
 class UsageError extends Error {}
+
+/** 表の持ち主の接続（DATABASE_ADMIN_URL）。表を作るときと、取り下げのときだけ使う */
+function adminDb() {
+  const url = process.env.DATABASE_ADMIN_URL;
+  if (!url) throw new Error("DATABASE_ADMIN_URL is not set (this command needs the table owner's connection)");
+  return pgDb({ connectionString: url, schema: process.env.DATABASE_SCHEMA || undefined });
+}
+
+/** 本文も消すときの、続きの手順（コマンドは本文を消さない。db/ops/erase_body.sql の手順2〜5） */
+const eraseSteps = (seq: number, pendingSeqs: readonly number[]) =>
+  [
+    "",
+    "取り下げを記録しました（本文を消す印つき）。本文はまだ消えていません。続けて、表の持ち主の接続で次を行います：",
+    ...(pendingSeqs.length > 0
+      ? [
+          `  0. 先に、同じ本文を指すほかの投稿（seq ${pendingSeqs.join(", ")}）も --erase-body で取り下げる。全部そろうまで本文は消せない`,
+          "     （同じ本文を指す投稿が複数あるのは、偽の投稿の可能性がある。lead に知らせる）",
+        ]
+      : []),
+    "  1. apps/web/db/ops/erase_body.sql の1つ目の文を流し、この投稿と、いま書いた取り下げの記録が出ることを確かめる",
+    `  2. SELECT erase_withdrawn_body(${seq});   を流す（消した本文のハッシュが返る。消した本文は元に戻せない）`,
+    "  3. 同じファイルの2つ目の文で、何も出ないことを確かめる。daily verify で照合が通ることを確かめる",
+    "  4. 動いている画面・毎日の実行は、再起動するまで消した本文を持っている。必要なら画面を作り直す・再起動する",
+    "",
+  ].join("\n");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const clock = { now: () => Date.now() };
 
 async function main(argv: string[]): Promise<number> {
   let parsed;
   try {
-    parsed = parseArgs({ args: argv, allowPositionals: true, options: { date: { type: "string" }, wait: { type: "boolean" } } });
+    parsed = parseArgs({ args: argv, allowPositionals: true, options: { date: { type: "string" }, wait: { type: "boolean" }, seq: { type: "string" }, reason: { type: "string" }, "erase-body": { type: "boolean" }, operator: { type: "string" } } });
   } catch (err) {
     throw new UsageError(err instanceof Error ? err.message : String(err));
   }
   const { positionals, values } = parsed;
   const [command] = positionals;
   if (command === "migrate") {
-    const url = process.env.DATABASE_ADMIN_URL;
-    if (!url) throw new Error("DATABASE_ADMIN_URL is not set");
-    const db = pgDb({ connectionString: url, schema: process.env.DATABASE_SCHEMA || undefined });
+    const db = adminDb();
     try {
       await migrate(db);
       stdout.write('{"migrated":true}\n');
+      return 0;
+    } finally {
+      await db.close();
+    }
+  }
+  if (command === "withdraw") {
+    // 使い方の誤りは、接続より先に確かめる
+    if (values.seq === undefined || !/^[1-9][0-9]{0,14}$/.test(values.seq)) throw new UsageError("--seq must be the seq of a post (a positive integer)");
+    const reasonProblem = withdrawReasonProblem(values.reason);
+    if (reasonProblem) throw new UsageError(reasonProblem);
+    const eraseBody = values["erase-body"] === true;
+    const db = adminDb();
+    try {
+      const withdrawn = await withdrawPost(db, { targetSeq: Number(values.seq), reason: values.reason!, eraseBody, operator: values.operator }, { clock });
+      // 照合が失敗しても、書けたことが分かるように先に出す（もう一度流して二重に書かないため）
+      stderr.write(`daily: wrote content.withdrawn seq=${withdrawn.seq} targetSeq=${withdrawn.targetSeq} bodyErased=${withdrawn.bodyErased}; verifying...\n`);
+      const verify = await verifyDatabase(db);
+      stdout.write(`${JSON.stringify({ withdrawn, verify })}\n`);
+      if (eraseBody) stderr.write(eraseSteps(withdrawn.targetSeq, withdrawn.pendingSeqs));
       return 0;
     } finally {
       await db.close();

@@ -32,6 +32,11 @@ export function Shell({ children }: { children: ReactNode }) {
         </nav>
       </header>
       <main className="mx-auto max-w-[1360px] px-4 pb-16 pt-7 sm:px-6">{children}</main>
+      <footer className="border-t-2 border-line bg-[#120826] px-6 py-5 text-[13px] font-bold">
+        <nav aria-label="フッター">
+          <Link href="/about" className="text-soft hover:text-ink">このサイトについて</Link>
+        </nav>
+      </footer>
     </>
   );
 }
