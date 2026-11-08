@@ -42,8 +42,11 @@ const MAX_LIMIT_YEN = Math.floor(Number.MAX_SAFE_INTEGER / TICK);
 export const SYMBOL_MAX_CHARS = 16;
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 const badChars = (s: string) => s.includes("\u0000") || LONE_SURROGATE.test(s) || s !== s.normalize("NFC");
-/** 空白・制御文字・書式の文字（ゼロ幅スペース・ゼロ幅接合子・BOM・向きの指定など）と、見えない詰め物の文字 */
-const INVISIBLE = /[\p{White_Space}\p{Cc}\p{Cf}\u115F\u1160\u3164\uFFA0\u2800]/gu;
+/**
+ * 空白・制御文字・書式の文字（ゼロ幅スペース・ゼロ幅接合子・BOM・向きの指定など）、結合文字（異体字セレクタ・U+034F・U+17B4 など。
+ * 前の文字に付くだけで、それだけでは見えない）と、見えない詰め物の文字
+ */
+const INVISIBLE = /[\p{White_Space}\p{Cc}\p{Cf}\p{M}\u115F\u1160\u3164\uFFA0\u2800]/gu;
 const chars = (s: string) => [...s].length;
 const FENCE = /^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?```$/;
 
