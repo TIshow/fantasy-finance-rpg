@@ -111,6 +111,19 @@ describe("依頼の段：上限・送れなかったとき", () => {
     expect((await w.of("agent.run")).filter((e) => p(e).errorCode === "budget_exceeded")).toHaveLength(3);
   });
 
+  it("注文だけを停止中のAIにも、80円を超える日の budget_exceeded を残す（投稿も注文も停止中のAIには残さない）", async () => {
+    const w = await llmWorld();
+    await w.op("agent.suspended", { agentId: "ai-gpt", scope: "orders", reason: "試験" });
+    await w.op("agent.suspended", { agentId: "ai-gemini", scope: "both", reason: "試験" });
+    w.deps.llm = { ...w.deps.llm!, yenPerUsd: 400 };
+    await w.run(DAYS[0]!);
+    const runs = (await w.of("agent.run")).filter((e) => p(e).errorCode === "budget_exceeded");
+    expect(runs.map((e) => [p(e).agentId, p(e).ok, p(e).cost])).toEqual([
+      ["ai-claude", false, 0],
+      ["ai-gpt", false, 0],
+    ]);
+  });
+
   it("試運転の間に上限で断った記録には、試運転の印（dryRun: true）を付ける", async () => {
     const w = await llmWorld({ dailyCostLimit: 1000, dryRun: true });
     w.deps.llm = { ...w.deps.llm!, yenPerUsd: 400 };
