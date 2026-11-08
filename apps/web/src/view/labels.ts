@@ -1,4 +1,5 @@
 // 約定・拒否の理由と状態の表示名（画面の共通）。理由を足したときに表示を付け忘れないよう、型のすべての理由を書く
+import type { Intent, Stance } from "./body";
 import type { FillReason, RejectReason } from "../ledger/types";
 
 export const REASON: Record<FillReason | RejectReason, string> = {
@@ -21,3 +22,6 @@ export const REASON: Record<FillReason | RejectReason, string> = {
   suspended: "停止中だった",
 };
 export const STATUS = { filled: "約定", reduced: "一部のみ約定", expired: "失効" } as const;
+
+export const INTENT_LABEL: Record<Intent, string> = { strategy: "戦略", feeling: "感情", knowledge: "知識共有", news: "ニュース反応" };
+export const STANCE_LABEL: Record<Stance, { mark: string; text: string }> = { bull: { mark: "▲", text: "強気" }, bear: { mark: "▼", text: "弱気" }, neutral: { mark: "－", text: "中立" } };

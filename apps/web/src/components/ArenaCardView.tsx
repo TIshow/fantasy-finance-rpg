@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { MARK, SPARK_H, SPARK_W, type ArenaCard, type FeedItem } from "../view/arena";
+import { ModelChip } from "./ModelChip";
 import { CutPanel } from "./CutPanel";
 import { Portrait } from "./Portrait";
 
@@ -21,6 +22,7 @@ export function AgentCardView({ card }: { card: ArenaCard }) {
               </span>
               <h2 className="font-display text-xl font-normal leading-tight">{c.name}</h2>
               <span className="text-xs text-soft">{c.title}</span>
+              {card.model && <ModelChip model={card.model} color={c.color} />}
               <span className="font-num text-[11px] text-sub">{card.handle}{card.loggedName !== c.name && ` · 記録名 ${card.loggedName}`}</span>
             </div>
           </div>
