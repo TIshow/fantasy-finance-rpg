@@ -5,7 +5,15 @@
 import type { LlmBatchPrice } from "../contracts";
 import { BatchPort, type BatchDriver, type BatchOutcome, type BatchPortOptions } from "./batch-port";
 import { GEMINI_PROVIDER, GeminiBatchClient, findGeminiBatchByDisplayName, geminiApiKeyFromEnv, geminiBatchBody, reconcileGeminiResults } from "./gemini-batch";
-import { GEMINI_MAX_OUTPUT_TOKENS, geminiBatchPrice } from "./gemini-pricing";
+import { geminiBatchPrice } from "./gemini-pricing";
+
+/**
+ * 送る出力の上限（考えた過程を含む。#179 の lead の決定2）。maxOutputTokens に入れる。
+ * 考えた過程が含まれることは、考えた過程の資料（https://ai.google.dev/gemini-api/docs/thinking#token-limits 。2026-11-08 確認）にあるが、
+ * その節が指すのは Interactions API の max_output_tokens で、この口が使う generateContent の maxOutputTokens でも同じとは明記されていない。
+ * 含まれなかったときは、実際の費用が予約を超え、閉じた記録の費用が maxCost を超える（記録の検査が上限の超過として見つける）
+ */
+export const GEMINI_MAX_OUTPUT_TOKENS = 8000;
 
 /**
  * 予約の料金。依頼を決めた時刻（submittedAt）で一度だけ選ぶ（2027-01-01 からの値上げ。作ってから48時間のうちに切り替わるなら高いほう）。
@@ -23,8 +31,7 @@ export function geminiBatchDriver(client: Client): BatchDriver {
   return {
     provider: GEMINI_PROVIDER,
     settingKeys: ["max_tokens", "thinking_level"],
-    // 考えた過程が max_tokens に入るか資料で言えないので、出力はモデルの上限まで予約する（送る max_tokens は変えない）
-    minReservedOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+    maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
     priceAt: geminiReservePrice,
     prepare(r, customId) {
       const items = [{ customId, messages: r.messages }];
@@ -50,7 +57,7 @@ export function geminiBatchDriver(client: Client): BatchDriver {
       if (it.type === "errored") return { kind: "costUnknown", result: "failed", errorCode: it.errorCode === 8 ? "rate_limited" : "provider_error" };
       // 答えたモデルの版がないときは、バッチのモデル（models/ を外したもの）
       const respondedModel = it.respondedModel ?? status.model.replace(/^models\//, "");
-      return { kind: "succeeded", output: it.output, respondedModel, usage: it.usage };
+      return { kind: "succeeded", output: it.output, respondedModel, usage: it.usage, truncated: it.finishReason === "MAX_TOKENS" };
     },
     async cancel(batchId) {
       return (await client.cancel(batchId)).ok;

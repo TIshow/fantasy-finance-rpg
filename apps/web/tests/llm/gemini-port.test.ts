@@ -6,8 +6,8 @@ import { sha256Hex } from "../../src/events/hash";
 import { BatchBudget, batchCustomIdOf } from "../../src/llm/batch-port";
 import { GEMINI_CREATE_SETTLE_MS, GeminiBatchClient } from "../../src/llm/gemini-batch";
 import { llmTokenCost } from "../../src/events/llm-cost";
-import { GEMINI_MAX_OUTPUT_TOKENS, GEMINI_PRICE_SWITCH_AT } from "../../src/llm/gemini-pricing";
-import { geminiBatchPort, geminiReservePrice } from "../../src/llm/gemini-port";
+import { GEMINI_PRICE_SWITCH_AT } from "../../src/llm/gemini-pricing";
+import { GEMINI_MAX_OUTPUT_TOKENS, geminiBatchPort, geminiReservePrice } from "../../src/llm/gemini-port";
 
 const recorded = (name: string) => readFileSync(new URL(`./recorded/${name}`, import.meta.url), "utf8");
 const KEY = "AIza-test-not-a-real-key";
@@ -53,12 +53,12 @@ const req = (over: Partial<LlmBatchRequest> = {}): LlmBatchRequest => ({
     { role: "system", content: "あなたは投資家です" },
     { role: "user", content: "入力" },
   ],
-  // (50,000×0.375ドル＋65,536×1.875ドル)/100万 × 160円 ＝ 22.7円
-  maxCost: 227,
+  // (20,000×0.375ドル＋8,000×1.875ドル)/100万 × 160円 ＝ 3.6円
+  maxCost: 36,
   tradingDate: "2026-11-10",
   submittedAt: AT,
   reservePrice: { ...PRICE, yenPerUsd: 160 },
-  maxInputTokens: 50_000,
+  maxInputTokens: 20_000,
   maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
   ...over,
 });
@@ -79,26 +79,29 @@ describe("Gemini のバッチの口", () => {
     expect(r).toEqual({
       ok: true,
       sentBodyHash: await sha256Hex(new TextEncoder().encode(body)),
-      ticket: { agentId: "gemini-ai", provider: "google", modelId: "gemini-3.8-flash", batchId: ID, customId: CID, maxCost: 227, tradingDate: "2026-11-10", submittedAt: AT },
+      ticket: { agentId: "gemini-ai", provider: "google", modelId: "gemini-3.8-flash", batchId: ID, customId: CID, maxCost: 36, tradingDate: "2026-11-10", submittedAt: AT },
     });
   });
 
-  it("出力は、送る max_tokens にかかわらずモデルの上限（65,536）まで予約しなければ断る", async () => {
+  it("出力の上限は 8,000。違う max_tokens・足りない予約・20,000 バイトを超える本文は断る", async () => {
     const { f, seen } = fakeFetch(() => new Response(created()));
+    await expect(make(f).submit(req({ model: { provider: "google", modelId: "gemini-3.8-flash", settings: { max_tokens: "65536" } }, maxOutputTokens: 65_536, maxCost: 1000 }))).rejects.toThrow(RangeError);
     await expect(make(f).submit(req({ maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS - 1 }))).rejects.toThrow(RangeError);
-    expect(llmTokenCost({ inputTokens: 50_000, outputTokens: GEMINI_MAX_OUTPUT_TOKENS }, { ...PRICE, yenPerUsd: 160 })).toBe(227);
-    await expect(make(f).submit(req({ maxCost: 226 }))).rejects.toThrow(RangeError);
+    expect(llmTokenCost({ inputTokens: 20_000, outputTokens: GEMINI_MAX_OUTPUT_TOKENS }, { ...PRICE, yenPerUsd: 160 })).toBe(36);
+    await expect(make(f).submit(req({ maxCost: 35 }))).rejects.toThrow(RangeError);
+    await expect(make(f).submit(req({ messages: [{ role: "user", content: "あ".repeat(6700) }] }))).rejects.toThrow(/byte length/);
     expect(seen).toHaveLength(0);
   });
 
-  it("考えた過程と、合計の残り（totalTokenCount の差）を出力に数えても、出力の上限までなら費用は maxCost を超えない", async () => {
+  it("考えた過程と合計の残りを出力に数えても、出力の上限までなら費用は maxCost を超えない。上限で止まった答えは truncated: true", async () => {
     const j = JSON.parse(finished("run-a"));
     const usage = j.response.inlinedResponses.inlinedResponses[0].response.usageMetadata;
-    Object.assign(usage, { promptTokenCount: 50_000, candidatesTokenCount: 8000, thoughtsTokenCount: 50_000, totalTokenCount: 50_000 + GEMINI_MAX_OUTPUT_TOKENS });
-    const r = await make(fakeFetch(() => new Response(JSON.stringify(j))).f).collect(ticket({ maxCost: 227 }));
-    expect(r).toMatchObject({ result: "collected", usage: { inputTokens: 50_000, outputTokens: GEMINI_MAX_OUTPUT_TOKENS } });
+    Object.assign(usage, { promptTokenCount: 20_000, candidatesTokenCount: 3000, thoughtsTokenCount: 4000, totalTokenCount: 20_000 + GEMINI_MAX_OUTPUT_TOKENS });
+    j.response.inlinedResponses.inlinedResponses[0].response.candidates[0].finishReason = "MAX_TOKENS";
+    const r = await make(fakeFetch(() => new Response(JSON.stringify(j))).f).collect(ticket({ maxCost: 36 }));
+    expect(r).toMatchObject({ result: "collected", truncated: true, usage: { inputTokens: 20_000, outputTokens: GEMINI_MAX_OUTPUT_TOKENS } });
     if (r.status !== "closed") throw new Error("pending");
-    expect(r.usage.cost).toBeLessThanOrEqual(227);
+    expect(r.usage.cost).toBeLessThanOrEqual(36);
   });
 
   it("値上げをまたぐ依頼は、高い料金で予約しなければ断る。temperature も断る", async () => {

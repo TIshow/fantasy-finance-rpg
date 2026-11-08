@@ -148,7 +148,7 @@ const INT64_STR = /^(0|[1-9][0-9]{0,14})$/;
 const THINKING: Readonly<Record<string, ThinkingLevel>> = Object.freeze({ low: "LOW", medium: "MEDIUM", high: "HIGH" });
 
 /**
- * LlmModel と messages から、送る中身を作る。settings は max_tokens（必須。maxOutputTokens に入れる。考えた過程を含むかは未確認なので、予約は gemini-pricing.ts の GEMINI_MAX_OUTPUT_TOKENS で見込む）と
+ * LlmModel と messages から、送る中身を作る。settings は max_tokens（必須。考えた過程を含む出力の上限）と
  * thinking_level（"low"・"medium"・"high"。Gemini 3.8 Flash は "minimal" を受け付けない）だけを許す。
  * temperature は Gemini 3.6 Flash 以降では黙って無視されるので、送らずに断る（記録と実際が食い違わないように）。
  * system は先頭の1件だけ許し、systemInstruction に移す。assistant は Gemini の名前の model にする。内容は変えない。
@@ -304,7 +304,7 @@ function parseItem(json: unknown): GeminiItemResult {
   const candidatesTokens = count(u.candidatesTokenCount);
   const thoughtsTokens = count(u.thoughtsTokenCount);
   // 合計（totalTokenCount）が、入力・候補・考えた過程の足し算より大きいときは、差を出力に足す
-  // （資料にない種類のトークンも、高いほうの出力の単価で数える側。生成したトークンなので、予約の出力の上限の内）
+  // （資料にない種類のトークンも、高いほうの出力の単価で数える側）
   const total = count(u.totalTokenCount);
   const extra = Math.max(0, total - (promptTokens + toolUsePromptTokens + candidatesTokens + thoughtsTokens));
   return {
