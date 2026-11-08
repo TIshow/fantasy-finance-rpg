@@ -7,6 +7,8 @@ import { sha256Hex } from "../../src/events/hash";
 import { llmTokenCost } from "../../src/events/llm-cost";
 import { OpenAIBatchClient, openaiBatchFileBody, toOpenAIParams } from "../../src/llm/openai-batch";
 import { openaiBatchPort, openaiReservePrice } from "../../src/llm/openai-port";
+import { BATCH_SEND_TIMEOUT_MS } from "../../src/llm/batch-port";
+import { hangingFetch, settledAt } from "./send-timeout";
 
 const recorded = (name: string) => readFileSync(new URL(`./recorded/${name}`, import.meta.url), "utf8");
 const KEY = "sk-test-not-a-real-key";
@@ -95,6 +97,27 @@ describe("OpenAI のバッチの口", () => {
       expect(r).toMatchObject({ ok: false, billingUnknown: true });
       expect(JSON.stringify(r)).not.toContain("secret");
     }
+  });
+
+  it("上げと作成の待ち時間の合計は送る時間の上限（10分）より短く、返らなければ通信を中断する（裏で送り続けない）", async () => {
+    const p = await make(fakeFetch(() => new Response("{}")).f).prepare(req());
+    // 上げが返らない：中断して、バッチを作る依頼は出さない
+    const up = hangingFetch();
+    let r: unknown;
+    expect(await settledAt(async () => (r = await make(up.f).send(p, 7)), BATCH_SEND_TIMEOUT_MS)).toBeLessThan(BATCH_SEND_TIMEOUT_MS);
+    expect(up.state).toEqual({ calls: 1, aborted: 1 });
+    expect(r).toEqual({ ok: false, errorCode: "timeout", notCreated: true });
+    // 上げが待ち時間の上限の直前（119秒）に返り、作成が返らない：合計でも10分より前に中断する
+    const state = { aborted: 0 };
+    const slow = ((input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).endsWith("/v1/files")
+        ? new Promise<Response>((resolve) => setTimeout(() => resolve(new Response(recorded("openai-file-uploaded.json"))), 119_000))
+        : new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => ((state.aborted += 1), reject(new DOMException("aborted", "AbortError")))))) as typeof fetch;
+    const at = await settledAt(async () => (r = await make(slow).send(p, 7)), BATCH_SEND_TIMEOUT_MS);
+    expect(at).not.toBeNull();
+    expect(at!).toBeLessThan(BATCH_SEND_TIMEOUT_MS);
+    expect(state.aborted).toBe(1);
+    expect(r).toEqual({ ok: false, errorCode: "timeout", billingUnknown: true });
   });
 
   describe("探す", () => {
