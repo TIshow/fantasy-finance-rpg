@@ -6,6 +6,7 @@ import { replay } from "../../src/events/replay";
 import { INVESTOR_PROMPT_VERSION } from "../../src/llm/investor-prompt";
 import { jst } from "../contracts/fakes";
 import { llmFailed } from "../../scripts/daily-lib";
+import { errorText } from "../../src/runner/llm-stage";
 import type { StageResult } from "../../src/runner/day";
 import { DAYS, LLM_IDS, llmWorld, p } from "./llm-world";
 
@@ -61,6 +62,14 @@ describe("依頼の段（前の営業日の引けのあと）", async () => {
   it("締めの前の晩でなければ依頼しない（古い日を回し直したとき）", async () => {
     w.clock.set(jst(DAYS[1]!, 10));
     expect(submitOf(await w.run(DAYS[0]!))).toMatchObject({ status: "skipped" });
+  });
+});
+
+describe("例外の文", () => {
+  it("キーらしい文字列を伏せる", () => {
+    const t = errorText(new Error("bad key sk-ant-api03-abcdefghijklmnop and AIzaSyA1234567890abcdefghij, Authorization: Bearer abc.def-ghijk key=0123456789abcdef"));
+    expect(t).toBe("bad key [redacted] and [redacted], Authorization: Bearer [redacted] key=[redacted]");
+    expect(errorText(new Error("hash 0123abcd short sk-1"))).toBe("hash 0123abcd short sk-1");
   });
 });
 

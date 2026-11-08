@@ -106,8 +106,8 @@ export async function llmSubmit(day: DayAccess, llm: LlmDeps, date: string): Pro
     return { stage, status: "skipped", detail: `error: ${errorText(e)}` };
   }
   const prompt = await investorPrompt();
-  // 入力に使う記録は、この段の始めの記録で3体とも同じにする（あとで書く①・③は入力に入らない）。3体の市場の文が同じことも確かめる
-  const base = events;
+  // 入力に使う記録は、この段の始めの記録の写しで3体とも同じにする（あとで書く①・③は入らない）。3体の市場の文が同じことも確かめる
+  const base = [...events];
   let market: string | undefined;
   const notes: string[] = [];
   const errors: string[] = [];
@@ -150,7 +150,7 @@ export async function llmSubmit(day: DayAccess, llm: LlmDeps, date: string): Pro
         continue;
       }
       wrote = true;
-      if (omitted.posts > 0 || omitted.auctionDays > 0) notes.push(`${a.id}:omitted ${omitted.posts} posts, ${omitted.auctionDays} days`);
+      if (omitted.posts > 0 || omitted.auctionDays > 0 || omitted.withheld > 0) notes.push(`${a.id}:omitted ${omitted.posts} posts, ${omitted.auctionDays} days, ${omitted.withheld} posts with unreadable corrections`);
       const sent = await port.send(prepared, sub.event.seq);
       const batchSeq = sub.event.seq;
       if (sent.ok) {
@@ -165,7 +165,9 @@ export async function llmSubmit(day: DayAccess, llm: LlmDeps, date: string): Pro
         notes.push(`${a.id}:send unknown (${sent.errorCode}); the next run looks for it`);
       }
     } catch (e) {
-      // 1体の例外で、ほかのAIを止めない。段の結果は失敗（detail が "error: " で始まる）にする
+      // 1体の例外で、ほかのAIを止めない。段の結果は失敗（detail が "error: " で始まる）にする。
+      // 保管に書けたのに写しに当てられなかったとき（LocalCopyError）は、写しと保管がずれているので段ごと止める
+      if (e instanceof LocalCopyError) throw e;
       errors.push(`${a.id}: ${errorText(e)}`);
     }
   }
@@ -203,9 +205,15 @@ export function bodyText(values: ValuesPort, hash: string): string | null {
   return b && typeof b.value === "string" ? b.value : null;
 }
 
-/** 例外の文を、結果と標準出力に書ける形にする（改行・制御文字を空白に、200文字まで） */
+/** 保管に書けたのに、手元の写し（day.ts の Day）に当てられなかった。写しと保管がずれるので、段ごと止める */
+export class LocalCopyError extends Error {}
+
+/** API キーらしい文字列（sk-…・AIza…・Bearer …・key=…）。念のため、例外の文から伏せる */
+const SECRET_LIKE = /sk-[A-Za-z0-9_-]{8,}|AIza[0-9A-Za-z_-]{16,}|(?<=\bBearer\s+)[A-Za-z0-9._~+/=-]{8,}|(?<=\b(?:api[_-]?key|key|token|secret)\s*[=:]\s*)[^\s&"',]{8,}/gi;
+
+/** 例外の文を、結果と標準出力に書ける形にする（改行・制御文字を空白に、キーらしい文字列を伏せ、200文字まで） */
 export function errorText(e: unknown): string {
-  const t = (e instanceof Error ? e.message : String(e)).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
+  const t = (e instanceof Error ? e.message : String(e)).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(SECRET_LIKE, "[redacted]").trim();
   return [...t].length > 200 ? `${[...t].slice(0, 200).join("")}…` : t;
 }
 
