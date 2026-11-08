@@ -107,7 +107,7 @@ describe("締めでの打ち切り・止まったあとのやり直し・試運�
     const inner = w.deps.store;
     let crash = true;
     w.deps.store = { ...inner, read: inner.read.bind(inner), last: inner.last.bind(inner), commitSheet: inner.commitSheet.bind(inner), append: (d) => (crash && d.type === "agent.run" && d.payload.agentId === "ai-claude" ? ((crash = false), Promise.reject(new Error("crashed"))) : inner.append(d)) };
-    expect(collectOf(await w.runAt(D1, 6, 50))).toMatchObject({ detail: "error: ai-claude: crashed; waiting: ai-gpt,ai-gemini" });
+    expect(collectOf(await w.runAt(D1, 6, 50))).toMatchObject({ detail: expect.stringMatching(/^error: ai-claude#\d+: crashed; waiting: ai-gpt,ai-gemini$/) });
     expect((await w.of("llm.batch.closed")).map((e) => p(e).agentId)).toEqual(["ai-claude"]);
     await w.runAt(D1, 7, 20);
     expect((await llmRuns(w, "ai-claude")).map((e) => [p(e).purpose, p(e).ok])).toEqual([["post", true], ["order", true]]);
@@ -167,7 +167,7 @@ describe("締めでの打ち切り・止まったあとのやり直し・試運�
     };
     w.llm.providers.openai!.outcome = () => answer(good);
     const r = collectOf(await w.runAt(D1, 6, 50))!;
-    expect(r.detail).toMatch(/^error: ai-claude: /);
+    expect(r.detail).toMatch(/^error: ai-claude#\d+: /);
     expect((await w.of("order_sheet.committed")).some((e) => p(e).agentId === "ai-gpt" && p(e).tradingDate === D1)).toBe(true);
   });
 
@@ -211,5 +211,43 @@ describe("金曜の夜の依頼を、月曜の朝に受け取る", async () => {
     const sheets = (await w.of("order_sheet.committed")).filter((e) => p(e).tradingDate === MON && subs.some((s) => p(s).agentId === p(e).agentId));
     expect(sheets).toHaveLength(3);
     await replay(await w.all(), w.values, { holidayTables: w.holidayTables });
+  });
+});
+
+describe("受け取りの段の例外の扱い", () => {
+  it("古い①で例外が続いても、今日の①は進める（例外は①ごと）", async () => {
+    const w = await evening();
+    const old = (await w.of("llm.batch.submitted")).find((e) => p(e).agentId === "ai-claude" && p(e).tradingDate === D1)!;
+    const oldId = p((await w.of("llm.batch.sent")).find((e) => p(e).batchSeq === old.seq)!).batchId;
+    // 古い①（D1 の分）の受け取りだけ、ずっと例外にする
+    w.llm.providers.anthropic!.outcome = (id) => {
+      if (id === oldId) throw new RangeError("old batch broken");
+      return answer(good);
+    };
+    // D1 の朝を回し忘れ、D1 の夜に D2 の分を依頼する
+    expect(collectOf(await w.runAt(D1, 16, 35))!.detail).toMatch(new RegExp(`^error: ai-claude#${old.seq}: `));
+    const r = collectOf(await w.runAt(DAYS[2]!, 6, 50))!;
+    expect(r.detail).toMatch(new RegExp(`^error: ai-claude#${old.seq}: `));
+    expect((await w.of("order_sheet.committed")).some((e) => p(e).agentId === "ai-claude" && p(e).tradingDate === DAYS[2])).toBe(true);
+  });
+
+  it("保管に書けたのに写しに当てられなかったら、段ごと止める（ほかのAIへ進まない）", async () => {
+    const w = await evening();
+    for (const f of Object.values(w.llm.providers)) f.outcome = () => answer(good);
+    const inner = w.deps.store;
+    let broken = true;
+    // 保管には書くが、写しの検査で断られる形の結果を返す（seq をずらす）
+    w.deps.store = { ...inner, read: inner.read.bind(inner), last: inner.last.bind(inner), commitSheet: inner.commitSheet.bind(inner), append: async (d) => {
+      const r = await inner.append(d);
+      if (broken && r.ok && d.type === "llm.batch.closed") {
+        broken = false;
+        return { ok: true, event: { ...r.event, seq: r.event.seq + 100 } };
+      }
+      return r;
+    } };
+    const r = collectOf(await w.runAt(D1, 6, 50))!;
+    expect(r.detail).toMatch(/^error: /);
+    expect(r.detail).not.toContain("ai-claude#");
+    expect((await w.of("llm.batch.closed")).map((e) => p(e).agentId)).toEqual(["ai-claude"]);
   });
 });

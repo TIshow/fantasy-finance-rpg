@@ -15,7 +15,7 @@ import type { Account, Deciyen, Order } from "../ledger/types";
 import type { ValuesPort } from "../store/pg-values";
 import { type SplitInput, adjustCloses } from "./adjust";
 import { llmCollect } from "./llm-collect";
-import { type Appended, type DayAccess, type LlmDeps, errorText, llmSubmit } from "./llm-stage";
+import { type Appended, type DayAccess, type LlmDeps, LocalCopyError, errorText, llmSubmit } from "./llm-stage";
 import { discloseDue } from "./world/disclosure";
 
 /** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引き、凍結した写しを渡す */
@@ -210,7 +210,15 @@ class Day {
    * orders が false（試運転）なら、注文票を確定する口（commitSheet）を持たない凍結したオブジェクトを返す
    */
   access(orders = false): DayAccess {
-    const write = async (r: Appended, what: string): Promise<Appended> => (r.ok ? { ok: true, event: await this.sync(r, what) } : r);
+    // 保管に書けたのに写しに当てられなければ LocalCopyError（写しと保管がずれるので、LLM の段は段ごと止める）
+    const write = async (r: Appended, what: string): Promise<Appended> => {
+      if (!r.ok) return r;
+      try {
+        return { ok: true, event: await this.sync(r, what) };
+      } catch (e) {
+        throw new LocalCopyError(e instanceof Error ? e.message : String(e));
+      }
+    };
     const base = {
       events: () => this.log.events,
       holidays: () => this.log.holidays(),
