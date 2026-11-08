@@ -11,13 +11,16 @@ type Rec = Pick<LogEvent, "seq" | "type" | "recordedAt" | "payload">;
 
 const jst = (date: string, hh: number, mm = 0) => Date.parse(`${date}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00+09:00`);
 
+/** 依頼の記録に入れる予約の料金 */
+const RESERVE_PRICE = { yenPerUsd: 160, inputCentsPer10MTok: 15_000, outputCentsPer10MTok: 75_000 };
+
 /** 記録を seq の順に並べる。sub は依頼（送る前の予約）、sent は送った記録、close は閉じた記録（sent と close は依頼の seq を指す） */
 function log(...items: (["sub", number, number, string?] | ["sent", number, number] | ["close", number, number, number])[]): Rec[] {
   return items.map((it, i) => {
     const seq = i + 1;
     if (it[0] === "sub") {
       const [, at, maxCost, agentId = `a${seq}`] = it;
-      return { seq, type: "llm.batch.submitted", recordedAt: at, payload: { agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: "b".repeat(64), customId: `c${seq}`, maxCost, tradingDate: "2026-11-10", submittedAt: at } };
+      return { seq, type: "llm.batch.submitted", recordedAt: at, payload: { agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: "b".repeat(64), customId: `c${seq}`, maxCost, tradingDate: "2026-11-10", submittedAt: at, ...RESERVE_PRICE } };
     }
     if (it[0] === "sent") {
       const [, at, batchSeq] = it;
@@ -141,7 +144,7 @@ describe("openLlmBatches・llmSentOf・llmReservationOf・llmTicketOf", () => {
     const sent = llmSentOf(events, 2);
     expect(sent?.seq).toBe(3);
     const ticket: LlmBatchTicket | null = llmTicketOf(open[0]!, sent);
-    expect(ticket).toEqual({ batchSeq: 2, agentId: "beta", provider: "anthropic", modelId: "m", batchId: "batch_2", customId: "c2", sentBodyHash: "b".repeat(64), reservedAt: at(16, 36), maxCost: 200, tradingDate: "2026-11-10", submittedAt: at(16, 36) });
+    expect(ticket).toEqual({ batchSeq: 2, agentId: "beta", provider: "anthropic", modelId: "m", batchId: "batch_2", customId: "c2", sentBodyHash: "b".repeat(64), reservedAt: at(16, 36), maxCost: 200, tradingDate: "2026-11-10", submittedAt: at(16, 36), reservePrice: RESERVE_PRICE });
   });
 
   it("送った記録がまだない依頼（②と③のあいだで止まった）は、控えを作れず（null）、予約の控えから探す", () => {
@@ -149,7 +152,7 @@ describe("openLlmBatches・llmSentOf・llmReservationOf・llmTicketOf", () => {
     expect(llmSentOf(events, 1)).toBeNull();
     expect(llmTicketOf(events[0]!, null)).toBeNull();
     const r: LlmBatchReservation = llmReservationOf(events[0]!);
-    expect(r).toEqual({ batchSeq: 1, agentId: "alpha", provider: "anthropic", modelId: "m", customId: "c1", sentBodyHash: "b".repeat(64), reservedAt: at(16, 35), maxCost: 150, tradingDate: "2026-11-10", submittedAt: at(16, 35) });
+    expect(r).toEqual({ batchSeq: 1, agentId: "alpha", provider: "anthropic", modelId: "m", customId: "c1", sentBodyHash: "b".repeat(64), reservedAt: at(16, 35), maxCost: 150, tradingDate: "2026-11-10", submittedAt: at(16, 35), reservePrice: RESERVE_PRICE });
     // 閉じていない依頼のうち、送った記録のないもの
     expect(openLlmBatches(events).filter((e) => llmSentOf(events, e.seq) === null).map((e) => e.seq)).toEqual([1]);
   });
@@ -161,6 +164,29 @@ describe("openLlmBatches・llmSentOf・llmReservationOf・llmTicketOf", () => {
     expect(() => llmTicketOf(sub1!, sent2!)).toThrow(RangeError);
     expect(() => llmTicketOf(sub2!, close!)).toThrow(RangeError);
     expect(llmTicketOf(sub2!, sent2!)?.batchId).toBe("batch_2");
+  });
+
+  it("控えの料金は①の記録をそのまま写す（今の料金表や円の設定から選び直さない）", () => {
+    const [sub, sent] = log(["sub", at(16, 35), 150], ["sent", at(16, 36), 1]);
+    const p = sub!.payload as Record<string, unknown>;
+    // 依頼のときの料金（あとで料金表や円の設定が変わっても、記録にあるこの値を使う）
+    const reserved = { ...sub!, payload: { ...p, yenPerUsd: 150, inputCentsPer10MTok: 3_750, outputCentsPer10MTok: 30_000 } };
+    const want = { yenPerUsd: 150, inputCentsPer10MTok: 3_750, outputCentsPer10MTok: 30_000 };
+    expect(llmReservationOf(reserved).reservePrice).toEqual(want);
+    expect(llmTicketOf(reserved, sent!)?.reservePrice).toEqual(want);
+    // 控えを変えても記録は変わらない（写しであって、同じ物を指していない）
+    llmReservationOf(reserved).reservePrice.yenPerUsd = 1;
+    expect(llmReservationOf(reserved).reservePrice.yenPerUsd).toBe(150);
+  });
+
+  it("①に料金がない、または1以上の整数でなければ RangeError", () => {
+    const [sub] = log(["sub", at(16, 35), 150]);
+    const p = sub!.payload as Record<string, unknown>;
+    for (const f of ["yenPerUsd", "inputCentsPer10MTok", "outputCentsPer10MTok"]) {
+      for (const v of [undefined, 0, -1, 1.5, "160", null]) {
+        expect(() => llmReservationOf({ ...sub!, payload: { ...p, [f]: v } }), `${f}=${String(v)}`).toThrow(RangeError);
+      }
+    }
   });
 });
 

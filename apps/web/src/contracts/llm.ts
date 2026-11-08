@@ -191,6 +191,12 @@ export interface LlmBatchReservation {
   tradingDate: string;
   /** 依頼を決めた時刻（①の submittedAt） */
   submittedAt: number;
+  /**
+   * 予約の料金（①の inputCentsPer10MTok・outputCentsPer10MTok・yenPerUsd をそのまま写したもの。LlmBatchRequest.reservePrice と同じ値）。
+   * collect・abandon は、閉じた結果の費用をこの料金で出し、price にはこの2つの単価を入れる。今の料金表や口の設定の円から
+   * 選び直さない（依頼から受け取りまでに料金表や円の設定が変わると、閉じる記録が①の料金と合わず断られ、答えが使えなくなるため）
+   */
+  reservePrice: LlmBatchPrice & { yenPerUsd: number };
 }
 
 /**
@@ -205,11 +211,13 @@ export interface LlmBatchTicket extends LlmBatchReservation {
 /**
  * 送った結果（send）。
  * - ok：③（llm.batch.sent）に batchId を書く
- * - notCreated：バッチが作られていないと確か（本文を1バイトも送り出す前に失敗した、または提供元がバッチを作らずに断ったと答えた）。
+ * - notCreated：バッチが作られていないと確か。次のどれか：本文を1バイトも送り出す前に失敗した。提供元がバッチを作らずに断ったと答えた。
+ *   提供元にバッチを作る依頼をまだ出していない段階で失敗した（OpenAI で、本文のファイルの上げに失敗し、バッチを作る依頼を出していない
+ *   場合など。上げたファイルは課金されない）。ただし、ファイルの上げの途中で送る時間の上限（10分）を超えたときは billingUnknown にする。
  *   runner は result: "failed"・費用0・トークン数0・料金は reservePrice・notCreatedError に errorCode を入れた llm.batch.closed で
  *   閉じる（③のない①だけが、費用0で閉じられる）
- * - billingUnknown：作られた（課金されうる）か分からない。本文を1バイトでも送り出したあとの失敗（タイムアウト・通信断を含む）は、
- *   notCreated にせず、こちらにする。runner は find で探す
+ * - billingUnknown：作られた（課金されうる）か分からない。バッチを作る依頼を1バイトでも送り出したあとの失敗（タイムアウト・通信断を含む）は、
+ *   notCreated にせず、こちらにする（作る依頼と本文を一度に送る提供元では、本文を1バイトでも送り出したあと）。runner は find で探す
  */
 export type LlmSendResult =
   | { ok: true; batchId: string }
@@ -238,7 +246,8 @@ export type LlmFindResult = { status: "found"; batchId: string } | { status: "no
  * - collected：答えを受け取った。output と respondedModel がある
  * - expired：締め（8:30）で打ち切った、または提供元で期限が切れた
  * - failed：提供元で失敗した、結果が読めなかった
- * usage.cost は実際の費用（0.1円単位、端数は切り上げ）。llmTokenCost(usage のトークン数, reservePrice) ちょうど
+ * usage.cost は実際の費用（0.1円単位、端数は切り上げ）。llmTokenCost(usage のトークン数, reservePrice) ちょうど。reservePrice は
+ * 控え（LlmBatchTicket.reservePrice。①から写したもの）を使う
  * （記録の検査が同じ計算で確かめる）。price は reservePrice の2つの単価をそのまま写したもの（違えば記録できない）。
  * 提供元が実際にはもっと安く請求しても（OpenAI の短い文脈の料金など）、予約の料金で数える（多めに数えるので安全側）。
  * 閉じたときに料金を選び直さない（提供元のバッチを作った時刻で選ぶと、値上げをまたいだ依頼が記録できなくなる）。
