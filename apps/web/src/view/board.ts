@@ -88,6 +88,13 @@ export function boardSymbols(view: View): Set<string> {
 export function buildBoard(view: View, symbol: string): Board | null {
   // 知っている銘柄だけ（まだ投稿がなくても、上場した銘柄のページは作る）
   if (!boardSymbols(view).has(symbol)) return null;
+  return boardOf(view, symbol);
+}
+
+/** 「全体」の掲示板（/board）。銘柄ではないので、持ち株の一覧は空。投稿がなくても作る */
+export const buildAllBoard = (view: View): Board => boardOf(view, ALL_BOARD);
+
+function boardOf(view: View, symbol: string): Board {
   const evidence = new Map(view.evidence.map((e) => [e.seq, e]));
   const posts = view.timeline.filter((t): t is TimelineItem & { kind: "post" } => t.kind === "post" && t.symbol === symbol);
   const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.symbol === symbol && t.qty > 0);

@@ -51,7 +51,7 @@ describe("モデルの表示とLLMの3体の肖像", () => {
 });
 
 describe("日ごとの判断の画面", () => {
-  const item = (o: Partial<DecisionItem>): DecisionItem => ({ key: "p1", timeText: "17:00", kind: "post", label: "投稿", text: "", note: null, symbol: null, tags: [], runSeq: null, model: null, ...o });
+  const item = (o: Partial<DecisionItem>): DecisionItem => ({ key: "p1", timeText: "17:00", kind: "post", label: "投稿", text: "", note: null, symbol: null, tags: [], runSeq: null, model: null, dryRun: false, ...o });
   const pageWith = (decisions: AgentPage["decisions"]): AgentPage => {
     const ev = (seq: number, type: LogEvent["type"], payload: object): LogEvent => ({ seq, schema: 1, type, recordedAt: 0, actor: "system", keys: [], refs: [], payload, prevHash: "", hash: "" });
     const base = buildAgentPage(buildView([ev(1, "agent.registered", { agentId: "a", displayName: "あ", startDate: "2026-11-09", initialCash: 10_000 })], () => undefined), new Map(), "a")!;

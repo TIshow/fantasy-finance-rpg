@@ -89,6 +89,14 @@ export interface RunModel {
   agentId: string;
   provider: string;
   modelId: string;
+  /** 記録された時刻 */
+  at: number;
+  /** 判断に成功したか（ok が false のものだけ失敗。ない記録は成功扱い） */
+  ok: boolean;
+  /** 失敗したときのエラーコード（timeout・budget_exceeded など。ないか文字列でなければ null） */
+  errorCode: string | null;
+  /** 試運転（注文を出さない実行）か。dryRun が true のときだけ true、ない記録は本番 */
+  dryRun: boolean;
 }
 
 export interface View {

@@ -57,7 +57,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
         // 形が違う記録は読み飛ばす（画面を止めない）
         if (typeof p.agentId === "string" && typeof p.model?.provider === "string" && typeof p.model?.modelId === "string") {
           // 判断ごとのモデルを引くため、成功・失敗を問わず全件を残す
-          runs.push({ seq: e.seq, agentId: p.agentId, provider: p.model.provider, modelId: p.model.modelId });
+          runs.push({ seq: e.seq, agentId: p.agentId, provider: p.model.provider, modelId: p.model.modelId, at: e.recordedAt, ok: p.ok !== false, errorCode: typeof p.errorCode === "string" ? p.errorCode : null, dryRun: p.dryRun === true });
           // 「最後のモデル」は、成功した判断（ok が false でないもの）だけで決める。失敗した判断は、投稿も注文票も出していないため
           if (p.ok !== false) {
             const variant = `${p.model.provider}\u0000${p.model.modelId}`;

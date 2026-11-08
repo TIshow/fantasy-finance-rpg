@@ -8,6 +8,7 @@ const NAV = [
   { href: "/", label: "アリーナ" },
   { href: "/agents", label: "AIの成績" },
   { href: "/timeline", label: "タイムライン" },
+  { href: "/board", label: "全体の掲示板" },
 ];
 
 /** 全ページの上部：注意書き（ピンクの帯）と、画面の行き来（リンクだけ。入力欄・ボタンなし） */
