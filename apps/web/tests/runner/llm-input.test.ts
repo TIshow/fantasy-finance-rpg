@@ -8,7 +8,7 @@ import { investorInputOf } from "../../src/runner/llm-input";
 const T = "2026-11-10";
 const PREV = "2026-11-09";
 let seq = 0;
-const ev = (type: LogEvent["type"], payload: Record<string, unknown>, recordedAt = Date.parse("2026-11-09T07:00:00Z")): LogEvent => ({ seq: ++seq, type, recordedAt, payload }) as unknown as LogEvent;
+const ev = (type: LogEvent["type"], payload: Record<string, unknown>, recordedAt = Date.parse("2026-11-09T07:00:00Z"), refs: number[] = []): LogEvent => ({ seq: ++seq, type, recordedAt, refs, payload }) as unknown as LogEvent;
 const bodies = new Map([
   ["h1", "VRN1 は強い"],
   ["h2", "取り下げた投稿"],
@@ -105,5 +105,28 @@ describe("investorInputOf", () => {
   it("根拠のあとの台帳の調整は、口座の元の seq に入れる", () => {
     const adj = [...events, ev("ledger.adjusted", { agentId: "ai-claude", correctionSeq: 1 })];
     expect(investorInputOf(adj, ctx).accountSeqs).toEqual([1, 9, adj.at(-1)!.seq]);
+  });
+
+  it("投稿を指しているのに形が読めない訂正（種類の綴りが違う・種類がない・別のキー）があれば、その投稿を外し、外した数と訂正の seq を残す", () => {
+    const at = Date.parse("2026-11-09T07:00:00Z");
+    const cases = [
+      ev("correction.issued", { targetSeq: 10, kind: "投稿", newBodyHash: "h5" }),
+      ev("correction.issued", { targetSeq: 10, newBodyHash: "h5" }),
+      ev("correction.issued", { postSeq: 10, kind: "post", text: "h5" }, at, [10]),
+      ev("correction.issued", { targetSeq: 10, kind: "post" }),
+    ];
+    for (const bad of cases) {
+      const input = investorInputOf([...events, bad], ctx);
+      expect(input.posts.map((x) => x.seq)).toEqual([12]);
+      expect(input.withheld).toEqual([{ postSeq: 10, correctionSeq: bad.seq }]);
+      const r = investorUserText(input);
+      expect(r.omitted.withheld).toBe(1);
+      expect(r.text).toContain("訂正の形が読めないため外した投稿：1件");
+      expect(r.text).not.toContain("VRN1 は強い");
+      expect(r.inputSeqs).toContain(bad.seq);
+      expect(r.inputSeqs).not.toContain(10);
+    }
+    // 投稿を指していない訂正（入力データの訂正）では、投稿は外さない
+    expect(investorInputOf([...events, ev("correction.issued", { targetSeq: 6, kind: "data", newValueHash: "x" }, at, [6])], ctx).withheld).toBeUndefined();
   });
 });
