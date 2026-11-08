@@ -83,7 +83,7 @@ describe("investorInputOf", () => {
   });
 
   it("投稿の訂正：seq が最大の訂正の本文を使い、訂正の seq を持たせる。消した本文の訂正なら入れない", () => {
-    const more = [...events, ev("correction.issued", { targetSeq: 10, kind: "post", newBodyHash: "h5" }), ev("correction.issued", { refSeq: 10, kind: "post", newBodyHash: "h6" }), ev("correction.issued", { targetSeq: 12, kind: "post", newBodyHash: "erased" }), ev("correction.issued", { targetSeq: 6, kind: "data", newBodyHash: "h5" })];
+    const more = [...events, ev("correction.issued", { targetSeq: 10, kind: "post", newBodyHash: "h5" }), ev("correction.issued", { targetSeq: 10, kind: "post", newBodyHash: "h6" }), ev("correction.issued", { targetSeq: 12, kind: "post", newBodyHash: "erased" }), ev("correction.issued", { targetSeq: 6, kind: "data", newBodyHash: "h5" })];
     const fixed = investorInputOf(more, ctx);
     expect(fixed.posts).toEqual([{ seq: 10, agentId: "ai-gpt", board: "VRN1", at: expect.any(Number), text: "2回目の訂正の本文", correctionSeq: more.at(-3)!.seq }]);
     expect(investorUserText(fixed).inputSeqs).toContain(more.at(-3)!.seq);
@@ -128,5 +128,47 @@ describe("investorInputOf", () => {
     }
     // 投稿を指していない訂正（入力データの訂正）では、投稿は外さない
     expect(investorInputOf([...events, ev("correction.issued", { targetSeq: 6, kind: "data", newValueHash: "x" }, at, [6])], ctx).withheld).toBeUndefined();
+  });
+
+  it("前の形のキー（refSeq・bodyHash）は読まない：その訂正は読めない訂正として、指す投稿を外す", () => {
+    const at = Date.parse("2026-11-09T07:00:00Z");
+    for (const old of [ev("correction.issued", { refSeq: 10, kind: "post", newBodyHash: "h5" }, at, [10]), ev("correction.issued", { targetSeq: 10, kind: "post", bodyHash: "h5" }, at, [10])]) {
+      const input = investorInputOf([...events, old], ctx);
+      expect(input.posts.map((x) => x.seq)).toEqual([12]);
+      expect(input.withheld).toEqual([{ postSeq: 10, correctionSeq: old.seq }]);
+    }
+  });
+
+  it("投稿ごとに seq が最大の訂正だけが効く：読める→読めないなら外し、読めない→読めるなら訂正の本文を印つきで出す", () => {
+    const at = Date.parse("2026-11-09T07:00:00Z");
+    const good = () => ev("correction.issued", { targetSeq: 10, kind: "post", reason: "誤り", newBodyHash: "h5" }, at, [10]);
+    const bad = () => ev("correction.issued", { targetSeq: 10, kind: "post", reason: "誤り" }, at, [10]);
+    const g1 = good();
+    const b1 = bad();
+    const thenBad = investorInputOf([...events, g1, b1], ctx);
+    expect(thenBad.posts.map((x) => x.seq)).toEqual([12]);
+    expect(thenBad.withheld).toEqual([{ postSeq: 10, correctionSeq: b1.seq }]);
+    const b2 = bad();
+    const g2 = good();
+    const thenGood = investorInputOf([...events, b2, g2], ctx);
+    expect(thenGood.withheld).toBeUndefined();
+    expect(thenGood.posts.find((x) => x.seq === 10)).toMatchObject({ text: "訂正した本文", correctionSeq: g2.seq });
+  });
+
+  it("訂正の対象は targetSeq の1件だけ。refs のほかの投稿は引用で、外さず、訂正の印なしでふつうに出す", () => {
+    const at = Date.parse("2026-11-09T07:00:00Z");
+    const fix = ev("correction.issued", { targetSeq: 12, kind: "post", reason: "誤り", newBodyHash: "h5" }, at, [12, 10]);
+    const input = investorInputOf([...events, fix], ctx);
+    expect(input.withheld).toBeUndefined();
+    expect(input.posts.map((x) => [x.seq, x.text, x.correctionSeq])).toEqual([
+      [10, "VRN1 は強い", undefined],
+      [12, "訂正した本文", fix.seq],
+    ]);
+    // 読めない訂正でも、targetSeq が投稿なら外すのはその投稿だけ（refs の引用は外さない）
+    const bad = ev("correction.issued", { targetSeq: 12, kind: "post", reason: "誤り" }, at, [12, 10]);
+    expect(investorInputOf([...events, bad], ctx).withheld).toEqual([{ postSeq: 12, correctionSeq: bad.seq }]);
+    // 入力データの訂正（kind: input）が投稿を引用していても、投稿は外さない
+    const data = ev("correction.issued", { targetSeq: 6, kind: "input", reason: "値の誤り" }, at, [6, 10]);
+    expect(investorInputOf([...events, data], ctx).withheld).toBeUndefined();
   });
 });

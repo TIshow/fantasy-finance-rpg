@@ -90,13 +90,46 @@ describe("依頼の段：上限・送れなかったとき", () => {
     expect((await w.of("agent.run")).filter((e) => p(e).agentId === "ai-gpt")).toHaveLength(1);
   });
 
-  it("3体の予約の合計が目標（80円）を超える設定なら、どのAIも依頼せず、段を失敗（error:）にする", async () => {
+  it("3体の予約の合計が目標（80円）を超える設定なら、どのAIにも送らず、AIごとに budget_exceeded（費用0）をその日1回だけ残し、段は失敗（error:）にする", async () => {
     const w = await llmWorld();
     w.deps.llm = { ...w.deps.llm!, yenPerUsd: 400 };
     const r = submitOf(await w.run(DAYS[0]!));
-    expect(r).toMatchObject({ status: "skipped", detail: expect.stringMatching(/^error: the daily reservations \(\d+\) exceed the target \(800\)$/) });
+    expect(r).toMatchObject({ status: "written", detail: expect.stringMatching(/^error: the daily reservations \(\d+\) exceed the target \(800\); ai-claude:budget_exceeded; ai-gpt:budget_exceeded; ai-gemini:budget_exceeded$/) });
     expect(llmFailed([r!])).toBe(true);
     expect(await w.of("llm.batch.submitted")).toEqual([]);
+    expect(Object.values(w.llm.providers).map((f) => f.sent.length)).toEqual([0, 0, 0]);
+    const runs = (await w.of("agent.run")).filter((e) => p(e).errorCode === "budget_exceeded");
+    expect(runs.map((e) => [p(e).agentId, p(e).ok, p(e).cost, p(e).purpose, p(e).dryRun])).toEqual([
+      ["ai-claude", false, 0, "order", undefined],
+      ["ai-gpt", false, 0, "order", undefined],
+      ["ai-gemini", false, 0, "order", undefined],
+    ]);
+    // 回し直しても二重に書かない。設定が直るまで、段は失敗のまま（運用者に知らせ続ける）
+    w.clock.set(w.clock.now() + 60_000);
+    const again = submitOf(await w.run(DAYS[0]!));
+    expect(again).toMatchObject({ status: "skipped", detail: expect.stringMatching(/^error: the daily reservations/) });
+    expect((await w.of("agent.run")).filter((e) => p(e).errorCode === "budget_exceeded")).toHaveLength(3);
+  });
+
+  it("注文だけを停止中のAIにも、80円を超える日の budget_exceeded を残す（投稿も注文も停止中のAIには残さない）", async () => {
+    const w = await llmWorld();
+    await w.op("agent.suspended", { agentId: "ai-gpt", scope: "orders", reason: "試験" });
+    await w.op("agent.suspended", { agentId: "ai-gemini", scope: "both", reason: "試験" });
+    w.deps.llm = { ...w.deps.llm!, yenPerUsd: 400 };
+    await w.run(DAYS[0]!);
+    const runs = (await w.of("agent.run")).filter((e) => p(e).errorCode === "budget_exceeded");
+    expect(runs.map((e) => [p(e).agentId, p(e).ok, p(e).cost])).toEqual([
+      ["ai-claude", false, 0],
+      ["ai-gpt", false, 0],
+    ]);
+  });
+
+  it("試運転の間に上限で断った記録には、試運転の印（dryRun: true）を付ける", async () => {
+    const w = await llmWorld({ dailyCostLimit: 1000, dryRun: true });
+    w.deps.llm = { ...w.deps.llm!, yenPerUsd: 400 };
+    await w.run(DAYS[0]!);
+    const runs = (await w.of("agent.run")).filter((e) => p(e).errorCode === "budget_exceeded");
+    expect(runs.map((e) => p(e).dryRun)).toEqual([true, true, true]);
   });
 
   it("1体で例外が出ても、ほかのAIは依頼する。段は失敗（error:）で、例外の文は1行・200文字までにする", async () => {

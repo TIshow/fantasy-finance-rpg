@@ -167,7 +167,7 @@ describe("erase_withdrawn_body", () => {
     })).rejects.toThrow(/stored_values is append-only/);
     expect(await has(output)).toBe(true);
     // 消してよい本文でも、別の記録（ここでは訂正）が同じハッシュを指せば断る
-    await insertRaw("correction.issued", "operator:owner", { refSeq: erased, kind: "post", newBodyHash: bodyOf(erased) });
+    await insertRaw("correction.issued", "operator:owner", { targetSeq: erased, kind: "post", reason: "試験", newBodyHash: bodyOf(erased) });
     await expect(erase(erased)).rejects.toThrow("may not be erased");
     expect(await has(bodyOf(erased))).toBe(true);
   }, 60_000);
