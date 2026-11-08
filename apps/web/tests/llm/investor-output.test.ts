@@ -89,10 +89,12 @@ describe("parseInvestorOutput", () => {
   });
 
   it("本文が空白と見えない文字（ゼロ幅スペース・BOM・ハングルの詰め物など）だけなら post_blank", () => {
-    for (const t of ["", "\u200b\u200b", "\ufeff \u200d", "\u3164", "\u2800\u00a0\u3000", "\u202e"]) {
+    for (const t of ["", "\u200b\u200b", "\ufeff \u200d", "\u3164", "\u2800\u00a0\u3000", "\u202e", "\u034f", "\ufe0f\ufe0f", "\u{e0100}", "\u17b4\u17b5", " \u0301"]) {
       expect(read({ ...good, post: { board: "VRN1", text: t } })).toEqual({ ok: false, problem: "post_blank" });
     }
     expect(read({ ...good, post: { board: "VRN1", text: "\u200bあ" } })).toMatchObject({ ok: true });
+    // 結合文字が付いていても、見える文字があれば通る（絵文字＋異体字セレクタ）
+    expect(read({ ...good, post: { board: "VRN1", text: "\u2764\ufe0f" } })).toMatchObject({ ok: true });
   });
 
   it("銘柄は16文字まで。__proto__ のキーは知らない項目として断る", () => {
