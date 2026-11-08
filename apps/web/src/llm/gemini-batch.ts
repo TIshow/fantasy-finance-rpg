@@ -482,6 +482,27 @@ function checkBaseUrl(raw: string): string {
   return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
 }
 
+/**
+ * 作成で送る本文。1件ごとの中身は model と messages から toGeminiRequest で作る。create はこれと同じ文字列を送る
+ * （ハッシュを先に出すために公開する）。決まりに合わなければ RangeError
+ */
+export function geminiBatchBody(model: LlmModel, displayName: string, items: readonly GeminiBatchRequestItem[]): string {
+  if (!isObj(model) || model.provider !== GEMINI_PROVIDER) throw new RangeError(`model.provider must be "${GEMINI_PROVIDER}"`);
+  const modelId = model.modelId;
+  if (!isStr(modelId) || !MODEL_ID.test(modelId)) throw new RangeError("invalid model id");
+  if (!isStr(displayName) || !DISPLAY_NAME.test(displayName)) throw new RangeError("displayName must match ^[A-Za-z0-9_-]{1,128}$");
+  if (!Array.isArray(items) || items.length === 0) throw new RangeError("no requests");
+  const ids = new Set<string>();
+  for (const it of items) {
+    if (!isObj(it) || !isStr(it.customId) || !CUSTOM_ID.test(it.customId) || ids.has(it.customId)) throw new RangeError("customId must be unique and match ^[A-Za-z0-9_-]{1,64}$");
+    ids.add(it.customId);
+  }
+  const requests = items.map((it) => ({ request: toGeminiRequest(model, it.messages), metadata: { key: it.customId } }));
+  const body = JSON.stringify({ batch: { model: `models/${modelId}`, displayName, inputConfig: { requests: { requests } } } });
+  if (new TextEncoder().encode(body).length >= GEMINI_MAX_BODY_BYTES) throw new RangeError("request body is too large for an inline batch");
+  return body;
+}
+
 export interface GeminiBatchClientOptions {
   apiKey: string;
   /** 試験で差し替える。既定は Node の fetch（包んで呼ぶ） */
@@ -527,22 +548,18 @@ export class GeminiBatchClient {
    * create を呼ぶ直前に呼び出し側が自分の時計で取った時刻を使う（gemini-pricing.ts の geminiBatchPrice）。
    */
   async create(model: LlmModel, displayName: string, items: readonly GeminiBatchRequestItem[]): Promise<GeminiCreateResult> {
-    if (!isObj(model) || model.provider !== GEMINI_PROVIDER) throw new RangeError(`model.provider must be "${GEMINI_PROVIDER}"`);
-    const modelId = model.modelId;
-    if (!isStr(modelId) || !MODEL_ID.test(modelId)) throw new RangeError("invalid model id");
-    if (!DISPLAY_NAME.test(displayName)) throw new RangeError("displayName must match ^[A-Za-z0-9_-]{1,128}$");
-    if (items.length === 0) throw new RangeError("no requests");
-    const ids = new Set<string>();
-    for (const it of items) {
-      if (!CUSTOM_ID.test(it.customId) || ids.has(it.customId)) throw new RangeError("customId must be unique and match ^[A-Za-z0-9_-]{1,64}$");
-      ids.add(it.customId);
-    }
-    const requests = items.map((it) => ({ request: toGeminiRequest(model, it.messages), metadata: { key: it.customId } }));
-    const body = JSON.stringify({ batch: { model: `models/${modelId}`, displayName, inputConfig: { requests: { requests } } } });
-    const bytes = new TextEncoder().encode(body);
-    if (bytes.length >= GEMINI_MAX_BODY_BYTES) throw new RangeError("request body is too large for an inline batch");
-    const sent: SentBody = { body, sha256: await sha256Hex(bytes) };
-    const r = await this.#call("POST", `/${GEMINI_API_VERSION}/models/${modelId}:batchGenerateContent`, body, parseStatus, this.#timeoutMs);
+    return this.createBody(model, displayName, geminiBatchBody(model, displayName, items));
+  }
+
+  /** geminiBatchBody(model, displayName, …) で作った本文を、加工せずに送ってバッチを作る（契約：記録のハッシュと送った本文を一致させる） */
+  async createBody(model: LlmModel, displayName: string, body: string): Promise<GeminiCreateResult> {
+    if (!isObj(model) || !isStr(model.modelId) || !MODEL_ID.test(model.modelId) || typeof body !== "string" || body === "") throw new RangeError("model and body are required");
+    const sent: SentBody = { body, sha256: await sha256Hex(new TextEncoder().encode(body)) };
+    // 応答のモデルと名前が送ったものと違えば、何かが作られたが頼んだものか分からないので、形が合わない（billingUnknown）とする
+    const r = await this.#call("POST", `/${GEMINI_API_VERSION}/models/${model.modelId}:batchGenerateContent`, body, (json) => {
+      const s = parseStatus(json);
+      return need(s.model === `models/${model.modelId}` && s.displayName === displayName, s);
+    }, this.#timeoutMs);
     if (!r.ok && uncertainOnCreate(r)) return { ...r, billingUnknown: true, sent };
     return { ...r, sent };
   }

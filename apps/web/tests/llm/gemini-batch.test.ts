@@ -364,6 +364,9 @@ describe("Gemini のバッチの口", () => {
       [fakeFetch(() => new Response("", { status: 500 })).f, { errorCode: "provider_error", reason: "http", status: 500, billingUnknown: true }],
       [fakeFetch(() => new Response("not json")).f, { errorCode: "provider_error", reason: "malformed", status: 200, billingUnknown: true }],
       [fakeFetch(() => new Response('{"name":"batches/x","metadata":{}}')).f, { errorCode: "provider_error", reason: "malformed", status: 200, billingUnknown: true }],
+      // 応答のモデル・名前が送ったものと違う（頼んだものか分からない）
+      [fakeFetch(() => new Response(recorded("gemini-batch-created.json").replace(NAME, "other-name"))).f, { errorCode: "provider_error", reason: "malformed", status: 200, billingUnknown: true }],
+      [fakeFetch(() => new Response(recorded("gemini-batch-created.json").replace(`models/${MODEL}`, "models/gemini-other"))).f, { errorCode: "provider_error", reason: "malformed", status: 200, billingUnknown: true }],
     ];
     for (const [f, expected] of cases) {
       const r = await client(f, 5).create(GOOGLE, NAME, item);
