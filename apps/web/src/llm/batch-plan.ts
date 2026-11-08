@@ -1,11 +1,11 @@
 // 3社のバッチの予約の見積もりと、その日の合計の確かめ（#179 の lead の決定2）。
-// 予約 ＝ 入力の上限 × 入力の単価 ＋ 出力の上限 × 出力の単価（1ドル160円。0.1円未満は切り上げ。src/events/llm-cost.ts の llmTokenCost）。
+// 予約 ＝ 入力の上限 × 入力の倍率 × 入力の単価 ＋ 出力の上限 × 出力の単価（1ドル160円。0.1円未満は切り上げ。batch-port.ts の batchReserveCost）。
+// 入力の倍率は、GPT だけ3（キャッシュへの書き込みを3倍で数えるため。#179 の lead の答え）。送る本文の上限は3社とも2万バイト。
 // 毎日の実行は、依頼を始める前に checkDailyBatchReservations を呼び、合計が目標（80円）を超える設定なら始めない。
 import type { LlmBatchPrice } from "../contracts";
-import { llmTokenCost } from "../events/llm-cost";
 import type { Deciyen } from "../ledger/types";
 import { ANTHROPIC_MAX_OUTPUT_TOKENS, ANTHROPIC_PROVIDER, anthropicReservePrice } from "./anthropic-port";
-import { BATCH_MAX_INPUT_TOKENS, YEN_PER_USD } from "./batch-port";
+import { BATCH_MAX_INPUT_TOKENS, YEN_PER_USD, batchReserveCost } from "./batch-port";
 import { GEMINI_PROVIDER } from "./gemini-batch";
 import { GEMINI_MAX_OUTPUT_TOKENS, geminiReservePrice } from "./gemini-port";
 import { OPENAI_INPUT_COST_FACTOR, OPENAI_MAX_OUTPUT_TOKENS, OPENAI_PROVIDER, openaiReservePrice } from "./openai-port";
@@ -13,7 +13,7 @@ import { OPENAI_INPUT_COST_FACTOR, OPENAI_MAX_OUTPUT_TOKENS, OPENAI_PROVIDER, op
 /** 1日の予約の合計の目標（80円。1日の上限100円との差は、思いがけない費用の余裕） */
 export const BATCH_DAILY_RESERVE_TARGET: Deciyen = 800;
 
-/** 提供元ごとの上限。inputCostFactor は、入力の1トークンを費用の式で何倍に数えうるか（送る本文のバイト数の上限を決める） */
+/** 提供元ごとの上限。inputCostFactor は、入力の1トークンを費用の式で何倍に数えうるか（予約で入力に掛ける。送る口の driver と同じ値） */
 const LIMITS: Readonly<Record<string, { maxOutputTokens: number; inputCostFactor: number; price: (modelId: string, at: number) => LlmBatchPrice | undefined }>> = Object.freeze({
   [ANTHROPIC_PROVIDER]: { maxOutputTokens: ANTHROPIC_MAX_OUTPUT_TOKENS, inputCostFactor: 1, price: (m: string) => anthropicReservePrice(m) },
   [OPENAI_PROVIDER]: { maxOutputTokens: OPENAI_MAX_OUTPUT_TOKENS, inputCostFactor: OPENAI_INPUT_COST_FACTOR, price: (m: string) => openaiReservePrice(m) },
@@ -37,9 +37,9 @@ export function batchReservationOf(model: { provider: string; modelId: string },
   if (l === undefined || p === undefined) throw new RangeError(`no batch price for ${model.provider}/${model.modelId}`);
   if (!Number.isSafeInteger(yenPerUsd) || yenPerUsd < 1) throw new RangeError("yenPerUsd must be a positive safe integer");
   const reservePrice = { yenPerUsd, inputCentsPer10MTok: p.inputCentsPer10MTok, outputCentsPer10MTok: p.outputCentsPer10MTok };
-  const maxCost = llmTokenCost({ inputTokens: BATCH_MAX_INPUT_TOKENS, outputTokens: l.maxOutputTokens }, reservePrice);
+  const maxCost = batchReserveCost(BATCH_MAX_INPUT_TOKENS, l.maxOutputTokens, l.inputCostFactor, reservePrice);
   if (maxCost === null) throw new RangeError("the reservation does not fit in a safe integer");
-  return { reservePrice, maxInputTokens: BATCH_MAX_INPUT_TOKENS, maxOutputTokens: l.maxOutputTokens, maxBodyBytes: Math.floor(BATCH_MAX_INPUT_TOKENS / l.inputCostFactor), maxCost };
+  return { reservePrice, maxInputTokens: BATCH_MAX_INPUT_TOKENS, maxOutputTokens: l.maxOutputTokens, maxBodyBytes: BATCH_MAX_INPUT_TOKENS, maxCost };
 }
 
 /**
