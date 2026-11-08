@@ -14,7 +14,7 @@ import { investorPrompt, investorUserText } from "../llm/investor-prompt";
 import { type InvestorDecision, parseInvestorOutput } from "../llm/investor-output";
 import { type LlmInvestor, investorRequest } from "./llm-agents";
 import { investorInputOf } from "./llm-input";
-import { type DayAccess, type LlmDeps, type LlmStageResult, bodyText, errorText, isSuspended, llmRunPayload, must } from "./llm-stage";
+import { type DayAccess, type LlmDeps, type LlmStageResult, bodyText, errorText, isSuspended, LocalCopyError, llmRunPayload, must } from "./llm-stage";
 
 /** ③のない①を、閉じずに探し続ける時間（送る時間の上限10分＋一覧への反映の余裕30分。契約の LlmFindResult） */
 export const FIND_GRACE_MS = 40 * 60_000;
@@ -71,7 +71,7 @@ function settled(events: readonly LogEvent[], sub: LogEvent, now: number, dryRun
 /**
  * 受け取りと判断の段。date は取引日。取引日が date 以前の、片づいていない依頼を扱う（前の取引日に回し忘れた依頼も、ここで閉じる）。
  * 締め（8:30）を過ぎて答えがなければ打ち切り、その日は注文なし（記録に残す）。試運転かどうかは llm.policy.dryRun で決める。
- * AIごとに例外を受け、ほかのAIは続ける（段の結果は "error: " で始める）
+ * 依頼（①）ごとに例外を受け、ほかの依頼・ほかのAIは続ける（段の結果は "error: " で始める）
  */
 export async function llmCollect(day: DayAccess, llm: LlmDeps, date: string): Promise<LlmStageResult> {
   const stage = "llm.collect";
@@ -81,17 +81,19 @@ export async function llmCollect(day: DayAccess, llm: LlmDeps, date: string): Pr
   let wrote = false;
   const prompt = await investorPrompt();
   for (const a of llm.investors) {
-    try {
-      const subs = day.events().filter((e) => e.type === "llm.batch.submitted" && pl(e).agentId === a.id && (pl(e).tradingDate as string) <= date);
-      for (const sub of subs) {
+    const subs = day.events().filter((e) => e.type === "llm.batch.submitted" && pl(e).agentId === a.id && (pl(e).tradingDate as string) <= date);
+    // 例外は①ごとに受ける（古い①で例外が続いても、今日の①は進める）。保管に書けたのに写しに当てられなかったときは、段ごと止める
+    for (const sub of subs) {
+      try {
         if (settled(day.events(), sub, day.clock.now(), llm.policy.dryRun)) continue;
         const r = await settle(day, llm, a, sub, prompt);
         if (r.wrote) wrote = true;
         if (r.waiting) waiting.push(a.id);
         if (r.note) notes.push(`${a.id}:${r.note}`);
+      } catch (e) {
+        if (e instanceof LocalCopyError) throw e;
+        errors.push(`${a.id}#${sub.seq}: ${errorText(e)}`);
       }
-    } catch (e) {
-      errors.push(`${a.id}: ${errorText(e)}`);
     }
   }
   const rest = [...notes, ...(waiting.length > 0 ? [`waiting: ${waiting.join(",")}`] : [])].join("; ");
