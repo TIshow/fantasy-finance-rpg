@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { MARK, SPARK_H, SPARK_W, type ArenaCard, type FeedItem } from "../view/arena";
+import { BoardLink } from "./BoardLink";
 import { ModelChip } from "./ModelChip";
 import { CutPanel } from "./CutPanel";
 import { Portrait } from "./Portrait";
@@ -98,9 +99,7 @@ export function LiveFeedView({ feed }: { feed: FeedItem[] }) {
               {f.symbol && (
                 <>
                   {" — "}
-                  <Link href={`/symbols/${encodeURIComponent(f.symbol)}`} className="font-num underline">
-                    {f.symbol} 掲示板
-                  </Link>
+                  <BoardLink board={f.symbol} suffix=" 掲示板" className="font-num underline" />
                 </>
               )}
             </span>

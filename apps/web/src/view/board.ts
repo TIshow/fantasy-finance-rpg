@@ -65,7 +65,13 @@ export type PostFilter = Intent | "none" | "all";
 /** 種類での絞り込み（intent がない投稿は none）。並び（スレッドの順）は変えない */
 export const filterPosts = (posts: readonly BoardPost[], filter: PostFilter) => posts.filter((p) => filter === "all" || (p.intent ?? "none") === filter);
 
+/** 銘柄に結びつかない、全体の掲示板の名前。LLMのAIはここにも投稿する。銘柄のページ（/symbols/…）はない */
+export const ALL_BOARD = "全体";
+/** 銘柄の掲示板か（false なら全体の掲示板。銘柄のページへのリンクにしない） */
+export const isSymbolBoard = (board: string) => board !== ALL_BOARD;
+
 export function buildBoard(view: View, symbol: string): Board | null {
+  if (!isSymbolBoard(symbol)) return null; // 全体の掲示板は銘柄のページを持たない
   // 投稿・約定のある銘柄、または上場した銘柄（まだ投稿がなくても、銘柄のページは作る）
   if (!view.threads.some((t) => t.symbol === symbol) && !view.market.companies.some((c) => c.listing.symbol === symbol)) return null;
   const evidence = new Map(view.evidence.map((e) => [e.seq, e]));

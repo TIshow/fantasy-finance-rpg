@@ -1,16 +1,13 @@
 import Link from "next/link";
 import type { TimelineItem } from "../view/types";
 import { formatJst } from "../view/format";
+import { BoardLink } from "./BoardLink";
 import { REASON, STATUS } from "../view/labels";
 
 const SIDE = { buy: "買い", sell: "売り" } as const;
 const SCOPE = { posts: "投稿", orders: "注文", both: "投稿と注文" } as const;
 
-const Symbol = ({ symbol }: { symbol: string }) => (
-  <Link href={`/symbols/${encodeURIComponent(symbol)}`} className="font-num font-semibold text-neon-cyan underline">
-    {symbol}
-  </Link>
-);
+const Symbol = ({ symbol }: { symbol: string }) => <BoardLink board={symbol} className="font-num font-semibold text-neon-cyan underline" />;
 
 function Body({ item }: { item: TimelineItem }) {
   switch (item.kind) {
