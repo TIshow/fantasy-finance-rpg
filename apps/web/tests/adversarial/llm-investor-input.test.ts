@@ -165,6 +165,16 @@ describe("読めない形の訂正（安全側に外す）", () => {
     expect(shown(fix({ kind: "input", targetSeq: 10, reason: "r" }, [10, 14])).posts).toEqual([14, 16]);
   });
 
+  it("seq が最大の訂正だけが効く（7d9d029）：読めない訂正（refs で A と B を指す）のあとに A の読める訂正が来れば、A は印つきで戻り、B は外したまま。記録の並びが入れ替わっていても seq で決まる", () => {
+    const rows: Row[] = [...ROWS.slice(0, 19), ["correction.issued", jst(PREV, 16, 30), { reason: "誤り" }, [10, 14]], ["correction.issued", jst(PREV, 16, 31), { kind: "post", targetSeq: 10, newBodyHash: "h8" }, [10]]];
+    const log = logOf(rows);
+    for (const l of [log, [...log].reverse()]) {
+      const input = investorInputOf(l, ctx());
+      expect(input.posts.map((x) => [x.seq, x.correctionSeq]).sort((a, b) => a[0]! - b[0]!)).toEqual([[10, 21], [16, 18]]);
+      expect(investorUserText(input).omitted.withheld).toBe(1);
+    }
+  });
+
   it("読める訂正の targetSeq が投稿で、refs に targetSeq を入れていない（記録の検査を通らない）形でも、引用の投稿は外さない", () => {
     const r = shown(fix({ kind: "post", targetSeq: 14, newBodyHash: "h8" }, [10]));
     expect([r.posts, r.withheld]).toEqual([[10, 14, 16], 0]);
