@@ -65,17 +65,24 @@ interface Batch {
   seq: number;
   day: string;
   maxCost: Deciyen;
-  closed: { seq: number; cost: Deciyen } | null;
+  /** 予約の見積もりに使った入力のトークン数の上限と、本文に書いた出力の上限（①の maxInputTokens・bodyMaxOutputTokens） */
+  maxInputTokens: unknown;
+  bodyMaxOutputTokens: unknown;
+  closed: { seq: number; cost: Deciyen; result: unknown; inputTokens: number; outputTokens: number } | null;
 }
 
 function batchesOf(events: readonly Rec[]): Batch[] {
   const bySeq = new Map<number, Batch>();
   for (const e of events) {
     const p = e.payload as Payload;
-    if (e.type === "llm.batch.submitted") bySeq.set(e.seq, { seq: e.seq, day: jstDayOf(p.submittedAt as number), maxCost: p.maxCost as number, closed: null });
+    if (e.type === "llm.batch.submitted") {
+      bySeq.set(e.seq, { seq: e.seq, day: jstDayOf(p.submittedAt as number), maxCost: p.maxCost as number, maxInputTokens: p.maxInputTokens, bodyMaxOutputTokens: p.bodyMaxOutputTokens, closed: null });
+    }
     if (e.type === "llm.batch.closed") {
       const b = bySeq.get(p.batchSeq as number);
-      if (b && !b.closed) b.closed = { seq: e.seq, cost: p.cost as number };
+      // 入力のトークン数は、キャッシュへの書き込み・読み出しの分を含めて数える
+      const input = ["inputTokens", "cacheCreationInputTokens", "cacheReadInputTokens"].reduce((sum, f) => sum + ((p[f] as number | undefined) ?? 0), 0);
+      if (b && !b.closed) b.closed = { seq: e.seq, cost: p.cost as number, result: p.result, inputTokens: input, outputTokens: p.outputTokens as number };
     }
   }
   return [...bySeq.values()];
@@ -95,14 +102,17 @@ export interface LlmCostProblem {
    * reservation：依頼の記録の時点で、それまでの使用済み＋その予約が上限を超えていた（seq はその依頼）。
    * 追記の処理が同じ判定で断るので、追記を通ったログには出ない（記録を別の方法で確かめるために残す）。
    * total：その日の使用済みが、いまの記録で上限を超えている（実費が予約を超えたときなど。seq はその日の最後の依頼）
+   * input_tokens・output_tokens：答えを受け取った（collected）閉じた記録のトークン数が、予約の上限（①の maxInputTokens・
+   * bodyMaxOutputTokens）を超えている。閉じる記録は断らずに残し、ここで挙げる（seq は閉じた記録、used はトークン数、limit はその上限）
    */
-  kind: "reservation" | "total";
+  kind: "reservation" | "total" | "input_tokens" | "output_tokens";
   seq: number;
-  used: Deciyen;
-  limit: Deciyen;
+  /** reservation・total では費用（0.1円単位）、input_tokens・output_tokens ではトークン数 */
+  used: number;
+  limit: number;
 }
 
-/** 上限が守られたか。守られていれば空。依頼の時点の判定と、その日の合計の両方を見る */
+/** 上限が守られたか。守られていれば空。依頼の時点の判定と、その日の合計と、受け取った答えのトークン数を見る */
 export function llmCostProblems(events: readonly Rec[], limit: Deciyen = LLM_DAILY_COST_LIMIT): LlmCostProblem[] {
   const batches = batchesOf(events);
   const out: LlmCostProblem[] = [];
@@ -115,6 +125,12 @@ export function llmCostProblems(events: readonly Rec[], limit: Deciyen = LLM_DAI
   for (const [day, seq] of last) {
     const used = usedBy(batches, day, Number.POSITIVE_INFINITY);
     if (used > limit) out.push({ day, kind: "total", seq, used, limit });
+  }
+  for (const b of batches) {
+    const c = b.closed;
+    if (c?.result !== "collected") continue;
+    if (typeof b.maxInputTokens === "number" && c.inputTokens > b.maxInputTokens) out.push({ day: b.day, kind: "input_tokens", seq: c.seq, used: c.inputTokens, limit: b.maxInputTokens });
+    if (typeof b.bodyMaxOutputTokens === "number" && c.outputTokens > b.bodyMaxOutputTokens) out.push({ day: b.day, kind: "output_tokens", seq: c.seq, used: c.outputTokens, limit: b.bodyMaxOutputTokens });
   }
   return out;
 }
@@ -139,6 +155,8 @@ export interface LlmReservationFields {
   modelId: string;
   customId: string;
   sentBodyHash: string;
+  /** 依頼の記録（①）を書いた時刻 */
+  reservedAt: number;
   maxCost: Deciyen;
   tradingDate: string;
   submittedAt: number;
@@ -160,6 +178,7 @@ export function llmReservationOf(submitted: Rec): LlmReservationFields {
     modelId: p.modelId as string,
     customId: p.customId as string,
     sentBodyHash: p.sentBodyHash as string,
+    reservedAt: submitted.recordedAt,
     maxCost: p.maxCost as number,
     tradingDate: p.tradingDate as string,
     submittedAt: p.submittedAt as number,

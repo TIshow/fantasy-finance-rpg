@@ -525,6 +525,8 @@ export class EventLog {
         // 予約に使った料金（閉じたときも同じ料金で数える）と、予約の見積もりに使ったトークン数の上限
         if (!Number.isSafeInteger(p.yenPerUsd) || (p.yenPerUsd as number) < 1) return "yenPerUsd must be a positive integer";
         if (![...LLM_PRICE_FIELDS, "maxInputTokens", "maxOutputTokens"].every((f) => isCount(p[f]))) return "prices and max token counts must be non-negative integers";
+        // 単価やトークン数の上限が0だと、閉じたときの費用がいつも0になり、予約がまるごと枠に戻る
+        if (![...LLM_PRICE_FIELDS, "maxInputTokens", "maxOutputTokens"].every((f) => (p[f] as number) >= 1)) return "prices and max token counts must be at least 1";
         const bound = llmTokenCost({ inputTokens: p.maxInputTokens as number, outputTokens: p.maxOutputTokens as number }, p as unknown as LlmPrice);
         if (bound === null || (p.maxCost as number) < bound) return `maxCost must be at least ${String(bound)} (the cost of the max tokens)`;
         // 本文に書いた出力の上限（max_tokens など）。予約の見積もりの上限を超えると、実際の請求が予約を超えうる
@@ -573,6 +575,7 @@ export class EventLog {
         if (zeroNotSent && !LLM_SEND_ERRORS.includes(p.notCreatedError)) return "notCreatedError must be timeout, rate_limited or provider_error";
         if (sent && p.result !== "collected" && p.cost === 0) return "a sent batch that was not collected cannot cost 0";
         if (p.result === "collected" && p.outputTokens === 0) return "a collected batch must have output tokens";
+        if (p.result === "collected" && LLM_TOKEN_FIELDS.filter((f) => f !== "outputTokens").every((f) => !p[f])) return "a collected batch must have input tokens";
         if (p.costUnknown === true) return LLM_PRICE_FIELDS.every((f) => p[f] === undefined) ? null : "an unknown cost has no price";
         // 料金は予約の料金ちょうど（安い料金や 0 を書いて、その日の使った額を少なく見せられないように）。
         // 提供元が実際にはもっと安く請求しても、予約の料金で数える（多めに数えるので安全側）
