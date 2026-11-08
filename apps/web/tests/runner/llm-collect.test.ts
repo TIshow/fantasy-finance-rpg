@@ -107,23 +107,109 @@ describe("締めでの打ち切り・止まったあとのやり直し・試運�
     const inner = w.deps.store;
     let crash = true;
     w.deps.store = { ...inner, read: inner.read.bind(inner), last: inner.last.bind(inner), commitSheet: inner.commitSheet.bind(inner), append: (d) => (crash && d.type === "agent.run" && d.payload.agentId === "ai-claude" ? ((crash = false), Promise.reject(new Error("crashed"))) : inner.append(d)) };
-    expect(collectOf(await w.runAt(D1, 6, 50))).toMatchObject({ detail: expect.stringMatching(/^error: crashed/) });
+    expect(collectOf(await w.runAt(D1, 6, 50))).toMatchObject({ detail: "error: ai-claude: crashed; waiting: ai-gpt,ai-gemini" });
     expect((await w.of("llm.batch.closed")).map((e) => p(e).agentId)).toEqual(["ai-claude"]);
     await w.runAt(D1, 7, 20);
     expect((await llmRuns(w, "ai-claude")).map((e) => [p(e).purpose, p(e).ok])).toEqual([["post", true], ["order", true]]);
     expect((await w.of("order_sheet.committed")).some((e) => p(e).agentId === "ai-claude" && p(e).tradingDate === D1)).toBe(true);
   });
 
-  it("試運転（dryRun）の間は、投稿だけを書き、注文票は書かない", async () => {
+  it("試運転（dryRun）の間は、投稿と判断の記録を書き、注文票は書かない", async () => {
     const w = await evening(true);
     w.llm.providers.anthropic!.outcome = () => answer(good);
     await w.runAt(D1, 6, 50);
-    expect((await llmRuns(w, "ai-claude")).map((e) => p(e).purpose)).toEqual(["post"]);
+    expect((await llmRuns(w, "ai-claude")).map((e) => [p(e).purpose, p(e).ok])).toEqual([["post", true], ["order", true]]);
     expect((await w.of("post.published")).some((e) => p(e).agentId === "ai-claude")).toBe(true);
     expect((await w.of("order_sheet.committed")).some((e) => p(e).agentId === "ai-claude" && p(e).tradingDate === D1)).toBe(false);
     // 翌日の引け後の処理と評価は、注文票がなくても進む
     await w.runAt(D1, 9, 35);
     await w.runAt(D1, 16, 35);
     expect((await w.of("valuation.recorded")).some((e) => p(e).agentId === "ai-claude" && p(e).date === D1)).toBe(true);
+  });
+
+  it("試運転で投稿なしの日・投稿を停止中のAIも、判断の記録（注文・成功）を書く。07:20 に受け取り直さず、締めのあとに timeout を書かない", async () => {
+    const w = await evening(true);
+    await w.op("agent.suspended", { agentId: "ai-gpt", scope: "posts", reason: "試験" });
+    w.llm.providers.anthropic!.outcome = () => answer(JSON.stringify({ post: null, orders: [{ symbol: "VRN1", side: "buy", qty: 100 }] }));
+    w.llm.providers.openai!.outcome = () => answer(good);
+    w.llm.providers.google!.outcome = () => answer(good);
+    await w.runAt(D1, 6, 50);
+    for (const id of ["ai-claude", "ai-gpt"]) expect((await llmRuns(w, id)).map((e) => [p(e).purpose, p(e).ok, p(e).outputHash !== undefined])).toEqual([["order", true, true]]);
+    expect((await w.of("post.published")).filter((e) => ["ai-claude", "ai-gpt"].includes(p(e).agentId as string))).toEqual([]);
+    const count = (await w.all()).length;
+    const again = await w.runAt(D1, 7, 20);
+    expect(collectOf(again)).toMatchObject({ status: "done" });
+    expect((await w.all()).length).toBe(count);
+    await w.runAt(D1, 9, 35);
+    await w.runAt(D1, 16, 35);
+    expect((await w.of("agent.run")).some((e) => p(e).errorCode === "timeout")).toBe(false);
+    await replay(await w.all(), w.values, { holidayTables: w.holidayTables });
+  });
+
+  it("回し直しても失敗の記録を二重に書かない（締めのあとの打ち切り）。失敗の記録は参照に①を持つ", async () => {
+    const w = await evening();
+    await w.runAt(D1, 9, 35);
+    const timeouts = async () => (await w.of("agent.run")).filter((e) => p(e).errorCode === "timeout");
+    expect(await timeouts()).toHaveLength(3);
+    const subs = await w.of("llm.batch.submitted");
+    for (const t of await timeouts()) expect(subs.some((s) => t.refs.includes(s.seq))).toBe(true);
+    await w.runAt(D1, 9, 50);
+    await w.runAt(D1, 16, 35);
+    await w.runAt(DAYS[2]!, 6, 50);
+    expect(await timeouts()).toHaveLength(3);
+    expect(await w.of("llm.batch.closed")).toHaveLength(3);
+  });
+
+  it("1体の提供元で例外が出ても、ほかのAIは受け取る（段は error:）", async () => {
+    const w = await evening();
+    w.llm.providers.anthropic!.outcome = () => {
+      throw new RangeError("broken provider");
+    };
+    w.llm.providers.openai!.outcome = () => answer(good);
+    const r = collectOf(await w.runAt(D1, 6, 50))!;
+    expect(r.detail).toMatch(/^error: ai-claude: /);
+    expect((await w.of("order_sheet.committed")).some((e) => p(e).agentId === "ai-gpt" && p(e).tradingDate === D1)).toBe(true);
+  });
+
+  it("送った結果が分からず、探しても分からない（unknown）あいだは締めまで待ち、締めのあとに予約した費用で閉じる", async () => {
+    const w = await llmWorld(undefined, { manualClock: true });
+    w.llm.providers.google!.send = () => ({ ok: false, errorCode: "timeout", billingUnknown: true });
+    w.llm.providers.google!.find = () => ({ status: "unknown" });
+    for (const [h, m] of [[6, 50], [9, 35], [16, 35]] as const) await w.runAt(D0, h, m);
+    expect(collectOf(await w.runAt(D1, 7, 20))!.detail).toContain("waiting: ai-claude,ai-gpt,ai-gemini");
+    expect((await w.of("llm.batch.closed")).filter((e) => p(e).agentId === "ai-gemini")).toEqual([]);
+    await w.runAt(D1, 9, 35);
+    const closed = (await w.of("llm.batch.closed")).find((e) => p(e).agentId === "ai-gemini")!;
+    expect([p(closed).result, p(closed).costUnknown, p(closed).cost]).toEqual(["failed", true, 36]);
+    expect((await llmRuns(w, "ai-gemini")).map((e) => [p(e).errorCode, e.refs])).toEqual([["provider_error", [p(closed).batchSeq, closed.seq]]]);
+  });
+
+  it("取引日に回し忘れた依頼は、次の取引日の実行で打ち切って閉じる", async () => {
+    const w = await evening();
+    // D1 の朝を飛ばし、D1 の 16:35 と D2 の朝に回す
+    await w.runAt(D1, 16, 35);
+    await w.runAt(DAYS[2]!, 6, 50);
+    const subs = (await w.of("llm.batch.submitted")).filter((e) => p(e).tradingDate === D1);
+    const closed = await w.of("llm.batch.closed");
+    expect(subs.every((s) => closed.some((c) => p(c).batchSeq === s.seq))).toBe(true);
+    expect((await w.of("agent.run")).filter((e) => p(e).errorCode === "timeout")).toHaveLength(3);
+    await replay(await w.all(), w.values, { holidayTables: w.holidayTables });
+  });
+});
+
+describe("金曜の夜の依頼を、月曜の朝に受け取る", async () => {
+  const w = await llmWorld();
+  for (const f of Object.values(w.llm.providers)) f.outcome = () => answer(JSON.stringify({ post: null, orders: [] }));
+  for (const d of DAYS) await w.run(d);
+  const MON = "2026-11-16";
+
+  it("金曜（11/13）の引けのあとに、月曜の分を依頼し、月曜の朝に受け取って注文票を確定する", async () => {
+    const subs = (await w.of("llm.batch.submitted")).filter((e) => p(e).tradingDate === MON);
+    expect(subs).toHaveLength(3);
+    expect(subs.every((e) => e.recordedAt < jst(DAYS[4]!, 23, 59))).toBe(true);
+    await w.run(MON);
+    const sheets = (await w.of("order_sheet.committed")).filter((e) => p(e).tradingDate === MON && subs.some((s) => p(s).agentId === p(e).agentId));
+    expect(sheets).toHaveLength(3);
+    await replay(await w.all(), w.values, { holidayTables: w.holidayTables });
   });
 });
