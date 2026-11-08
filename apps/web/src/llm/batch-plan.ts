@@ -35,6 +35,7 @@ export function batchReservationOf(model: { provider: string; modelId: string },
   const l = Object.hasOwn(LIMITS, model.provider) ? LIMITS[model.provider] : undefined;
   const p = l?.price(model.modelId, submittedAt);
   if (l === undefined || p === undefined) throw new RangeError(`no batch price for ${model.provider}/${model.modelId}`);
+  if (!Number.isSafeInteger(yenPerUsd) || yenPerUsd < 1) throw new RangeError("yenPerUsd must be a positive safe integer");
   const reservePrice = { yenPerUsd, inputCentsPer10MTok: p.inputCentsPer10MTok, outputCentsPer10MTok: p.outputCentsPer10MTok };
   const maxCost = llmTokenCost({ inputTokens: BATCH_MAX_INPUT_TOKENS, outputTokens: l.maxOutputTokens }, reservePrice);
   if (maxCost === null) throw new RangeError("the reservation does not fit in a safe integer");
@@ -43,10 +44,14 @@ export function batchReservationOf(model: { provider: string; modelId: string },
 
 /**
  * その日に依頼する AI のモデル（1体1件）の予約の合計。目標（既定は BATCH_DAILY_RESERVE_TARGET）を超えるなら RangeError。
- * 毎日の実行が、依頼を始める前に呼ぶ（その日はどの AI も依頼しない）
+ * 毎日の実行が、依頼を始める前に呼ぶ（その日はどの AI も依頼しない）。yenPerUsd は、送る口（BatchPortOptions.yenPerUsd）と同じ値を渡す
  */
-export function checkDailyBatchReservations(models: readonly { provider: string; modelId: string }[], submittedAt: number, target: Deciyen = BATCH_DAILY_RESERVE_TARGET): Deciyen {
-  const total = models.reduce((sum, m) => sum + batchReservationOf(m, submittedAt).maxCost, 0);
+export function checkDailyBatchReservations(
+  models: readonly { provider: string; modelId: string }[],
+  submittedAt: number,
+  { target = BATCH_DAILY_RESERVE_TARGET, yenPerUsd = YEN_PER_USD }: { target?: Deciyen; yenPerUsd?: number } = {},
+): Deciyen {
+  const total = models.reduce((sum, m) => sum + batchReservationOf(m, submittedAt, yenPerUsd).maxCost, 0);
   if (total > target) throw new RangeError(`the daily reservations (${total}) exceed the target (${target})`);
   return total;
 }

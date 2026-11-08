@@ -7,6 +7,8 @@ import { GeminiBatchClient } from "../../src/llm/gemini-batch";
 import { llmTokenCost } from "../../src/events/llm-cost";
 import { GEMINI_PRICE_SWITCH_AT } from "../../src/llm/gemini-pricing";
 import { GEMINI_MAX_OUTPUT_TOKENS, geminiBatchPort, geminiReservePrice } from "../../src/llm/gemini-port";
+import { BATCH_SEND_TIMEOUT_MS } from "../../src/llm/batch-port";
+import { hangingFetch, settledAt } from "./send-timeout";
 
 const recorded = (name: string) => readFileSync(new URL(`./recorded/${name}`, import.meta.url), "utf8");
 const KEY = "AIza-test-not-a-real-key";
@@ -97,6 +99,15 @@ describe("Gemini のバッチの口", () => {
     const p = await make(fakeFetch(() => new Response("{}")).f).prepare(req());
     expect(await make(fakeFetch(() => new Response(recorded("gemini-batch-created.json"))).f).send(p, 7)).toEqual({ ok: false, errorCode: "provider_error", billingUnknown: true });
     expect(await make(fakeFetch(() => new Response("{}", { status: 400 })).f).send(p, 7)).toEqual({ ok: false, errorCode: "provider_error", notCreated: true });
+  });
+
+  it("作成の待ち時間は送る時間の上限（10分）より短く、返らなければ通信を中断して billingUnknown（裏で送り続けない）", async () => {
+    const p = await make(fakeFetch(() => new Response("{}")).f).prepare(req());
+    const { f, state } = hangingFetch();
+    let r: unknown;
+    expect(await settledAt(async () => (r = await make(f).send(p, 7)), BATCH_SEND_TIMEOUT_MS)).toBeLessThan(BATCH_SEND_TIMEOUT_MS);
+    expect(state).toEqual({ calls: 1, aborted: 1 });
+    expect(r).toEqual({ ok: false, errorCode: "timeout", billingUnknown: true });
   });
 
   it("探す：表示名は本文の中にあり customId を持てないので、いつも not_found（提供元に問い合わせない）", async () => {

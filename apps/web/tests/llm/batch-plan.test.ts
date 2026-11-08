@@ -30,8 +30,12 @@ describe("予約の見積もり（入力の上限×入力の単価＋出力の�
   });
 
   it("目標を超える設定・知らない提供元・料金表にないモデルは断る", () => {
-    expect(() => checkDailyBatchReservations(MODELS, NOW, 259)).toThrow(RangeError);
-    expect(checkDailyBatchReservations(MODELS, NOW, 260)).toBe(260);
+    expect(() => checkDailyBatchReservations(MODELS, NOW, { target: 259 })).toThrow(RangeError);
+    expect(checkDailyBatchReservations(MODELS, NOW, { target: 260 })).toBe(260);
+    // 円は送る口と同じ値を渡す（1ドル200円なら 8+20+4.5 ＝ 32.5円）
+    expect(checkDailyBatchReservations(MODELS, NOW, { yenPerUsd: 200 })).toBe(325);
+    expect(batchReservationOf(MODELS[0]!, NOW, 200).reservePrice.yenPerUsd).toBe(200);
+    expect(() => checkDailyBatchReservations(MODELS, NOW, { yenPerUsd: 0 })).toThrow(RangeError);
     // 同じ AI を何体も並べると目標を超える（GPT 6体で96円）
     expect(() => checkDailyBatchReservations(Array(6).fill(MODELS[1]), NOW)).toThrow(RangeError);
     expect(() => batchReservationOf({ provider: "other", modelId: "m" }, NOW)).toThrow(RangeError);
