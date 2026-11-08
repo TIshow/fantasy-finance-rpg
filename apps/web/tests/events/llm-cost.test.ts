@@ -1,8 +1,8 @@
 // LLM の費用の上限を、記録だけから確かめる検査（#179）。
 // 使用済み ＝ 閉じたバッチの実際の費用 ＋ 閉じていないバッチの予約。暦日は依頼を決めた時刻（submittedAt。日本時間）。全提供元の合計。
 import { describe, expect, it } from "vitest";
-import type { LlmBatchTicket } from "../../src/contracts";
-import { jstDayOf, LLM_DAILY_COST_LIMIT, llmCostProblems, llmCostUsed, llmTicketOf, llmTokenCost, openLlmBatches } from "../../src/events/llm-cost";
+import type { LlmBatchReservation, LlmBatchTicket } from "../../src/contracts";
+import { jstDayOf, LLM_DAILY_COST_LIMIT, llmCostProblems, llmCostUsed, llmReservationOf, llmSentOf, llmTicketOf, llmTokenCost, openLlmBatches } from "../../src/events/llm-cost";
 import type { LogEvent } from "../../src/events/types";
 import { batchCostDeciyen } from "../../src/llm/cost";
 import { geminiBatchCostDeciyen } from "../../src/llm/gemini-pricing";
@@ -11,13 +11,17 @@ type Rec = Pick<LogEvent, "seq" | "type" | "recordedAt" | "payload">;
 
 const jst = (date: string, hh: number, mm = 0) => Date.parse(`${date}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00+09:00`);
 
-/** 記録を seq の順に並べる。sub は依頼、close は閉じた記録（依頼の seq を指す） */
-function log(...items: (["sub", number, number, string?] | ["close", number, number, number])[]): Rec[] {
+/** 記録を seq の順に並べる。sub は依頼（送る前の予約）、sent は送った記録、close は閉じた記録（sent と close は依頼の seq を指す） */
+function log(...items: (["sub", number, number, string?] | ["sent", number, number] | ["close", number, number, number])[]): Rec[] {
   return items.map((it, i) => {
     const seq = i + 1;
     if (it[0] === "sub") {
       const [, at, maxCost, agentId = `a${seq}`] = it;
-      return { seq, type: "llm.batch.submitted", recordedAt: at, payload: { agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: "b".repeat(64), batchId: `batch_${seq}`, customId: `c${seq}`, maxCost, tradingDate: "2026-11-10", submittedAt: at } };
+      return { seq, type: "llm.batch.submitted", recordedAt: at, payload: { agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: "b".repeat(64), customId: `c${seq}`, maxCost, tradingDate: "2026-11-10", submittedAt: at } };
+    }
+    if (it[0] === "sent") {
+      const [, at, batchSeq] = it;
+      return { seq, type: "llm.batch.sent", recordedAt: at, payload: { batchSeq, agentId: "x", batchId: `batch_${batchSeq}` } };
     }
     const [, at, batchSeq, cost] = it;
     return { seq, type: "llm.batch.closed", recordedAt: at, payload: { batchSeq, agentId: "x", result: "collected", cost, inputTokens: 1, outputTokens: 1 } };
@@ -63,6 +67,11 @@ describe("llmCostUsed", () => {
   it("記録がなければ 0", () => {
     expect(llmCostUsed([], D)).toBe(0);
   });
+
+  it("送ったか（llm.batch.sent があるか）は数え方に関わらない。閉じるまでは予約で数える", () => {
+    expect(llmCostUsed(log(["sub", at(16, 35), 150], ["sent", at(16, 36), 1]), D)).toBe(150);
+    expect(llmCostUsed(log(["sub", at(16, 35), 150], ["sent", at(16, 36), 1], ["close", at(17), 1, 40]), D)).toBe(40);
+  });
 });
 
 describe("llmCostProblems", () => {
@@ -98,19 +107,60 @@ describe("llmCostProblems", () => {
   });
 });
 
-describe("openLlmBatches と llmTicketOf", () => {
-  it("閉じていない依頼を記録の順で返し、記録から受け取りの控えを作り直す", () => {
-    const events = log(["sub", at(16, 35), 150, "alpha"], ["sub", at(16, 36), 200, "beta"], ["close", jst("2026-11-10", 6, 50), 1, 40]);
-    const open = openLlmBatches(events);
-    expect(open.map((e) => e.seq)).toEqual([2]);
-    const ticket: LlmBatchTicket | null = llmTicketOf(open[0]!);
-    expect(ticket).toEqual({ agentId: "beta", provider: "anthropic", modelId: "m", batchId: "batch_2", customId: "c2", maxCost: 200, tradingDate: "2026-11-10", submittedAt: at(16, 36) });
+describe("llmCostProblems：受け取った答えのトークン数", () => {
+  /** 上限（入力2万・出力1,000）の依頼と、その閉じた記録 */
+  const pair = (result: string, tokens: Record<string, number>): Rec[] => {
+    const [sub, close] = log(["sub", at(16, 35), 150], ["close", jst("2026-11-10", 6, 50), 1, 40]);
+    return [
+      { ...sub!, payload: { ...(sub!.payload as object), maxInputTokens: 20_000, bodyMaxOutputTokens: 1_000 } },
+      { ...close!, payload: { ...(close!.payload as object), result, ...tokens } },
+    ];
+  };
+
+  it("上限ちょうどは挙げない。入力（キャッシュの分を含む）や出力が上限を超えたら、閉じた記録を挙げる", () => {
+    expect(llmCostProblems(pair("collected", { inputTokens: 20_000, outputTokens: 1_000 }))).toEqual([]);
+    expect(llmCostProblems(pair("collected", { inputTokens: 20_001, outputTokens: 1_001 }))).toEqual([
+      { day: D, kind: "input_tokens", seq: 2, used: 20_001, limit: 20_000 },
+      { day: D, kind: "output_tokens", seq: 2, used: 1_001, limit: 1_000 },
+    ]);
+    expect(llmCostProblems(pair("collected", { inputTokens: 10_000, cacheCreationInputTokens: 5_000, cacheReadInputTokens: 5_001, outputTokens: 1 }))).toEqual([
+      { day: D, kind: "input_tokens", seq: 2, used: 20_001, limit: 20_000 },
+    ]);
   });
 
-  it("batchId が null の依頼は控えを作れない（null）。依頼でない記録は RangeError", () => {
-    const [sub, close] = log(["sub", at(16, 35), 150], ["close", at(16, 36), 1, 150]);
-    expect(llmTicketOf({ ...sub!, payload: { ...(sub!.payload as object), batchId: null } })).toBeNull();
-    expect(() => llmTicketOf(close!)).toThrow(RangeError);
+  it("答えを受け取っていない閉じ方（expired・failed）は挙げない", () => {
+    expect(llmCostProblems(pair("expired", { inputTokens: 30_000, outputTokens: 2_000 }))).toEqual([]);
+  });
+});
+
+describe("openLlmBatches・llmSentOf・llmReservationOf・llmTicketOf", () => {
+  it("閉じていない依頼を記録の順で返し、依頼と送った記録から受け取りの控えを作り直す", () => {
+    const events = log(["sub", at(16, 35), 150, "alpha"], ["sub", at(16, 36), 200, "beta"], ["sent", at(16, 37), 2], ["sent", at(16, 38), 1], ["close", jst("2026-11-10", 6, 50), 1, 40]);
+    const open = openLlmBatches(events);
+    expect(open.map((e) => e.seq)).toEqual([2]);
+    const sent = llmSentOf(events, 2);
+    expect(sent?.seq).toBe(3);
+    const ticket: LlmBatchTicket | null = llmTicketOf(open[0]!, sent);
+    expect(ticket).toEqual({ batchSeq: 2, agentId: "beta", provider: "anthropic", modelId: "m", batchId: "batch_2", customId: "c2", sentBodyHash: "b".repeat(64), reservedAt: at(16, 36), maxCost: 200, tradingDate: "2026-11-10", submittedAt: at(16, 36) });
+  });
+
+  it("送った記録がまだない依頼（②と③のあいだで止まった）は、控えを作れず（null）、予約の控えから探す", () => {
+    const events = log(["sub", at(16, 35), 150, "alpha"], ["sub", at(16, 36), 200, "beta"], ["sent", at(16, 37), 2]);
+    expect(llmSentOf(events, 1)).toBeNull();
+    expect(llmTicketOf(events[0]!, null)).toBeNull();
+    const r: LlmBatchReservation = llmReservationOf(events[0]!);
+    expect(r).toEqual({ batchSeq: 1, agentId: "alpha", provider: "anthropic", modelId: "m", customId: "c1", sentBodyHash: "b".repeat(64), reservedAt: at(16, 35), maxCost: 150, tradingDate: "2026-11-10", submittedAt: at(16, 35) });
+    // 閉じていない依頼のうち、送った記録のないもの
+    expect(openLlmBatches(events).filter((e) => llmSentOf(events, e.seq) === null).map((e) => e.seq)).toEqual([1]);
+  });
+
+  it("依頼でない記録、別の依頼を指す送った記録、送った記録でないものは RangeError", () => {
+    const [sub1, sub2, sent2, close] = log(["sub", at(16, 35), 150], ["sub", at(16, 36), 150], ["sent", at(16, 37), 2], ["close", at(16, 38), 1, 150]);
+    expect(() => llmTicketOf(close!, sent2!)).toThrow(RangeError);
+    expect(() => llmReservationOf(sent2!)).toThrow(RangeError);
+    expect(() => llmTicketOf(sub1!, sent2!)).toThrow(RangeError);
+    expect(() => llmTicketOf(sub2!, close!)).toThrow(RangeError);
+    expect(llmTicketOf(sub2!, sent2!)?.batchId).toBe("batch_2");
   });
 });
 
