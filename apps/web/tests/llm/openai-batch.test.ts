@@ -14,7 +14,7 @@ import {
   type BatchItemResult,
   type BatchStatus,
 } from "../../src/llm/openai-batch";
-import { openaiBatchPrice, openaiBatchReservePrice } from "../../src/llm/openai-pricing";
+import { openaiBatchPrice } from "../../src/llm/openai-pricing";
 
 const recorded = (name: string) => readFileSync(new URL(`./recorded/${name}`, import.meta.url), "utf8");
 const KEY = "sk-proj-test-not-a-real-key";
@@ -462,14 +462,5 @@ describe("OpenAI のバッチの料金", () => {
   it("表にないモデルは undefined（toString などの名前も）", () => {
     expect(openaiBatchPrice("gpt-6-astra", { inputTokens: 1 })).toBeUndefined();
     expect(openaiBatchPrice("toString", { inputTokens: 1 })).toBeUndefined();
-    expect(openaiBatchReservePrice("gpt-6-astra")).toBeUndefined();
-    expect(openaiBatchReservePrice("toString")).toBeUndefined();
-  });
-
-  it("予約（maxCost の見積もり）には、入力の長さによらず長い文脈の料金を使う", () => {
-    expect(openaiBatchReservePrice("gpt-6.1-sol")).toEqual({ inputCentsPerMTok: 200, outputCentsPerMTok: 750 });
-    // 入力2万・出力の上限2万5千で予約すると：2万 × 2ドル/100万 ＋ 2万5千 × 7.5ドル/100万 ＝ 0.2275ドル → 36.4円
-    const reserve = { inputTokens: 20000, outputTokens: 25000, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
-    expect(batchCostDeciyen(reserve, openaiBatchReservePrice("gpt-6.1-sol")!, 160)).toBe(364);
   });
 });

@@ -3,13 +3,21 @@
 // reasoning_effort だけ（temperature は送らない）。形への直し方は toOpenAIParams、上げるファイルの中身は openaiBatchFileBody。
 // 送った本文のハッシュは、上げたファイルの中身のハッシュ（契約）。
 import type { LlmBatchPrice } from "../contracts";
-import { BatchPort, type BatchDriver, type BatchOutcome, type BatchPortOptions } from "./batch-port";
+import { BATCH_MAX_INPUT_TOKENS, BatchPort, type BatchDriver, type BatchOutcome, type BatchPortOptions } from "./batch-port";
 import { OpenAIBatchClient, openaiApiKeyFromEnv, openaiBatchFileBody, reconcileResults, toOpenAIParams, type BatchItemResult } from "./openai-batch";
-import { openaiBatchReservePrice } from "./openai-pricing";
+import { openaiBatchPrice } from "./openai-pricing";
 
 export const OPENAI_PROVIDER = "openai";
 /** 記録にないバッチを探すときに読む一覧のページ数の上限（1ページ100件）。超えたら決められない（unknown） */
 const LOOKUP_MAX_PAGES = 20;
+/** 送る出力の上限（推論のトークンを含む。#179 の lead の決定2：考える分も出力として数えるので多めにする） */
+export const OPENAI_MAX_OUTPUT_TOKENS = 16_000;
+/**
+ * 入力の1トークンに掛かる倍率の最大。キャッシュへの書き込み（請求は最大で入力の2.5倍）を、入力の欄（1倍）と書き込みの欄（2倍）の
+ * 両方に入れて3倍で数える（openai-batch.ts の toTokenUsage）。予約の式（入力の上限×入力の単価）を変えずに上限として働かせるため、
+ * 送る本文は BATCH_MAX_INPUT_TOKENS ÷ 3（6,666バイト）までにする
+ */
+export const OPENAI_INPUT_COST_FACTOR = 3;
 /**
  * 依頼を送ってから、「作られていない」と決めてよくなるまでの時間（1時間。Gemini の GEMINI_CREATE_SETTLE_MS と同じ考え）。
  * 資料（https://developers.openai.com/api/docs/guides/batch 、2026-11-08 確認）には、作成が一覧に出るまでの遅れが書かれていない。
@@ -18,11 +26,12 @@ const LOOKUP_MAX_PAGES = 20;
 export const OPENAI_CREATE_SETTLE_MS = 60 * 60 * 1000;
 
 /**
- * 予約の料金。長い文脈の料金（入力が272,000トークンを超えるとき）を1,000万トークンあたりのセントに直す。時刻では変わらない。
- * 閉じたときも同じ料金で数える（実際は短い文脈の安い料金のことが多いが、多めに数えるので上限に対して安全側）
+ * 予約の料金。入力が上限（BATCH_MAX_INPUT_TOKENS）のときの料金を、1,000万トークンあたりのセントに直す。時刻では変わらない。
+ * 入力は 20,000 トークンを超えないので、長い文脈の料金（入力が272,000トークンを超えるとき）にはならず、短い文脈の料金になる。
+ * 閉じたときも同じ料金で数え、実際の請求の単価と同じになる
  */
 export function openaiReservePrice(modelId: string): LlmBatchPrice | undefined {
-  const p = openaiBatchReservePrice(modelId);
+  const p = openaiBatchPrice(modelId, { inputTokens: BATCH_MAX_INPUT_TOKENS });
   return p && { inputCentsPer10MTok: p.inputCentsPerMTok * 10, outputCentsPer10MTok: p.outputCentsPerMTok * 10 };
 }
 
@@ -33,8 +42,8 @@ export function openaiBatchDriver(client: Client): BatchDriver {
   return {
     provider: OPENAI_PROVIDER,
     settingKeys: ["max_tokens", "reasoning_effort"],
-    // キャッシュへの書き込み（最大で入力の2.5倍）は、入力の欄（1倍）と書き込みの欄（2倍）の両方に入れて3倍で数える（toTokenUsage）
-    inputCostFactor: 3,
+    maxOutputTokens: OPENAI_MAX_OUTPUT_TOKENS,
+    inputCostFactor: OPENAI_INPUT_COST_FACTOR,
     priceAt: (modelId) => openaiReservePrice(modelId),
     prepare(r, customId) {
       const items = [{ customId, params: toOpenAIParams(r.model, r.messages) }];
@@ -66,7 +75,7 @@ export function openaiBatchDriver(client: Client): BatchDriver {
       }
       const it = reconcileResults([t.customId], items).matched.get(t.customId);
       if (it === undefined) return UNKNOWN;
-      if (it.type === "succeeded") return { kind: "succeeded", output: it.output, respondedModel: it.respondedModel, usage: it.usage };
+      if (it.type === "succeeded") return { kind: "succeeded", output: it.output, respondedModel: it.respondedModel, usage: it.usage, truncated: it.incompleteReason === "max_output_tokens" };
       // 24時間以内に処理されなかったもの（課金されない）
       if (it.type === "expired") return { kind: "notBilled", result: "expired", errorCode: "timeout" };
       // 失敗した1件の課金は資料に書かれていない（トークン数も返らない）

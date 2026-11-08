@@ -4,7 +4,7 @@
 // - 送る前の確かめ（外れたら RangeError）と、閉じた結果（LlmBatchClosed）の組み立て
 // - 提供元ごとの違いは BatchDriver に閉じ込める（anthropic-port.ts など）
 // 提供元のエラー文は受け取らず、返さない。API キーはここに来ない（提供元ごとのクライアントが環境変数から読んで持つ）。
-import type { Clock, LlmBatchClosed, LlmBatchPort, LlmBatchPrice, LlmBatchRequest, LlmBatchTicket, LlmCollectResult, LlmPolicy, LlmSubmitResult } from "../contracts";
+import type { Clock, LlmBatchClosed, LlmBatchPort, LlmBatchPrice, LlmBatchRequest, LlmBatchTicket, LlmPolicy, LlmSubmitResult } from "../contracts";
 import { sha256Hex } from "../events/hash";
 import { jstDayOf, llmCostUsed, llmTokenCost } from "../events/llm-cost";
 import type { Draft } from "../events/append";
@@ -46,13 +46,15 @@ export function batchSpendOf(events: readonly Pick<LogEvent, "seq" | "type" | "r
   return { used: llmCostUsed(events, day), recordedKeys: keys };
 }
 
+/** 1回の入力の上限（トークン。#179 の lead の決定2）。1トークンは1バイト以上なので、本文がこのバイト数÷inputCostFactor 以下なら必ず収まる */
+export const BATCH_MAX_INPUT_TOKENS = 20_000;
+
 /** submittedAt と、この口の時計の今とのずれの許し（5分）。外れたら RangeError */
 export const SUBMITTED_AT_SKEW_MS = 300_000;
 
 /**
  * 課金されたか分からない依頼の2つの記録：llm.batch.submitted（batchId: null）と、すぐ閉じる llm.batch.closed（failed・costUnknown・費用 maxCost）。
- * submit が billingUnknown を返したとき（sentBodyHash はその値）と、やり直す前の findUnrecorded が found・unknown のとき
- * （BatchPort.unrecordedDrafts）に使う。closedFor には書けた llm.batch.submitted の seq を渡す
+ * submit が billingUnknown を返したときと、findUnrecorded が found・unknown のとき（unrecordedDrafts）に使う。closedFor には書けた submitted の seq を渡す
  */
 export async function unknownCostDrafts(r: LlmBatchRequest, sentBodyHash: string, recordedAt: number): Promise<{ submitted: Draft; closedFor(batchSeq: number): Draft }> {
   const { yenPerUsd, inputCentsPer10MTok, outputCentsPer10MTok } = r.reservePrice;
@@ -70,8 +72,7 @@ const isStr = (v: unknown): v is string => typeof v === "string";
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
 /**
- * その日の使用済み ＝ 記録にある分 ＋ まだ記録されていない自分の予約。全提供元で1つを共有する（上限は合計で数えるため）。
- * 判定と予約は、この中で1つずつ続けて行う（同じプロセスで同時に呼ばれても上限を超えない）。
+ * その日の使用済み ＝ 記録にある分 ＋ まだ記録されていない自分の予約。全提供元で1つを共有する。判定と予約は1つずつ続けて行う（同時に呼ばれても超えない）。
  * 予約は、その一意キーの llm.batch.submitted が記録に現れたら、記録の側で数えるので外す。
  */
 export class BatchBudget {
@@ -129,12 +130,9 @@ export interface Prepared {
 /** 送った結果。sentBodyHash はクライアントが実際に送った本文の SHA-256 */
 export type SendResult = { ok: true; batchId: string; sentBodyHash: string } | { ok: false; errorCode: BatchErrorCode; billingUnknown?: true };
 
-/**
- * 終わったバッチの、依頼した1件の結果。
- * notBilled：課金されないと資料にあるもの（費用0）。costUnknown：課金されたか分からないもの（費用は予約した maxCost）
- */
+/** 終わったバッチの1件の結果。truncated：出力の上限で切れた。notBilled：課金されないと資料にある（費用0）。costUnknown：課金されたか分からない（費用 maxCost） */
 export type BatchOutcome =
-  | { kind: "succeeded"; output: string; respondedModel: string; usage: TokenUsage }
+  | { kind: "succeeded"; output: string; respondedModel: string; usage: TokenUsage; truncated: boolean }
   | { kind: "notBilled" | "costUnknown"; result: "expired" | "failed"; errorCode: BatchErrorCode };
 
 /** 記録にないバッチを探す問い。since より後に作られたものを探す（提供元の時計とのずれの分、早めに渡す） */
@@ -158,10 +156,10 @@ export interface BatchDriver {
   readonly provider: string;
   /** model.settings に許す鍵（temperature は入れない。#179 の lead の決定） */
   readonly settingKeys: readonly string[];
+  /** 送る出力の上限（考える分も含む。#179 の lead の決定2）。settings.max_tokens はこれと同じ、maxOutputTokens はこれ以上 */
+  readonly maxOutputTokens: number;
   /** 費用の式が入力の1トークンに掛ける倍率の最大（キャッシュへの書き込みを入力の欄と書き込みの欄の両方に入れるなら3）。既定は1 */
   readonly inputCostFactor?: number;
-  /** settings.max_tokens にかかわらず、予約に見込む出力のトークン数の下限（考えた過程が max_tokens に入ると資料で言えない提供元） */
-  readonly minReservedOutputTokens?: number;
   /** submittedAt の時点の料金（1,000万トークンあたりのセント）。料金表にないモデルは undefined */
   priceAt(modelId: string, submittedAt: number): LlmBatchPrice | undefined;
   /** 送る本文を決まった形で作る。決まりに合わなければ RangeError */
@@ -183,13 +181,15 @@ export interface BatchPortOptions {
 }
 
 type ReservePrice = LlmBatchPrice & { yenPerUsd: number };
+/** 閉じた結果。truncated: true は、出力の上限で途中で切れた答え（collected のときだけ付く） */
+export type BatchClosed = LlmBatchClosed & { truncated?: true };
 const UNKNOWN_PENDING: BatchOutcome = { kind: "costUnknown", result: "expired", errorCode: "timeout" };
 
 /**
  * 契約 LlmBatchPort の実装。決まりは契約のとおり。ほかに：
  * - reservePrice は、提供元の料金表の submittedAt の時点の料金と、この口の1ドルあたりの円に、ちょうど一致すること
- * - maxOutputTokens は settings.max_tokens と driver.minReservedOutputTokens の大きいほう以上、maxInputTokens は送る本文の UTF-8 のバイト数×driver.inputCostFactor 以上であること
- *   （トークン数はバイト数を超えないので、予約が上限として働く）。外れたら RangeError
+ * - settings.max_tokens は driver.maxOutputTokens と同じで、maxOutputTokens はそれ以上。maxInputTokens は BATCH_MAX_INPUT_TOKENS 以下で、
+ *   送る本文の UTF-8 のバイト数×driver.inputCostFactor 以上（トークン数はバイト数を超えないので、予約が上限として働く）。外れたら RangeError
  * - 記録の読み出しが失敗したら、送らずに budget_exceeded を返す（上限を確かめられないので、送らない側に倒す）
  * - 受け取り・打ち切りで読めなかったときは pending（打ち切りでは、課金が分からないとして maxCost）
  */
@@ -250,7 +250,7 @@ export class BatchPort implements LlmBatchPort {
     return { ok: false, errorCode: sent.errorCode, sentBodyHash, submittedAt };
   }
 
-  async collect(t: LlmBatchTicket): Promise<LlmCollectResult> {
+  async collect(t: LlmBatchTicket): Promise<{ status: "pending" } | BatchClosed> {
     this.#checkTicket(t);
     const o = await this.#outcome(t);
     return o === "pending" ? { status: "pending" } : this.#closed(o, t, false);
@@ -273,10 +273,7 @@ export class BatchPort implements LlmBatchPort {
     return unknownCostDrafts(r, await sha256Hex(new TextEncoder().encode(body)), recordedAt);
   }
 
-  /**
-   * 記録にないバッチを探す（runner の義務：同じ AI・同じ取引日の依頼をやり直す前に確かめる）。
-   * found なら cancelBatch で取り消しを頼む。どちらでもやり直さず、unrecordedDrafts の記録で費用を maxCost で数える
-   */
+  /** 記録にないバッチを探す（runner の義務）。found なら cancelBatch で取り消しを頼む。どちらでもやり直さず、unrecordedDrafts で費用を maxCost で数える */
   async findUnrecorded(q: { agentId: string; tradingDate: string } & Omit<BatchLookupQuery, "customId">): Promise<BatchLookup> {
     if (![q.since, q.now, q.requestedAt].every(Number.isFinite)) throw new RangeError("since, now and requestedAt must be finite numbers");
     const customId = await batchCustomIdOf(q.agentId, q.tradingDate);
@@ -324,7 +321,8 @@ export class BatchPort implements LlmBatchPort {
       throw new RangeError("reservePrice must be the provider's price at submittedAt");
     }
     if (!isCount(r.maxInputTokens) || !isCount(r.maxOutputTokens)) throw new RangeError("maxInputTokens and maxOutputTokens must be non-negative safe integers");
-    if (!(r.maxOutputTokens >= Math.max(Number(m.settings.max_tokens), this.#driver.minReservedOutputTokens ?? 0))) throw new RangeError("maxOutputTokens must be at least settings.max_tokens and the provider's minimum");
+    const cap = this.#driver.maxOutputTokens;
+    if (m.settings.max_tokens !== String(cap) || r.maxOutputTokens < cap || r.maxInputTokens > BATCH_MAX_INPUT_TOKENS) throw new RangeError(`settings.max_tokens must be ${cap}, maxOutputTokens at least that, and maxInputTokens at most ${BATCH_MAX_INPUT_TOKENS}`);
     const bound = llmTokenCost({ inputTokens: r.maxInputTokens, outputTokens: r.maxOutputTokens }, rp);
     if (bound === null || r.maxCost < bound) throw new RangeError("maxCost must be at least the cost of maxInputTokens and maxOutputTokens");
   }
@@ -335,7 +333,7 @@ export class BatchPort implements LlmBatchPort {
   }
 
   /** 閉じた結果。料金は予約のときと同じ（submittedAt の時点の料金表）。abandoned なら result は expired（timeout） */
-  #closed(o: BatchOutcome, t: LlmBatchTicket, abandoned: boolean): LlmBatchClosed {
+  #closed(o: BatchOutcome, t: LlmBatchTicket, abandoned: boolean): BatchClosed {
     const finishedAt = this.#clock.now();
     const p = this.#driver.priceAt(t.modelId, t.submittedAt);
     const rp: ReservePrice | undefined = p && { yenPerUsd: this.#yen, ...p };
@@ -359,6 +357,6 @@ export class BatchPort implements LlmBatchPort {
     if (cost === null) return unknown("failed", "provider_error");
     const usage = { ...tokens, cost };
     if (abandoned) return { status: "closed", result: "expired", errorCode: "timeout", usage, price, finishedAt };
-    return { status: "closed", result: "collected", output: o.output, respondedModel: o.respondedModel, usage, price, finishedAt };
+    return { status: "closed", result: "collected", output: o.output, respondedModel: o.respondedModel, usage, price, finishedAt, ...(o.truncated ? { truncated: true as const } : {}) };
   }
 }
