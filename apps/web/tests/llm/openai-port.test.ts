@@ -90,6 +90,7 @@ describe("OpenAI のバッチの口", () => {
     const p = await make(fakeFetch(() => new Response("{}")).f).prepare(req());
     const up = fakeFetch(() => new Response('{"error":{"message":"req_secret123"}}', { status: 500 }));
     expect(await make(up.f).send(p, 7)).toEqual({ ok: false, errorCode: "provider_error", notCreated: true });
+    expect(up.seen.map((s) => `${s.method} ${s.path}`)).toEqual(["POST /v1/files"]); // バッチを作る依頼は出していない
     const created = (respond: () => Response | Promise<Response>) => fakeFetch((_m, url) => (url.endsWith("/v1/files") ? new Response(recorded("openai-file-uploaded.json")) : respond())).f;
     expect(await make(created(() => new Response("{}", { status: 400 }))).send(p, 7)).toEqual({ ok: false, errorCode: "provider_error", notCreated: true });
     for (const respond of [() => new Response('{"error":{"message":"req_secret123"}}', { status: 503 }), () => Promise.reject(new TypeError("req_secret123")), () => new Response(withName("openai-batch-created.json", "other"))]) {
@@ -101,10 +102,17 @@ describe("OpenAI のバッチの口", () => {
 
   it("上げと作成の待ち時間の合計は送る時間の上限（10分）より短く、返らなければ通信を中断する（裏で送り続けない）", async () => {
     const p = await make(fakeFetch(() => new Response("{}")).f).prepare(req());
-    // 上げが返らない：中断して、バッチを作る依頼は出さない
+    // 上げが返らない：クライアントの待ち時間で中断して notCreated。返したあとも、裏でバッチを作る依頼を出さない（さらに10分進めて確かめる）
     const up = hangingFetch();
     let r: unknown;
-    expect(await settledAt(async () => (r = await make(up.f).send(p, 7)), BATCH_SEND_TIMEOUT_MS)).toBeLessThan(BATCH_SEND_TIMEOUT_MS);
+    let callsAtReturn = -1;
+    const after = async () => {
+      r = await make(up.f).send(p, 7);
+      callsAtReturn = up.state.calls;
+      await new Promise((resolve) => setTimeout(resolve, BATCH_SEND_TIMEOUT_MS));
+    };
+    expect(await settledAt(after, 3 * BATCH_SEND_TIMEOUT_MS)).toBeLessThan(2 * BATCH_SEND_TIMEOUT_MS);
+    expect(callsAtReturn).toBe(1);
     expect(up.state).toEqual({ calls: 1, aborted: 1 });
     expect(r).toEqual({ ok: false, errorCode: "timeout", notCreated: true });
     // 上げが待ち時間の上限の直前（119秒）に返り、作成が返らない：合計でも10分より前に中断する
@@ -123,7 +131,7 @@ describe("OpenAI のバッチの口", () => {
   describe("探す", () => {
     const H = createHash("sha256").update(FILE_BODY).digest("hex");
     const CID = `${IID}-${H.slice(0, 16)}`;
-    const reservation = { batchSeq: 3, agentId: "gpt-ai", provider: "openai", modelId: "gpt-6.1-sol", customId: CID, sentBodyHash: H, reservedAt: AT, maxCost: 300, tradingDate: "2026-11-10", submittedAt: AT };
+    const reservation = { batchSeq: 3, agentId: "gpt-ai", provider: "openai", modelId: "gpt-6.1-sol", customId: CID, sentBodyHash: H, reservedAt: AT, maxCost: 300, tradingDate: "2026-11-10", submittedAt: AT, reservePrice: { ...PRICE, yenPerUsd: 160 } };
     const status = (id: string, at: number, customId: string | null = CID) => ({ ...JSON.parse(withName("openai-batch-completed.json", customId)), id, created_at: Math.floor(at / 1000) });
     const lookup = (data: unknown[], file: () => Response = () => new Response(FILE_BODY)) =>
       fakeFetch((_m, url) => (url.includes(`/files/${FILE}/content`) ? file() : new Response(JSON.stringify({ object: "list", data, has_more: false }))));
@@ -146,7 +154,7 @@ describe("OpenAI のバッチの口", () => {
   });
 
   describe("受け取り", () => {
-    const ticketFor = (): LlmBatchTicket => ({ batchSeq: 3, agentId: "gpt-ai", provider: "openai", modelId: "gpt-6.1-sol", customId: `${IID}-${"c".repeat(16)}`, sentBodyHash: "c".repeat(64), reservedAt: AT, maxCost: 300, tradingDate: "2026-11-10", submittedAt: AT, batchId: BATCH });
+    const ticketFor = (): LlmBatchTicket => ({ batchSeq: 3, agentId: "gpt-ai", provider: "openai", modelId: "gpt-6.1-sol", customId: `${IID}-${"c".repeat(16)}`, sentBodyHash: "c".repeat(64), reservedAt: AT, maxCost: 300, tradingDate: "2026-11-10", submittedAt: AT, reservePrice: { ...PRICE, yenPerUsd: 160 }, batchId: BATCH });
     /** 終わったバッチ。結果のファイルの as の customId を、本文の中の1件のIDに置き換える */
     const done = (as: string, status = recorded("openai-batch-completed.json")) =>
       fakeFetch((_m, url) => {
@@ -201,6 +209,17 @@ describe("OpenAI のバッチの口", () => {
       const { f, seen } = fakeFetch(() => new Response(recorded("openai-batch-created.json")));
       expect(await make(f).abandon(ticketFor())).toMatchObject({ result: "expired", errorCode: "timeout", usage: { cost: 300 }, costUnknown: true });
       expect(seen.map((s) => `${s.method} ${s.path}`)).toEqual([`GET /v1/batches/${BATCH}`, `POST /v1/batches/${BATCH}/cancel`, `GET /v1/batches/${BATCH}`]);
+    });
+
+    it("費用と料金は控えの予約の料金で出す（口の料金表・円が控えと違っても選び直さない）。打ち切りも同じ", async () => {
+      const rp = { inputCentsPer10MTok: 2000, outputCentsPer10MTok: 9000, yenPerUsd: 150 };
+      const t = { ...ticketFor(), reservePrice: rp, maxCost: 1000 };
+      const cost = llmTokenCost({ inputTokens: 20_000, outputTokens: 4500 }, rp);
+      expect(cost).toBe(121); // (20,000×2ドル＋4,500×9ドル)/100万 × 150円 ＝ 12.075円
+      const other = (f: typeof fetch) => openaiBatchPort({ policy: { dailyCostLimit: 1000, dryRun: false }, clock: { now: () => AT + 5000 }, yenPerUsd: 170, client: new OpenAIBatchClient({ apiKey: KEY, fetch: f }) });
+      const price = { inputCentsPer10MTok: 2000, outputCentsPer10MTok: 9000 };
+      expect(await other(done("run-a").f).collect(t)).toMatchObject({ result: "collected", usage: { cost }, price });
+      expect(await other(done("run-a").f).abandon(t)).toMatchObject({ result: "expired", usage: { cost }, price });
     });
   });
 });
