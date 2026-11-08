@@ -155,17 +155,20 @@ export interface LlmBatchRequest extends LlmRequest {
 }
 
 /**
- * 送る前に作った本文（prepare の結果）。runner は sentBodyHash と customId を①に書いてから、これを send に渡す。
+ * 送る前に作った本文（prepare の結果）。runner は sentBodyHash・customId・bodyMaxOutputTokens を①に書いてから、これを send に渡す。
  * body は提供元に実際に渡す本文（JSON。OpenAI は上げるファイルの中身）。sentBodyHash はその UTF-8 のバイト列の SHA-256（16進の小文字）。
  * send は body を加工せずに送る（記録のハッシュが、実際に送った本文と一致するように）
  */
 export interface LlmPreparedBatch {
   readonly request: LlmBatchRequest;
   /**
-   * 提供元で探せる、決まった名前（英数字・ハイフン・下線で1〜64文字）。agentId と tradingDate だけから作る
-   * （記録の一意キー llmbatch:<agentId>:<tradingDate> を元にする）。②と③のあいだで止まったときに、find がこれで探す
+   * 提供元で探せる名前（英数字・ハイフン・下線で1〜64文字）。agentId と tradingDate から作った前半に、"-" と sentBodyHash の
+   * 先頭16文字を付ける（記録の検査が末尾を確かめる）。同じAI・同じ取引日でも、本文が違えば名前が変わる。
+   * 提供元のバッチ（Gemini の表示名、OpenAI のメタデータなど）と、中の1件のID（custom_id）の両方に、取れる限り入れる
    */
   readonly customId: string;
+  /** 本文に書いた出力の上限（max_tokens・max_output_tokens など。考える分を含む）。request.maxOutputTokens 以下 */
+  readonly bodyMaxOutputTokens: number;
   readonly body: string;
   readonly sentBodyHash: string;
 }
@@ -178,6 +181,8 @@ export interface LlmBatchReservation {
   provider: string;
   modelId: string;
   customId: string;
+  /** 送る本文のハッシュ（①の sentBodyHash）。find が、見つけたバッチの本文と比べる */
+  sentBodyHash: string;
   /** 予約した費用（LlmRequest.maxCost） */
   maxCost: Deciyen;
   tradingDate: string;
@@ -197,9 +202,11 @@ export interface LlmBatchTicket extends LlmBatchReservation {
 /**
  * 送った結果（send）。
  * - ok：③（llm.batch.sent）に batchId を書く
- * - notCreated：バッチが作られていないと分かっている（提供元が断った、送る前に失敗した）。費用0。runner は result: "failed"・
- *   費用0・トークン数0・料金は reservePrice の llm.batch.closed で閉じる（③のない①だけが、費用0で閉じられる）
- * - billingUnknown：作られた（課金されうる）か分からない（timeout・通信断など）。runner は find で探す
+ * - notCreated：バッチが作られていないと確か（本文を1バイトも送り出す前に失敗した、または提供元がバッチを作らずに断ったと答えた）。
+ *   runner は result: "failed"・費用0・トークン数0・料金は reservePrice・notCreatedError に errorCode を入れた llm.batch.closed で
+ *   閉じる（③のない①だけが、費用0で閉じられる）
+ * - billingUnknown：作られた（課金されうる）か分からない。本文を1バイトでも送り出したあとの失敗（タイムアウト・通信断を含む）は、
+ *   notCreated にせず、こちらにする。runner は find で探す
  */
 export type LlmSendResult =
   | { ok: true; batchId: string }
@@ -208,10 +215,17 @@ export type LlmSendResult =
 
 /**
  * 探した結果（find）。
- * - found：customId の名前で、この予約のバッチだと確かめられた。runner は③を書く
- * - not_found：見つからなかった、または見つけたものがこの予約のものか確かめられなかった。runner は result: "failed"・
- *   costUnknown: true・費用 maxCost の llm.batch.closed で閉じる（課金されたか分からないので、予約した費用を使ったものとして数える）
+ * - found：この予約のバッチだと確かめられた。条件は次のすべて。runner は③を書く
+ *   - 提供元のバッチの作成時刻が、①の submittedAt 以上で、submittedAt から1時間（①を書ける時間）＋送るのにかかる時間の上限以内
+ *   - その範囲で customId の名前を持つ候補が、ちょうど1つ（2つ以上なら確かめられないので not_found）
+ *   - 本文を取り出せる提供元では、そのバイト列の SHA-256 が①の sentBodyHash と同じ
+ *   名前を持てない、処理中に中身が見えないなど、これを確かめられない提供元（Anthropic など）は found を返さず not_found にする
+ * - not_found：見つからなかった、または確かめられなかった。runner は、submittedAt から1時間たつまでは閉じずに、次の実行で探し直す
+ *   （一覧への反映が遅れることがあるため）。1時間を過ぎていれば、result: "failed"・costUnknown: true・費用 maxCost の
+ *   llm.batch.closed で閉じる（課金されたか分からないので、予約した費用を使ったものとして数える）
  * - unknown：一覧が読めなかった。あとで探し直す。取引日の締め（8:30）を過ぎても分からなければ、not_found と同じに閉じる
+ * 閉じたあとも、その取引日の締めまでは探し続け、見つけたら abandon に渡して取り消しを頼む（返った結果は記録しない。費用は閉じた記録の
+ * maxCost で数えている）。
  */
 export type LlmFindResult = { status: "found"; batchId: string } | { status: "not_found" } | { status: "unknown" };
 
@@ -225,8 +239,9 @@ export type LlmFindResult = { status: "found"; batchId: string } | { status: "no
  * 提供元が実際にはもっと安く請求しても（OpenAI の短い文脈の料金など）、予約の料金で数える（多めに数えるので安全側）。
  * 閉じたときに料金を選び直さない（提供元のバッチを作った時刻で選ぶと、値上げをまたいだ依頼が記録できなくなる）。
  * 費用が分からなければ、price を付けず、usage.cost に maxCost をそのまま入れ、costUnknown: true を付ける。
- * 送ったバッチ（③があるもの）は、費用0の failed では閉じられない（記録の検査が断る）。失敗の費用が0と分かっていても、costUnknown で閉じる。
- * 実費が maxCost を超えても切り捨てない。トークン数が分からなければ 0。
+ * 送ったバッチ（③があるもの）は、答えを受け取っていない閉じ方（expired・failed）で費用0にできない（記録の検査が断る）。
+ * 失敗の費用が0と分かっていても、costUnknown で閉じる。collected は出力のトークン数が1以上（0 なら記録の検査が断る）。
+ * 実費が maxCost を超えても切り捨てない。トークン数が分からなければ、0 を入れずに costUnknown で閉じる（トークン数の欄は 0）。
  */
 export type LlmBatchClosed = { status: "closed"; usage: LlmBatchUsage; finishedAt: number } & (
   | { result: "collected"; output: string; respondedModel: string }
@@ -245,6 +260,9 @@ export type LlmCollectResult = { status: "pending" } | LlmBatchClosed;
 /**
  * まとめて依頼し、あとで受け取る口（各社のバッチ）。
  *
+ * 予約が実際の請求の上限になること（実装の義務）：本文の出力の上限（考える分を含む）は maxOutputTokens 以下、入力のトークン数の
+ * 見積もり（多めに倒す）は maxInputTokens 以下にする。出力の上限は①の bodyMaxOutputTokens に残り、記録の検査が maxOutputTokens 以下かを見る。
+ *
  * 費用の上限：その日の使用済み ＝ 閉じたバッチの実際の費用 ＋ 閉じていないバッチの予約（maxCost）。全提供元の合計で、
  * 記録だけから数える（src/events/llm-cost.ts の llmCostUsed）。暦日は依頼を決めた時刻（submittedAt）の日本時間の日付。
  * 記録は、①を書くときに、使用済み＋maxCost が1日の上限（LLM_DAILY_COST_LIMIT）を超えるなら断る。予約は記録にあるので、
@@ -252,15 +270,18 @@ export type LlmCollectResult = { status: "pending" } | LlmBatchClosed;
  * 同じ AI・同じ取引日の①は一意キーで1つだけなので、2つの実行が同じ依頼を二重に送ることもない。
  *
  * runner の流れ：
- * 1. prepare で本文を作る（送らない）。policy.dailyCostLimit が記録の上限より小さければ、llmCostUsed ＋ maxCost がそれを超えるときは
- *    ①を書かずに agent.run の失敗（budget_exceeded、費用0）を書く
- * 2. ①（llm.batch.submitted）を書く。sentBodyHash・customId は prepare の結果、submittedAt・料金・トークン数の上限は request から。
- *    断られたら（上限を超える、一意キーが使用済み、取引日の違いなど）送らない。上限で断られたときは budget_exceeded の agent.run を書く
+ * 1. prepare で本文を作る（送らない）。①を書く前に、llmCostUsed（記録から数えたその日の使用済み）＋ maxCost が、
+ *    記録の上限（LLM_DAILY_COST_LIMIT）と policy.dailyCostLimit の小さいほうを超えないかを確かめる。超えるなら①を書かずに
+ *    agent.run の失敗（budget_exceeded、費用0）を書く（記録の断りの文言で上限を見分けなくてよいように）
+ * 2. ①（llm.batch.submitted）を書く。submittedAt・料金・トークン数の上限は request から、
+ *    sentBodyHash・customId・bodyMaxOutputTokens は prepare の結果。断られたら（同時に動いた実行が先に予約して上限を超えた、一意キーが
+ *    使用済み、取引日の違いなど）送らない
  * 3. send で送る。結果は LlmSendResult のとおりに記録する（③、費用0の failed、または find）
  * 4. ②と③のあいだで止まった場合：次の実行は、閉じていない①のうち③のないもの（openLlmBatches と llmSentOf）を、
  *    llmReservationOf で控えにして find で探す。found なら③を書き、そのあとはふつうに受け取る（締めを過ぎていれば abandon）。
- *    not_found なら費用 maxCost（costUnknown）の failed で閉じる。③が断られた（もう閉じていた）ら、そのバッチの取り消しを頼む
+ *    not_found・unknown の扱いは LlmFindResult のとおり。③が断られた（もう閉じていた）ら、そのバッチを abandon で取り消す
  * 5. 受け取り（collect）と締めでの打ち切り（abandon）は、①と③から作った控え（llmTicketOf）で行う
+ * 照合（replay）も LLM_DAILY_COST_LIMIT で確かめるので、上限の値を下げると古い記録が照合を通らなくなりうる（変えるときは記録の検査を直す）
  *
  * 提供元の形への直し方（system の置き場所、設定の文字列から数への変換など）は、提供元ごとに決まった形にし、試験で確かめる。
  * settings と messages のほかは足さない（ツールなし。temperature は送らない。#179 の lead の決定）。
@@ -273,7 +294,8 @@ export interface LlmBatchPort {
   /**
    * 送る本文を作り、そのハッシュと customId を返す。提供元には何も送らない。
    * maxCost の検査（LlmRequest と同じ。外れたら、または maxInputTokens・maxOutputTokens・reservePrice から出した費用より小さければ
-   * RangeError で reject）
+   * RangeError で reject）。本文の出力の上限が maxOutputTokens を超える、または入力の見積もり（多めに倒す）が maxInputTokens を
+   * 超えるときも、RangeError で reject
    */
   prepare(request: LlmBatchRequest): Promise<LlmPreparedBatch>;
   /** ①を書いたあとに、prepared.body をそのまま提供元に送る。batchSeq は①の seq（提供元の名前などに使ってよい） */
@@ -284,8 +306,10 @@ export interface LlmBatchPort {
   collect(ticket: LlmBatchTicket): Promise<LlmCollectResult>;
   /**
    * 締め（8:30）での打ち切り。提供元にバッチの取り消しを頼み、result: "expired"（errorCode: "timeout"）で閉じた結果を返す。
-   * 取り消しのあとで課金されたかが分からないときは、費用を maxCost にして costUnknown: true を付ける（安全側）。
-   * 取り消しの前に答えが出ていても、締めのあとなので使わない（費用は実際の値を入れてよい）。pending は返さない。
+   * 取り消しはすぐには効かず、処理済みの分は課金される。提供元が処理を終えた（取り消し済み・終了）と確かめられ、
+   * 実際のトークン数が取れたときだけ、その値で閉じる（取れたトークン数が0なら、費用0の expired は記録の検査が断るので costUnknown）。
+   * それより前、または分からないときは、費用を maxCost にして costUnknown: true を付ける（安全側）。
+   * 取り消しの前に答えが出ていても、締めのあとなので使わない。pending は返さない。
    */
   abandon(ticket: LlmBatchTicket): Promise<LlmBatchClosed>;
 }
