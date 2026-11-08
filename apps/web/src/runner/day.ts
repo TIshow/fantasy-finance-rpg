@@ -14,7 +14,7 @@ import { cutoffOf, isBusinessDay, nextBusinessDay, previousBusinessDay } from ".
 import type { Account, Deciyen, Order } from "../ledger/types";
 import type { ValuesPort } from "../store/pg-values";
 import { type SplitInput, adjustCloses } from "./adjust";
-import { type DayAccess, type LlmDeps, errorText, llmSubmit } from "./llm-stage";
+import { type DayAccess, type LlmDeps, LocalCopyError, errorText, llmSubmit } from "./llm-stage";
 import { discloseDue } from "./world/disclosure";
 
 /** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引き、凍結した写しを渡す */
@@ -213,7 +213,12 @@ class Day {
       values: this.deps.values,
       append: async (type: Parameters<DayAccess["append"]>[0], payload: Payload, refs: number[]) => {
         const r = await this.deps.store.append({ type, actor: "system", refs, payload });
-        return r.ok ? { ok: true as const, event: await this.sync(r, type) } : r;
+        if (!r.ok) return r;
+        try {
+          return { ok: true as const, event: await this.sync(r, type) };
+        } catch (e) {
+          throw new LocalCopyError(e instanceof Error ? e.message : String(e));
+        }
       },
     });
   }
