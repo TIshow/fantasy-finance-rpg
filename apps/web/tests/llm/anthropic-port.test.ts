@@ -33,7 +33,7 @@ const make = (f: typeof fetch, limit = 1000) =>
 const req = (over: Partial<LlmBatchRequest> = {}): LlmBatchRequest => ({
   agentId: "claude-ai",
   purpose: "order",
-  model: { provider: "anthropic", modelId: "claude-sonnet-5-5", settings: { max_tokens: "2000" } },
+  model: { provider: "anthropic", modelId: "claude-sonnet-5-5", settings: { max_tokens: "4000" } },
   prompt: { id: "p", version: "1", hash: "0".repeat(64) },
   inputSeqs: [1],
   messages: [
@@ -44,8 +44,8 @@ const req = (over: Partial<LlmBatchRequest> = {}): LlmBatchRequest => ({
   tradingDate: "2026-11-10",
   submittedAt: AT,
   reservePrice: { ...PRICE, yenPerUsd: 160 },
-  maxInputTokens: 50_000,
-  maxOutputTokens: 2000,
+  maxInputTokens: 20_000,
+  maxOutputTokens: 4000,
   ...over,
 });
 
@@ -59,7 +59,7 @@ describe("Anthropic のバッチの口", () => {
     const { f, seen } = fakeFetch(() => new Response(recorded("anthropic-batch-created.json")));
     const r = await make(f).submit(req());
     const customId = await batchCustomIdOf("claude-ai", "2026-11-10");
-    const body = `{"requests":[{"custom_id":"${customId}","params":{"model":"claude-sonnet-5-5","max_tokens":2000,"system":"あなたは投資家です","messages":[{"role":"user","content":"入力"}]}}]}`;
+    const body = `{"requests":[{"custom_id":"${customId}","params":{"model":"claude-sonnet-5-5","max_tokens":4000,"system":"あなたは投資家です","messages":[{"role":"user","content":"入力"}]}}]}`;
     expect(seen).toEqual([{ method: "POST", url: "https://api.anthropic.com/v1/messages/batches", body }]);
     expect(r).toEqual({
       ok: true,
@@ -69,9 +69,12 @@ describe("Anthropic のバッチの口", () => {
     expect(JSON.stringify(r)).not.toContain(KEY);
   });
 
-  it("temperature は送る前に断る", async () => {
+  it("temperature・決まりと違う出力の上限・入力の上限を超える本文は、送る前に断る", async () => {
     const { f, seen } = fakeFetch(() => new Response(recorded("anthropic-batch-created.json")));
-    await expect(make(f).submit(req({ model: { provider: "anthropic", modelId: "claude-sonnet-5-5", settings: { max_tokens: "2000", temperature: "0" } } }))).rejects.toThrow(RangeError);
+    await expect(make(f).submit(req({ model: { provider: "anthropic", modelId: "claude-sonnet-5-5", settings: { max_tokens: "4000", temperature: "0" } } }))).rejects.toThrow(RangeError);
+    // 出力の上限は 4,000。本文が 20,000 バイトを超える依頼は送らない（日本語1文字は3バイト）
+    await expect(make(f).submit(req({ model: { provider: "anthropic", modelId: "claude-sonnet-5-5", settings: { max_tokens: "8000" } }, maxOutputTokens: 8000, maxCost: 1000 }))).rejects.toThrow(RangeError);
+    await expect(make(f).submit(req({ messages: [{ role: "user", content: "あ".repeat(6700) }] }))).rejects.toThrow(/byte length/);
     expect(seen).toHaveLength(0);
   });
 
@@ -106,6 +109,8 @@ describe("Anthropic のバッチの口", () => {
       const usage = { inputTokens: 20_000, outputTokens: 1500, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
       expect(r).toEqual({ status: "closed", result: "collected", output: '{"post":null,"orders":[]}', respondedModel: "claude-sonnet-5-5", usage: { inputTokens: 20_000, outputTokens: 1500, cost: 44 }, price: PRICE, finishedAt: AT + 5000 });
       expect(llmTokenCost(usage, { ...PRICE, yenPerUsd: 160 })).toBe(batchCostDeciyen(usage, { inputCentsPerMTok: 100, outputCentsPerMTok: 500 }, 160));
+      // 出力の上限（max_tokens）で止まった答えは truncated: true
+      expect(await make(ended((await results("run-a")).replace('"end_turn"', '"max_tokens"')).f).collect(await ticketFor())).toMatchObject({ result: "collected", truncated: true });
     });
 
     it("errored・expired は課金されない（費用0）。結果にないときは課金が分からない（maxCost）", async () => {

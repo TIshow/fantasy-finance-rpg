@@ -18,6 +18,7 @@ function fakeDriver(over: Partial<BatchDriver> = {}, send: () => Promise<SendRes
   const driver: BatchDriver = {
     provider: "fake",
     settingKeys: ["max_tokens"],
+    maxOutputTokens: 2000,
     priceAt: (m) => (m === "m1" ? PRICE : undefined),
     prepare: (r) => ({ body: JSON.stringify(r.messages), send: () => ((calls.send += 1), send()) }),
     outcome: async () => "pending",
@@ -42,7 +43,7 @@ const req = (over: Partial<LlmBatchRequest> = {}): LlmBatchRequest => ({
   tradingDate: "2026-11-10",
   submittedAt: AT,
   reservePrice: { ...PRICE, yenPerUsd: 160 },
-  maxInputTokens: 50_000,
+  maxInputTokens: 20_000,
   maxOutputTokens: 2000,
   ...over,
 });
@@ -126,14 +127,16 @@ describe("送る前の確かめ（RangeError で reject し、送らない）", 
     ["maxCost が 0", { maxCost: 0 }],
     ["maxCost が NaN", { maxCost: Number.NaN }],
     ["maxCost が小数", { maxCost: 1.5 }],
-    // 50,000×1ドル/100万＋2,000×5ドル/100万 ＝ 0.06ドル ＝ 9.6円（96）
-    ["上限のトークン数の費用より小さい", { maxCost: 95 }],
+    // 20,000×1ドル/100万＋2,000×5ドル/100万 ＝ 0.03ドル ＝ 4.8円（48）
+    ["上限のトークン数の費用より小さい", { maxCost: 47 }],
     ["予約の料金が料金表と違う", { reservePrice: { ...PRICE, inputCentsPer10MTok: 999, yenPerUsd: 160 } }],
     ["1ドルあたりの円が違う", { reservePrice: { ...PRICE, yenPerUsd: 150 } }],
     ["temperature を送ろうとした", { model: { provider: "fake", modelId: "m1", settings: { max_tokens: "2000", temperature: "0" } } }],
     ["提供元が違う", { model: { provider: "other", modelId: "m1", settings: { max_tokens: "2000" } } }],
     ["料金表にないモデル", { model: { provider: "fake", modelId: "m2", settings: { max_tokens: "2000" } } }],
     ["maxOutputTokens が max_tokens より小さい", { maxOutputTokens: 1999, maxCost: 1000 }],
+    ["max_tokens が提供元の出力の上限と違う", { model: { provider: "fake", modelId: "m1", settings: { max_tokens: "1999" } } }],
+    ["maxInputTokens が入力の上限（20,000）を超える", { maxInputTokens: 20_001, maxCost: 1000 }],
     ["maxInputTokens が送る本文のバイト数より小さい", { maxInputTokens: 10 }],
     ["maxInputTokens が送る本文のバイト数×inputCostFactor より小さい", { maxInputTokens: 60, maxCost: 1000 }],
     ["取引日の形が違う", { tradingDate: "2026/11/10" }],
@@ -157,7 +160,7 @@ describe("送る前の確かめ（RangeError で reject し、送らない）", 
 
 describe("受け取りと打ち切り", () => {
   const usage = { inputTokens: 20_000, outputTokens: 1500, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
-  const succeeded: BatchOutcome = { kind: "succeeded", output: "{}", respondedModel: "m1-2026", usage };
+  const succeeded: BatchOutcome = { kind: "succeeded", output: "{}", respondedModel: "m1-2026", usage, truncated: false };
 
   it("受け取り：費用は予約の料金で、llmTokenCost ちょうど。料金をそのまま写す", async () => {
     const { driver } = fakeDriver({ outcome: async () => succeeded });
@@ -165,6 +168,8 @@ describe("受け取りと打ち切り", () => {
     const cost = llmTokenCost(usage, { ...PRICE, yenPerUsd: 160 });
     expect(r).toEqual({ status: "closed", result: "collected", output: "{}", respondedModel: "m1-2026", usage: { inputTokens: 20_000, outputTokens: 1500, cost }, price: PRICE, finishedAt: AT + 1000 });
     expect(cost).toBe(44); // (20,000×1ドル＋1,500×5ドル)/100万 × 160円 ＝ 4.4円
+    // 出力の上限で切れた答えは truncated: true
+    expect(await port(fakeDriver({ outcome: async () => ({ ...succeeded, truncated: true }) }).driver).collect(ticket())).toMatchObject({ result: "collected", truncated: true });
   });
 
   it("課金されないもの・分からないもの・読めないとき", async () => {
@@ -219,7 +224,7 @@ describe("課金されたか分からない依頼の2つの記録（unknownCostD
     expect(calls.send).toBe(0);
     expect(llmCostUsed(l.events, DAY)).toBe(160);
     expect(await l.canAppend((await port(driver).unrecordedDrafts(req(), AT + 2000)).submitted)).toMatch(/duplicate key/);
-    await expect(port(driver).unrecordedDrafts(req({ maxCost: 95 }), AT + 1000)).rejects.toThrow(RangeError);
+    await expect(port(driver).unrecordedDrafts(req({ maxCost: 47 }), AT + 1000)).rejects.toThrow(RangeError);
     // submit が billingUnknown を返したとき。予約は記録の側に移り、二重に数えない
     const b = new BatchBudget({ dailyCostLimit: 1000, dryRun: false }, async (day: string) => batchSpendOf(l.events, day));
     const r = await port(fakeDriver({}, async () => ({ ok: false, errorCode: "timeout", billingUnknown: true })).driver, b).submit(req({ agentId: "ai-2" }));
