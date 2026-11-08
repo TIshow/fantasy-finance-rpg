@@ -111,7 +111,7 @@ const SYMBOL = /^[0-9A-Z]{3,8}$/;
  * 提供元のバッチのIDを足す）→ llm.batch.closed（①を指す）。①は提供元のバッチのIDを持たない
  */
 const LLM_PRICE_FIELDS = ["inputCentsPer10MTok", "outputCentsPer10MTok"];
-const LLM_SUBMITTED_FIELDS = ["agentId", "provider", "modelId", "promptVersion", "sentBodyHash", "customId", "maxCost", "tradingDate", "submittedAt", "yenPerUsd", ...LLM_PRICE_FIELDS, "maxInputTokens", "maxOutputTokens", "bodyMaxOutputTokens"];
+const LLM_SUBMITTED_FIELDS = ["agentId", "provider", "modelId", "promptVersion", "sentBodyHash", "customId", "maxCost", "tradingDate", "submittedAt", "yenPerUsd", ...LLM_PRICE_FIELDS, "maxInputTokens", "maxOutputTokens", "bodyMaxOutputTokens", "dryRun"];
 const LLM_TOKEN_FIELDS = ["inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens"];
 const LLM_SENT_FIELDS = ["batchSeq", "agentId", "provider", "batchId"];
 const LLM_CLOSED_FIELDS = ["batchSeq", "agentId", "result", "cost", "costUnknown", "notCreatedError", ...LLM_TOKEN_FIELDS, ...LLM_PRICE_FIELDS];
@@ -131,6 +131,8 @@ const isCount = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 0;
 export const LLM_RECORD_WINDOW_MS = 3_600_000;
 /** correction.issued の項目（#179。EVENT_LOG §3.4） */
 const CORRECTION_FIELDS = ["targetSeq", "kind", "reason", "newBodyHash"];
+/** 入力データの訂正（kind: "input"）の対象。EVENT_LOG §6.2 の入力データ（始値・終値・分割・配当）。台帳の誤りは ledger.adjusted で直す */
+const CORRECTABLE_INPUTS: readonly unknown[] = ["prices.open", "prices.close", "corporate_action.announced"];
 
 export interface AppendContext {
   /** これまでに採用した祝日の一覧を、版（contentSha256）で引けるように渡す。どの版を使うかはログの holidays.adopted が決める */
@@ -517,6 +519,8 @@ export class EventLog {
         if (Object.keys(p).some((k) => !LLM_SUBMITTED_FIELDS.includes(k))) return "unknown field in a batch submission";
         if (!isShortText(p.provider) || !isShortText(p.modelId) || !isShortText(p.promptVersion)) return "provider, modelId and promptVersion are required (up to 100 characters)";
         if (typeof p.sentBodyHash !== "string" || !SHA256_HEX.test(p.sentBodyHash)) return "sentBodyHash must be a SHA-256 hex digest";
+        // 試運転の印は、依頼を記録したときに決める（答えを受け取るまでに試運転を切っても、その日の判断は試運転のまま）
+        if (p.dryRun !== undefined && p.dryRun !== true) return "dryRun must be true or left out";
         if (typeof p.customId !== "string" || !CUSTOM_ID.test(p.customId)) return "customId must match ^[A-Za-z0-9_-]{1,64}$";
         // 提供元の一覧で探すときに、別の本文のバッチと取り違えないよう、名前の末尾は本文のハッシュの先頭
         if (!p.customId.endsWith(`-${p.sentBodyHash.slice(0, LLM_CUSTOM_ID_HASH_CHARS)}`)) return `customId must end with - and the first ${String(LLM_CUSTOM_ID_HASH_CHARS)} characters of sentBodyHash`;
@@ -660,9 +664,11 @@ export class EventLog {
         if (Object.keys(p).some((k) => !CORRECTION_FIELDS.includes(k))) return "unknown field in a correction";
         if (!Number.isSafeInteger(p.targetSeq)) return "targetSeq must be the seq of an earlier event";
         if (!(CORRECTION_KINDS as readonly unknown[]).includes(p.kind)) return `kind must be one of ${CORRECTION_KINDS.join(", ")}`;
-        if (typeof p.reason !== "string" || p.reason === "" || p.reason.length > CORRECTION_REASON_MAX) return `reason is required (up to ${String(CORRECTION_REASON_MAX)} characters)`;
+        if (typeof p.reason !== "string" || p.reason.trim() === "" || p.reason.length > CORRECTION_REASON_MAX) return `reason is required (up to ${String(CORRECTION_REASON_MAX)} characters)`;
         if (p.newBodyHash !== undefined && (typeof p.newBodyHash !== "string" || !SHA256_HEX.test(p.newBodyHash))) return "newBodyHash must be a SHA-256 hex digest";
-        if (p.kind === "post" && this.events[(p.targetSeq as number) - 1]?.type !== "post.published") return "targetSeq of a post correction must be a post.published";
+        const target = this.events[(p.targetSeq as number) - 1]?.type;
+        if (p.kind === "post" && target !== "post.published") return "targetSeq of a post correction must be a post.published";
+        if (p.kind === "input" && !CORRECTABLE_INPUTS.includes(target)) return `targetSeq of an input correction must be one of ${CORRECTABLE_INPUTS.join(", ")}`;
         return null;
       }
       case "agent.suspended":
@@ -787,7 +793,7 @@ export class EventLog {
   /**
    * LLM の agent.run が、元のバッチ（batchSeq）を正しく指しているか（#179）。規則で動くAIと、これまでの記録は batchSeq を持たない。
    * 指す先は、同じAIの、答えを受け取った（collected）llm.batch.closed。送った本文のハッシュは、その依頼の記録と同じ。
-   * run は、その依頼の取引日の締め（8:30）より前に書く（締めのあとの答えは使わない）
+   * run は、その依頼の取引日の締め（8:30）より前に書く（締めのあとの答えは使わない）。試運転の印（dryRun）は依頼の記録と同じ
    */
   private runBatchProblem(d: Draft, agentId: string, H: ReadonlySet<string>): string | null {
     const p = d.payload;
@@ -797,6 +803,8 @@ export class EventLog {
     if (c?.type !== "llm.batch.closed" || cp?.agentId !== agentId || cp.result !== "collected") return "batchSeq must be a collected llm.batch.closed of the same agent";
     const sp = this.events[(cp.batchSeq as number) - 1]!.payload as Record<string, unknown>;
     if (p.sentBodyHash !== sp.sentBodyHash) return "sentBodyHash must match the batch submission";
+    // 試運転の印は、依頼の記録（①）と同じ。依頼のあとに試運転を切っても、印のない run を書いて注文票にはできない
+    if ((p.dryRun === true) !== (sp.dryRun === true)) return "dryRun must match the batch submission";
     // 入力は、依頼を送る前に記録した情報だけ（送った本文に入っていない情報を、判断に使ったと書けないように）
     if (Array.isArray(p.inputSeqs) && !p.inputSeqs.every((s) => typeof s === "number" && s < (cp.batchSeq as number))) return "inputSeqs must be recorded before the batch submission";
     try {

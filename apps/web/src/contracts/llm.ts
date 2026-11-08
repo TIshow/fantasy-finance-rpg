@@ -30,9 +30,10 @@ export interface LlmMessage {
  * （実装の作成時に RangeError）。実装は policy を複製して持ち、作ったあとに呼び出し側が書き換えても効かない。
  * dryRun が true の間は注文を出さない。runner には commitSheet を持たない OrderlessEventStore だけを渡す
  * （保証は runner の工場関数の仕事。event-store.ts の OrderlessEventStore を見る）。投稿と agent.run は書く
- * （費用と下書きを監査できるように）。試運転の日の agent.run には dryRun: true を書く（試運転でない日は書かない）。
+ * （費用と下書きを監査できるように）。試運転の日は、依頼の記録（llm.batch.submitted）に dryRun: true を書き、その答えから書く
+ * agent.run にも同じ印を書く（試運転でない日はどちらも書かない。印が依頼と食い違う run は記録の検査が断る）。
  * 記録の検査（EventLog の commitSheet）は、dryRun: true の注文の判断を元にした注文票を確定せず、拒否（invalid_sheet）として残す。
- * 締め（8:30）の前に試運転を切っても、その日の判断は本物の注文にならない（#179）。
+ * 依頼のあと、締め（8:30）の前に試運転を切っても、その日の判断は本物の注文にならない（#179）。
  */
 export interface LlmPolicy {
   /** 1日（日本時間の暦日）に使ってよい費用の上限。0.1円単位の整数 */

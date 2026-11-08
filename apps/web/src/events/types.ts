@@ -41,14 +41,18 @@ export type PostIntent = (typeof POST_INTENTS)[number];
 export type PostStance = (typeof POST_STANCES)[number];
 
 /**
- * agent.run の、省略できる試運転の印（#179）。試運転の日の実行だけが dryRun: true を書く。false などほかの値は断り、
- * 試運転でない実行は項目を書かない。印のある注文の判断（purpose: "order"）からは、注文票を確定できない（拒否の記録が残る）
+ * agent.run と llm.batch.submitted の、省略できる試運転の印（#179）。試運転の日の記録だけが dryRun: true を書く。false などほかの値は断り、
+ * 試運転でない記録は項目を書かない。印は依頼（llm.batch.submitted）を記録したときに決まり、その答えから書く agent.run は
+ * 依頼と同じ印を持つ（食い違えば断る）。印のある注文の判断（purpose: "order"）からは、注文票を確定できない（拒否の記録が残る）
  */
 export interface AgentRunDryRun {
   dryRun?: true;
 }
 
-/** correction.issued の対象の種類（#179）。post は投稿（targetSeq は post.published）、input は入力データ */
+/**
+ * correction.issued の対象の種類（#179）。post は投稿（targetSeq は post.published）。input は入力データ（targetSeq は
+ * EVENT_LOG §6.2 の prices.open・prices.close・corporate_action.announced）。台帳の誤りは ledger.adjusted で直す
+ */
 export const CORRECTION_KINDS = ["post", "input"] as const;
 export type CorrectionKind = (typeof CORRECTION_KINDS)[number];
 /** correction.issued の理由の最大の文字数（JavaScript の文字列の長さ） */

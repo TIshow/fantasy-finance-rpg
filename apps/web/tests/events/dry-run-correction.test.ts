@@ -53,10 +53,14 @@ async function admitAll(events: readonly LogEvent[]): Promise<string | null> {
   return null;
 }
 
-/** 保存済みのログの末尾に1件足して、連鎖を作り直す（追記の検査を通らずに保存されたもの） */
+/**
+ * 保存済みのログの末尾に1件足して、連鎖を作り直す（追記の検査を通らずに保存されたもの）。
+ * 一意キーは追記と同じものを付ける（バッチの答えから書いた agent.run は llmrun:<batchSeq>:<目的>）。キーの違いで落ちないように
+ */
 async function withLast(events: readonly LogEvent[], d: Draft): Promise<LogEvent[]> {
   const out: LogEvent[] = [];
-  for (const e of [...events.map((e) => ({ type: e.type, recordedAt: e.recordedAt, actor: e.actor, refs: [...e.refs], keys: [...e.keys], payload: e.payload })), { ...d, keys: [] }]) out.push(await sealEvent(out.at(-1) ?? null, e));
+  const keys = d.type === "agent.run" && d.payload.batchSeq !== undefined ? [`llmrun:${String(d.payload.batchSeq)}:${String(d.payload.purpose)}`] : [];
+  for (const e of [...events.map((e) => ({ type: e.type, recordedAt: e.recordedAt, actor: e.actor, refs: [...e.refs], keys: [...e.keys], payload: e.payload })), { ...d, keys }]) out.push(await sealEvent(out.at(-1) ?? null, e));
   return out;
 }
 
@@ -107,14 +111,81 @@ describe("agent.run の試運転の印（dryRun）", () => {
   });
 });
 
+/** 依頼（①）・送った記録（③）・閉じた記録まで書き、その答えから書く注文の agent.run の下書きを返す */
+async function batchUpTo(log: EventLog, src: number, submittedExtra: Record<string, unknown>) {
+  const at = jst("2026-11-09", 22, 30);
+  const body = "b".repeat(64);
+  const sub = await ok(log, sys("llm.batch.submitted", at, {
+    agentId: "alpha", provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: body, customId: `alpha-20261110-${"b".repeat(16)}`,
+    maxCost: 150, tradingDate: "2026-11-10", submittedAt: at, yenPerUsd: 160, inputCentsPer10MTok: 1000, outputCentsPer10MTok: 5000,
+    maxInputTokens: 50_000, maxOutputTokens: 8_000, bodyMaxOutputTokens: 8_000, ...submittedExtra,
+  }));
+  await ok(log, sys("llm.batch.sent", at + 60_000, { batchSeq: sub, agentId: "alpha", provider: "anthropic", batchId: "msgbatch_01" }, [sub]));
+  const closed = await ok(log, sys("llm.batch.closed", jst("2026-11-10", 6, 50), { batchSeq: sub, agentId: "alpha", result: "collected", cost: 44, inputTokens: 20_000, outputTokens: 1_500, inputCentsPer10MTok: 1000, outputCentsPer10MTok: 5000 }, [sub]));
+  return (extra: Record<string, unknown>) => sys("agent.run", jst("2026-11-10", 7), { agentId: "alpha", purpose: "order", inputSeqs: [src], ok: true, batchSeq: closed, sentBodyHash: body, ...extra }, [src, closed]);
+}
+
+describe("依頼の記録（llm.batch.submitted）の試運転の印", () => {
+  it("依頼の dryRun も true だけ書ける", async () => {
+    for (const v of [false, "true", 1, null]) {
+      const { log, src } = await setup();
+      await expect(batchUpTo(log, src, { dryRun: v }), JSON.stringify(v)).rejects.toThrow("dryRun must be true or left out");
+    }
+  });
+
+  it("試運転の依頼から、印のない run は書けない（依頼のあとに試運転を切っても、本物の注文にならない）", async () => {
+    const { log, src } = await setup();
+    const runOf = await batchUpTo(log, src, { dryRun: true });
+    expect(await why(log, runOf({}))).toBe("dryRun must match the batch submission");
+    const run = await ok(log, runOf({ dryRun: true }));
+    const r = await log.commitSheet(jst("2026-11-10", 8), "alpha", { tradingDate: "2026-11-10", orders: buy, runSeq: run, inputSeqs: [src] });
+    expect(r.ok && r.rejected).toBe("invalid_sheet");
+    expect(log.events.at(-1)!.type).toBe("order_sheet.rejected");
+    expect(await admitAll(log.events)).toBeNull();
+  });
+
+  it("試運転でない依頼から、印のある run は書けない。印のない run は確定できる", async () => {
+    const { log, src } = await setup();
+    const runOf = await batchUpTo(log, src, {});
+    expect(await why(log, runOf({ dryRun: true }))).toBe("dryRun must match the batch submission");
+    const run = await ok(log, runOf({}));
+    const r = await log.commitSheet(jst("2026-11-10", 8), "alpha", { tradingDate: "2026-11-10", orders: buy, runSeq: run, inputSeqs: [src] });
+    expect(r.ok && r.event.type).toBe("order_sheet.committed");
+  });
+
+  it("保存済みのログで、依頼と run の印が食い違えば照合で落ちる", async () => {
+    const { log, src } = await setup();
+    const runOf = await batchUpTo(log, src, { dryRun: true });
+    const good = log.events.slice();
+    expect(await admitAll(await withLast(good, runOf({})))).toMatch(/agent.run.*dryRun must match the batch submission/);
+    expect(await admitAll(await withLast(good, runOf({ dryRun: true })))).toBeNull();
+    // 試運転でない依頼に、印のある run を足した記録も落ちる
+    const real = await setup();
+    const realRunOf = await batchUpTo(real.log, real.src, {});
+    expect(await admitAll(await withLast(real.log.events, realRunOf({ dryRun: true })))).toMatch(/agent.run.*dryRun must match the batch submission/);
+  });
+});
+
 describe("correction.issued の形", () => {
-  const fix = (payload: Record<string, unknown>, refs: number[]) => op("correction.issued", jst("2026-11-10", 1), payload, refs);
+  const fix = (payload: Record<string, unknown>, refs: number[]) => op("correction.issued", jst("2026-11-10", 16), payload, refs);
 
   it("投稿の訂正と入力データの訂正を書ける。newBodyHash は省ける。refs のほかの seq は引用として書ける", async () => {
     const { log, src, post } = await setup();
+    const open = await ok(log, sys("prices.open", jst("2026-11-10", 9), { date: "2026-11-10" }));
     await ok(log, fix({ targetSeq: post, kind: "post", reason: "誤った数字", newBodyHash: HASH }, [post]));
     await ok(log, fix({ targetSeq: post, kind: "post", reason: "x".repeat(500) }, [post, src]));
-    await ok(log, fix({ targetSeq: src, kind: "input", reason: "配信元の訂正", newBodyHash: HASH }, [src]));
+    await ok(log, fix({ targetSeq: open, kind: "input", reason: "配信元の訂正", newBodyHash: HASH }, [open]));
+    await ok(log, fix({ targetSeq: open, kind: "input", reason: "値の訂正" }, [open, post, src]));
+  });
+
+  it("入力データの訂正の対象は、始値・終値・分割と配当の公表だけ（EVENT_LOG §6.2）", async () => {
+    const { log, src, post } = await setup();
+    const close = await ok(log, sys("prices.close", jst("2026-11-10", 15, 40), { date: "2026-11-10" }));
+    const announced = await ok(log, sys("corporate_action.announced", jst("2026-11-10", 15, 41), { symbol: "AAA", kind: "dividend", exDate: "2026-11-12", announcedAt: jst("2026-11-10", 15), perShare: 100 }));
+    await ok(log, fix({ targetSeq: close, kind: "input", reason: "r" }, [close]));
+    await ok(log, fix({ targetSeq: announced, kind: "input", reason: "r" }, [announced]));
+    const want = "targetSeq of an input correction must be one of prices.open, prices.close, corporate_action.announced";
+    for (const t of [src, post, 1, 3]) expect(await why(log, fix({ targetSeq: t, kind: "input", reason: "r" }, [t])), String(t)).toBe(want);
   });
 
   it("形に合わない中身は、理由を返して断る", async () => {
@@ -123,12 +194,13 @@ describe("correction.issued の形", () => {
     const BAD: [Record<string, unknown>, number[], string][] = [
       [{ kind: "post", reason: "r" }, [post], "targetSeq must be the seq of an earlier event"],
       [{ targetSeq: "5", kind: "post", reason: "r" }, [post], "payload refers to 5 outside refs"],
-      [{ targetSeq: next, kind: "input", reason: "r" }, [next], `payload refers to ${String(next)} outside refs`],
+      [{ targetSeq: next, kind: "post", reason: "r" }, [next], `payload refers to ${String(next)} outside refs`],
       [{ targetSeq: post, kind: "post", reason: "r" }, [], `payload refers to ${String(post)} outside refs`],
       [{ targetSeq: post, kind: "data", reason: "r" }, [post], "kind must be one of post, input"],
       [{ targetSeq: post, reason: "r" }, [post], "kind must be one of post, input"],
       [{ targetSeq: post, kind: "post" }, [post], "reason is required (up to 500 characters)"],
       [{ targetSeq: post, kind: "post", reason: "" }, [post], "reason is required (up to 500 characters)"],
+      [{ targetSeq: post, kind: "post", reason: " \n\t\u3000" }, [post], "reason is required (up to 500 characters)"],
       [{ targetSeq: post, kind: "post", reason: "x".repeat(501) }, [post], "reason is required (up to 500 characters)"],
       [{ targetSeq: post, kind: "post", reason: "r", newBodyHash: "h5" }, [post], "newBodyHash must be a SHA-256 hex digest"],
       [{ targetSeq: post, kind: "post", reason: "r", newBodyHash: HASH.toUpperCase() }, [post], "newBodyHash must be a SHA-256 hex digest"],
