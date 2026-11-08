@@ -7,3 +7,6 @@ CLAUDE.local.md
 .codex-log/
 *.log
 .claude/launch.json
+
+# npm run dev（Next.js）が自動で作るファイル。リポジトリには入れない（#179）
+apps/web/AGENTS.md
