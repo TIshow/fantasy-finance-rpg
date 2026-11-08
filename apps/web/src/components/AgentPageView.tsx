@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { Direction } from "../view/arena";
 import { CHART_H, CHART_W, type AgentPage, type DecisionDay, type HistoryRow } from "../view/agent-page";
+import { BoardLink } from "./BoardLink";
 import { ModelChip } from "./ModelChip";
 import { CutPanel } from "./CutPanel";
 import { Portrait } from "./Portrait";
@@ -33,7 +34,7 @@ function History({ rows }: { rows: HistoryRow[] }) {
   );
 }
 
-function Decisions({ days }: { days: DecisionDay[] }) {
+function Decisions({ days, symbols }: { days: DecisionDay[]; symbols?: ReadonlySet<string> }) {
   if (days.length === 0) return <p className="text-sm text-sub">まだ判断の記録がありません</p>;
   return (
     <div className="flex flex-col gap-3">
@@ -51,7 +52,7 @@ function Decisions({ days }: { days: DecisionDay[] }) {
                   {i.runSeq !== null && <span className="ml-auto">判断の実行 #{i.runSeq}</span>}
                 </div>
                 {i.note ? <p className="m-0 italic text-sub">{i.note}</p> : <p className="m-0 whitespace-pre-wrap">{i.text}</p>}
-                {i.symbol && <Link href={`/symbols/${encodeURIComponent(i.symbol)}`} className="w-fit font-num text-xs underline">{i.symbol} 掲示板</Link>}
+                {i.symbol && <BoardLink board={i.symbol} symbols={symbols} suffix=" 掲示板" className="w-fit font-num text-xs underline" />}
               </li>
             ))}
           </ul>
@@ -61,7 +62,7 @@ function Decisions({ days }: { days: DecisionDay[] }) {
   );
 }
 
-export function AgentPageView({ page: p }: { page: AgentPage }) {
+export function AgentPageView({ page: p, symbols }: { page: AgentPage; symbols?: ReadonlySet<string> }) {
   const c = p.character;
   return (
     <div className="flex flex-col gap-8">
@@ -82,7 +83,7 @@ export function AgentPageView({ page: p }: { page: AgentPage }) {
             )}
             <div className="mt-2 border border-line bg-ground px-3 py-2.5 text-sm">
               <span className="font-num text-[11px]" style={{ color: c.color }}>直近の投稿{p.latestPost && `（${p.latestPost.atText}）`} › </span>
-              {p.latestPost ? <>{p.latestPost.text} <Link href={`/symbols/${encodeURIComponent(p.latestPost.symbol)}`} className="font-num underline">{p.latestPost.symbol} 掲示板</Link></> : <span className="text-sub">まだ投稿がありません</span>}
+              {p.latestPost ? <>{p.latestPost.text} <BoardLink board={p.latestPost.symbol} symbols={symbols} suffix=" 掲示板" className="font-num underline" /></> : <span className="text-sub">まだ投稿がありません</span>}
             </div>
           </div>
         </section>
@@ -146,7 +147,7 @@ export function AgentPageView({ page: p }: { page: AgentPage }) {
 
       <section aria-labelledby="h-dec">
         <h2 id="h-dec" className={H2}>DECISIONS · 日ごとの判断（投稿と注文票）</h2>
-        <Decisions days={p.decisions} />
+        <Decisions days={p.decisions} symbols={symbols} />
       </section>
 
       <section aria-labelledby="h-hist">

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { MARK, SPARK_H, SPARK_W, type ArenaCard, type FeedItem } from "../view/arena";
+import { BoardLink } from "./BoardLink";
 import { ModelChip } from "./ModelChip";
 import { CutPanel } from "./CutPanel";
 import { Portrait } from "./Portrait";
@@ -80,7 +81,7 @@ export function LockedCard() {
   );
 }
 
-export function LiveFeedView({ feed }: { feed: FeedItem[] }) {
+export function LiveFeedView({ feed, symbols }: { feed: FeedItem[]; symbols?: ReadonlySet<string> }) {
   return (
     <section aria-labelledby="h-feed" className="border-2 border-line bg-[#120826]">
       <h2 id="h-feed" className="border-b-2 border-line px-4 py-2.5 font-num text-sm font-normal tracking-[0.12em] text-neon-lime">
@@ -98,9 +99,7 @@ export function LiveFeedView({ feed }: { feed: FeedItem[] }) {
               {f.symbol && (
                 <>
                   {" — "}
-                  <Link href={`/symbols/${encodeURIComponent(f.symbol)}`} className="font-num underline">
-                    {f.symbol} 掲示板
-                  </Link>
+                  <BoardLink board={f.symbol} symbols={symbols} suffix=" 掲示板" className="font-num underline" />
                 </>
               )}
             </span>

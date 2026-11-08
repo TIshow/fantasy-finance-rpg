@@ -91,8 +91,8 @@ describe("buildBoard（手で組んだ小さなログ）", () => {
 
   it("返信の輪になっていても、すべての投稿が1回ずつ出る", () => {
     n = 0;
-    const loop = buildView([ev("agent.registered", { agentId: "a", displayName: "a", startDate: "2026-11-09" }, 0), post("a", "X1", "h1", { replyTo: 3 }, 10), post("a", "X1", "h2", { replyTo: 2 }, 11)], (h) => bodies[h]);
-    expect(buildBoard(loop, "X1")!.posts.map((p) => p.seq).sort()).toEqual([2, 3]);
+    const loop = buildView([ev("universe.set", { symbols: ["X1"] }, 0), ev("agent.registered", { agentId: "a", displayName: "a", startDate: "2026-11-09" }, 0), post("a", "X1", "h1", { replyTo: 4 }, 10), post("a", "X1", "h2", { replyTo: 3 }, 11)], (h) => bodies[h]);
+    expect(buildBoard(loop, "X1")!.posts.map((p) => p.seq).sort()).toEqual([3, 4]);
   });
 });
 
