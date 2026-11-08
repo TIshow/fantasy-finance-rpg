@@ -5,7 +5,7 @@
 import type { Clock, LlmBatchPort, LlmPolicy, LlmPreparedBatch } from "../contracts";
 import { jstDayOf, LLM_DAILY_COST_LIMIT, llmCostUsed } from "../events/llm-cost";
 import type { LogEvent } from "../events/types";
-import { nextBusinessDay, tradingDateFor } from "../ledger/ledger";
+import { cutoffOf, nextBusinessDay, tradingDateFor } from "../ledger/ledger";
 import type { Account } from "../ledger/types";
 import { checkDailyBatchReservations } from "../llm/batch-plan";
 import { investorPrompt, investorUserText } from "../llm/investor-prompt";
@@ -40,6 +40,9 @@ export interface DayAccess {
   append(type: "agent.run" | "llm.batch.submitted" | "llm.batch.sent" | "llm.batch.closed", payload: Payload, refs: number[]): Promise<Appended>;
 }
 
+/** 依頼してよい時刻：引けの取り込み（16:30。day.ts の scheduleOf の closeAt）のあと。その日の大引けのあとの決算の発表を入力に入れるため */
+export const llmSubmitAt = (date: string) => cutoffOf(date) + 8 * 3_600_000;
+
 export type LlmStageResult = { stage: string; status: "written" | "done" | "waiting" | "skipped"; detail?: string };
 
 const pl = (e: LogEvent) => e.payload as Payload;
@@ -72,8 +75,9 @@ export function llmRunPayload(
 }
 
 /**
- * 依頼の段。date は引けを迎えた営業日で、依頼は次の営業日（取引日）の分。今が、その取引日の締めの前の晩（取引日が今の時点の
- * 次の取引日と同じ）でなければ飛ばす。AIごとに、前の日の引け後の処理が済むまで待つ。①があれば（送ったかどうかによらず）何もしない
+ * 依頼の段。date は引けを迎えた営業日で、依頼は次の営業日（取引日）の分。今が、date の引けの取り込み（16:30）のあとで、
+ * その取引日の締めの前（取引日が今の時点の次の取引日と同じ）でなければ飛ばす（板寄せの価格だけで動く日は、引け後の処理が
+ * 9:35 の実行で済むが、依頼は 16:35 の実行まで待つ）。AIごとに、前の日の引け後の処理が済むまで待つ。①があれば（送ったかどうかによらず）何もしない
  * （②と③のあいだで止まった依頼は、受け取りの段が探す）
  */
 export async function llmSubmit(day: DayAccess, llm: LlmDeps, date: string): Promise<LlmStageResult> {
@@ -81,6 +85,7 @@ export async function llmSubmit(day: DayAccess, llm: LlmDeps, date: string): Pro
   const H = day.holidays();
   const T = nextBusinessDay(date, H);
   const now = day.clock.now();
+  if (now < llmSubmitAt(date)) return { stage, status: "skipped", detail: `before the close of ${date}` };
   if (tradingDateFor(now, H) !== T) return { stage, status: "skipped", detail: `not the evening before ${T}` };
   const events = day.events();
   const active = llm.investors.filter((a) => {

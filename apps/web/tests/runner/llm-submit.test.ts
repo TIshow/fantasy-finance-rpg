@@ -46,6 +46,16 @@ describe("依頼の段（前の営業日の引けのあと）", async () => {
     expect(Object.values(w.llm.providers).map((f) => f.sent.length)).toEqual([1, 1, 1]);
   });
 
+  it("引けの取り込み（16:30）より前は依頼しない（板寄せのあとの 9:35 の実行で引け後の処理が済んでも、大引けのあとの決算を待つ）", async () => {
+    const m = await llmWorld(undefined, { manualClock: true });
+    await m.runAt(DAYS[0]!, 6, 50);
+    const morning = await m.runAt(DAYS[0]!, 9, 35);
+    expect((await m.of("corporate_actions.applied")).some((e) => p(e).asOf === DAYS[0])).toBe(true);
+    expect(submitOf(morning)).toMatchObject({ status: "skipped", detail: `before the close of ${DAYS[0]}` });
+    expect(submitOf(await m.runAt(DAYS[0]!, 16, 35))).toMatchObject({ status: "written" });
+    expect((await m.of("llm.batch.submitted")).every((e) => e.recordedAt === jst(DAYS[0]!, 16, 35))).toBe(true);
+  });
+
   it("締めの前の晩でなければ依頼しない（古い日を回し直したとき）", async () => {
     w.clock.set(jst(DAYS[1]!, 10));
     expect(submitOf(await w.run(DAYS[0]!))).toMatchObject({ status: "skipped" });

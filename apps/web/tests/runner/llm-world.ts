@@ -23,7 +23,8 @@ export const DAYS = ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "20
 export const LLM_IDS = LLM_INVESTORS.map((a) => a.id);
 export const p = (e: LogEvent) => e.payload as Record<string, unknown>;
 
-export async function llmWorld(policy?: LlmPolicy) {
+/** manualClock：決まった時刻まで待たない（GitHub Actions と同じ。runAt で時計を合わせて回す） */
+export async function llmWorld(policy?: LlmPolicy, opts: { manualClock?: boolean } = {}) {
   const clock = new FakeClock(0);
   const holidayTables = new Map([[FIXTURE_HOLIDAYS.contentSha256, FIXTURE_HOLIDAYS]]);
   const rand = mulberry32(0x5a17);
@@ -31,7 +32,7 @@ export async function llmWorld(policy?: LlmPolicy) {
   const store = new InMemoryEventStore(values, holidayTables, clock);
   const llm = fakeLlm(clock, policy);
   const waitUntil = async (at: number) => {
-    if (at > clock.now()) clock.set(at);
+    if (!opts.manualClock && at > clock.now()) clock.set(at);
   };
   const agents = [...(await ruleAgents()), ...(await liquidityAgents(SEED))];
   const deps: RunnerDeps = { store, market: new IngestedMarketData(clock), values, holidayTables, agents, clock, waitUntil, inputDays: 5, seed: SEED, llm: llm.deps };
@@ -44,5 +45,6 @@ export async function llmWorld(policy?: LlmPolicy) {
   for (const a of [...(await ruleAgents()), ...LLM_INVESTORS]) await op("agent.registered", { agentId: a.id, displayName: a.id, startDate: DAYS[0], initialCash: INITIAL_CASH });
   const all = () => store.read(0, 1_000_000);
   const of = async (type: LogEvent["type"]) => (await all()).filter((e) => e.type === type);
-  return { clock, store, values, holidayTables, deps, llm, op, all, of, run: (d: string) => runDay(d, deps) };
+  const runAt = (d: string, h: number, m = 0) => (clock.set(jst(d, h, m)), runDay(d, deps));
+  return { clock, store, values, holidayTables, deps, llm, op, all, of, run: (d: string) => runDay(d, deps), runAt };
 }
