@@ -3,11 +3,11 @@
 import { characterOf } from "./characters";
 import { fillKey } from "./agent-page";
 import type { Intent, Stance } from "./body";
+import { INTENT_LABEL, STANCE_LABEL } from "./labels";
+export { INTENT_LABEL, STANCE_LABEL };
 import { formatJstShort, formatMonthDay, formatYenMark } from "./format";
 import type { Evidence, TimelineItem, View } from "./types";
 
-export const INTENT_LABEL: Record<Intent, string> = { strategy: "戦略", feeling: "感情", knowledge: "知識共有", news: "ニュース反応" };
-export const STANCE_LABEL: Record<Stance, { mark: string; text: string }> = { bull: { mark: "▲", text: "強気" }, bear: { mark: "▼", text: "弱気" }, neutral: { mark: "－", text: "中立" } };
 
 export interface Cite {
   seq: number;
@@ -73,9 +73,10 @@ export function buildBoard(view: View, symbol: string): Board | null {
   const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.symbol === symbol && t.qty > 0);
   const bySeq = new Map(posts.map((p) => [p.seq, p]));
   const investorIds = new Set(view.agents.map((a) => a.agentId));
+  const providers = new Map(view.models.map((m) => [m.agentId, m.provider] as const));
 
   const toPost = (p: (typeof posts)[number], depth: number): BoardPost => {
-    const c = characterOf(p.agentId, p.agentName);
+    const c = characterOf(p.agentId, p.agentName, providers.get(p.agentId));
     const linked = investorIds.has(p.agentId);
     const nextOwn = posts.find((q) => q.agentId === p.agentId && q.seq > p.seq)?.seq ?? Infinity;
     return {
@@ -112,7 +113,7 @@ export function buildBoard(view: View, symbol: string): Board | null {
   for (const t of view.timeline) if (t.kind === "valuation" && investorIds.has(t.agentId)) lastVal.set(t.agentId, t);
   const holders = [...lastVal.values()].flatMap((v) => {
     const pos = v.positions.find((x) => x.symbol === symbol && x.qty > 0);
-    const c = characterOf(v.agentId, v.agentName);
+    const c = characterOf(v.agentId, v.agentName, providers.get(v.agentId));
     return pos ? [{ agentId: v.agentId, name: c.name, color: c.color, qty: pos.qty, valueText: formatYenMark(pos.qty * pos.price), asOf: formatMonthDay(v.date), stale: pos.stale }] : [];
   }).sort((a, b) => b.qty - a.qty || (a.agentId < b.agentId ? -1 : 1));
 
