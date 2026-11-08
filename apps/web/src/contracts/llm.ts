@@ -162,8 +162,9 @@ export interface LlmBatchRequest extends LlmRequest {
 export interface LlmPreparedBatch {
   readonly request: LlmBatchRequest;
   /**
-   * 提供元で探せる名前（英数字・ハイフン・下線で1〜64文字）。agentId と tradingDate から作った前半に、"-" と sentBodyHash の
+   * 提供元で探せる名前（英数字・ハイフン・下線で1〜64文字）。前半「agentId-YYYYMMDD（取引日）」に、"-" と sentBodyHash の
    * 先頭16文字を付ける（記録の検査が末尾を確かめる）。同じAI・同じ取引日でも、本文が違えば名前が変わる。
+   * 前半は47文字まで。長ければ agentId を先頭から切り詰めて収める（名前の違いは末尾のハッシュで保たれる）。
    * 提供元のバッチ（Gemini の表示名、OpenAI のメタデータなど）と、中の1件のID（custom_id）の両方に、取れる限り入れる
    */
   readonly customId: string;
@@ -183,6 +184,8 @@ export interface LlmBatchReservation {
   customId: string;
   /** 送る本文のハッシュ（①の sentBodyHash）。find が、見つけたバッチの本文と比べる */
   sentBodyHash: string;
+  /** ①を書いた時刻（①の recordedAt）。送るのはこのあとなので、find の時刻の範囲と、not_found で閉じるまでの待ちの起点にする */
+  reservedAt: number;
   /** 予約した費用（LlmRequest.maxCost） */
   maxCost: Deciyen;
   tradingDate: string;
@@ -216,12 +219,13 @@ export type LlmSendResult =
 /**
  * 探した結果（find）。
  * - found：この予約のバッチだと確かめられた。条件は次のすべて。runner は③を書く
- *   - 提供元のバッチの作成時刻が、①の submittedAt 以上で、submittedAt から1時間（①を書ける時間）＋送るのにかかる時間の上限以内
+ *   - 提供元のバッチの作成時刻が、①の reservedAt の5分前（時計のずれの余裕）から、reservedAt ＋ 送る時間の上限（10分。send は
+ *     これを超えたら打ち切って billingUnknown を返す）＋ 5分 までの範囲
  *   - その範囲で customId の名前を持つ候補が、ちょうど1つ（2つ以上なら確かめられないので not_found）
  *   - 本文を取り出せる提供元では、そのバイト列の SHA-256 が①の sentBodyHash と同じ
  *   名前を持てない、処理中に中身が見えないなど、これを確かめられない提供元（Anthropic など）は found を返さず not_found にする
- * - not_found：見つからなかった、または確かめられなかった。runner は、submittedAt から1時間たつまでは閉じずに、次の実行で探し直す
- *   （一覧への反映が遅れることがあるため）。1時間を過ぎていれば、result: "failed"・costUnknown: true・費用 maxCost の
+ * - not_found：見つからなかった、または確かめられなかった。runner は、reservedAt から40分（送る時間の上限10分＋一覧への反映の余裕30分）
+ *   たつまでは閉じずに、次の実行で探し直す（送っている最中や、一覧への反映が遅れている間に閉じないため）。過ぎていれば、result: "failed"・costUnknown: true・費用 maxCost の
  *   llm.batch.closed で閉じる（課金されたか分からないので、予約した費用を使ったものとして数える）
  * - unknown：一覧が読めなかった。あとで探し直す。取引日の締め（8:30）を過ぎても分からなければ、not_found と同じに閉じる
  * 閉じたあとも、その取引日の締めまでは探し続け、見つけたら abandon に渡して取り消しを頼む（返った結果は記録しない。費用は閉じた記録の
@@ -298,7 +302,10 @@ export interface LlmBatchPort {
    * 超えるときも、RangeError で reject
    */
   prepare(request: LlmBatchRequest): Promise<LlmPreparedBatch>;
-  /** ①を書いたあとに、prepared.body をそのまま提供元に送る。batchSeq は①の seq（提供元の名前などに使ってよい） */
+  /**
+   * ①を書いたあとに、prepared.body をそのまま提供元に送る。batchSeq は①の seq（提供元の名前などに使ってよい）。
+   * 送る時間の上限は10分。超えたら打ち切って billingUnknown を返す
+   */
   send(prepared: LlmPreparedBatch, batchSeq: number): Promise<LlmSendResult>;
   /** ②と③のあいだで止まったあとに、提供元の一覧から customId の名前でバッチを探す。見つけても取り消さない */
   find(reservation: LlmBatchReservation): Promise<LlmFindResult>;

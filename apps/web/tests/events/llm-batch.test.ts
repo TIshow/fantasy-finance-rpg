@@ -215,6 +215,12 @@ describe("llm.batch.submitted", () => {
     [{ outputCentsPer10MTok: "5000" }, "prices and max token counts must be non-negative integers"],
     [{ maxInputTokens: 1.5 }, "prices and max token counts must be non-negative integers"],
     [{ maxOutputTokens: null }, "prices and max token counts must be non-negative integers"],
+    // 単価やトークン数の上限が0だと、閉じたときの費用がいつも0になり、予約がまるごと枠に戻る
+    [{ inputCentsPer10MTok: 0 }, "prices and max token counts must be at least 1"],
+    [{ outputCentsPer10MTok: 0 }, "prices and max token counts must be at least 1"],
+    [{ inputCentsPer10MTok: 0, outputCentsPer10MTok: 0 }, "prices and max token counts must be at least 1"],
+    [{ maxInputTokens: 0 }, "prices and max token counts must be at least 1"],
+    [{ maxOutputTokens: 0, bodyMaxOutputTokens: 0 }, "prices and max token counts must be at least 1"],
     [{ maxOutputTokens: 4_000, bodyMaxOutputTokens: 4_001 }, "bodyMaxOutputTokens must be a positive integer up to maxOutputTokens"],
     // 予約は上限のトークン数から出した費用（144）以上
     [{ maxCost: 143 }, "maxCost must be at least 144 (the cost of the max tokens)"],
@@ -282,6 +288,9 @@ describe("llm.batch.closed", () => {
     // 答えを受け取ったなら、出力のトークン数は1以上
     [{ result: "collected", cost: 32, inputTokens: 20_000, outputTokens: 0 }, "a collected batch must have output tokens"],
     [{ result: "collected", cost: 0, inputTokens: 0, outputTokens: 0 }, "a collected batch must have output tokens"],
+    // 入力のトークン数も1以上（キャッシュの分を含めて数える）
+    [{ result: "collected", cost: 12, inputTokens: 0, outputTokens: 1_500 }, "a collected batch must have input tokens"],
+    [{ result: "collected", cost: 12, inputTokens: 0, outputTokens: 1_500, cacheReadInputTokens: 0 }, "a collected batch must have input tokens"],
     // 送れなかった理由は、送っていない依頼を費用0で閉じるときだけ
     [{ notCreatedError: "timeout" }, "notCreatedError is required exactly when a batch that was not sent closes with cost 0"],
     // キャッシュへの書き込みは入力の2倍：1万トークンで 3.2円 を足す
@@ -318,6 +327,10 @@ describe("llm.batch.closed", () => {
     const log2 = await setup();
     const s3 = await submitAndSend(log2, jst("2026-11-09", 16, 35));
     await ok(log2, closed(jst("2026-11-10", 6, 50), s3.seq, { cost: 76, cacheCreationInputTokens: 10_000, cacheReadInputTokens: 0 }));
+    // 入力がキャッシュの読み出しだけでも、受け取った答えとして書ける：(2万×1000 ＋ 1,500×5000) セント/1,000万 × 160円 ＝ 4.4円
+    const log3 = await setup();
+    const s5 = await submitAndSend(log3, jst("2026-11-09", 16, 35));
+    await ok(log3, closed(jst("2026-11-10", 6, 50), s5.seq, { inputTokens: 0, cacheReadInputTokens: 20_000 }));
   });
 
   it("送った記録（③）のない依頼は failed でだけ閉じられる。費用は、送っていないと確かなら0（トークン数も0）、分からなければ予約した費用", async () => {

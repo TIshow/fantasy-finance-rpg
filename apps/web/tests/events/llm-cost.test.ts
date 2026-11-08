@@ -107,6 +107,32 @@ describe("llmCostProblems", () => {
   });
 });
 
+describe("llmCostProblems：受け取った答えのトークン数", () => {
+  /** 上限（入力2万・出力1,000）の依頼と、その閉じた記録 */
+  const pair = (result: string, tokens: Record<string, number>): Rec[] => {
+    const [sub, close] = log(["sub", at(16, 35), 150], ["close", jst("2026-11-10", 6, 50), 1, 40]);
+    return [
+      { ...sub!, payload: { ...(sub!.payload as object), maxInputTokens: 20_000, bodyMaxOutputTokens: 1_000 } },
+      { ...close!, payload: { ...(close!.payload as object), result, ...tokens } },
+    ];
+  };
+
+  it("上限ちょうどは挙げない。入力（キャッシュの分を含む）や出力が上限を超えたら、閉じた記録を挙げる", () => {
+    expect(llmCostProblems(pair("collected", { inputTokens: 20_000, outputTokens: 1_000 }))).toEqual([]);
+    expect(llmCostProblems(pair("collected", { inputTokens: 20_001, outputTokens: 1_001 }))).toEqual([
+      { day: D, kind: "input_tokens", seq: 2, used: 20_001, limit: 20_000 },
+      { day: D, kind: "output_tokens", seq: 2, used: 1_001, limit: 1_000 },
+    ]);
+    expect(llmCostProblems(pair("collected", { inputTokens: 10_000, cacheCreationInputTokens: 5_000, cacheReadInputTokens: 5_001, outputTokens: 1 }))).toEqual([
+      { day: D, kind: "input_tokens", seq: 2, used: 20_001, limit: 20_000 },
+    ]);
+  });
+
+  it("答えを受け取っていない閉じ方（expired・failed）は挙げない", () => {
+    expect(llmCostProblems(pair("expired", { inputTokens: 30_000, outputTokens: 2_000 }))).toEqual([]);
+  });
+});
+
 describe("openLlmBatches・llmSentOf・llmReservationOf・llmTicketOf", () => {
   it("閉じていない依頼を記録の順で返し、依頼と送った記録から受け取りの控えを作り直す", () => {
     const events = log(["sub", at(16, 35), 150, "alpha"], ["sub", at(16, 36), 200, "beta"], ["sent", at(16, 37), 2], ["sent", at(16, 38), 1], ["close", jst("2026-11-10", 6, 50), 1, 40]);
@@ -115,7 +141,7 @@ describe("openLlmBatches・llmSentOf・llmReservationOf・llmTicketOf", () => {
     const sent = llmSentOf(events, 2);
     expect(sent?.seq).toBe(3);
     const ticket: LlmBatchTicket | null = llmTicketOf(open[0]!, sent);
-    expect(ticket).toEqual({ batchSeq: 2, agentId: "beta", provider: "anthropic", modelId: "m", batchId: "batch_2", customId: "c2", sentBodyHash: "b".repeat(64), maxCost: 200, tradingDate: "2026-11-10", submittedAt: at(16, 36) });
+    expect(ticket).toEqual({ batchSeq: 2, agentId: "beta", provider: "anthropic", modelId: "m", batchId: "batch_2", customId: "c2", sentBodyHash: "b".repeat(64), reservedAt: at(16, 36), maxCost: 200, tradingDate: "2026-11-10", submittedAt: at(16, 36) });
   });
 
   it("送った記録がまだない依頼（②と③のあいだで止まった）は、控えを作れず（null）、予約の控えから探す", () => {
@@ -123,7 +149,7 @@ describe("openLlmBatches・llmSentOf・llmReservationOf・llmTicketOf", () => {
     expect(llmSentOf(events, 1)).toBeNull();
     expect(llmTicketOf(events[0]!, null)).toBeNull();
     const r: LlmBatchReservation = llmReservationOf(events[0]!);
-    expect(r).toEqual({ batchSeq: 1, agentId: "alpha", provider: "anthropic", modelId: "m", customId: "c1", sentBodyHash: "b".repeat(64), maxCost: 150, tradingDate: "2026-11-10", submittedAt: at(16, 35) });
+    expect(r).toEqual({ batchSeq: 1, agentId: "alpha", provider: "anthropic", modelId: "m", customId: "c1", sentBodyHash: "b".repeat(64), reservedAt: at(16, 35), maxCost: 150, tradingDate: "2026-11-10", submittedAt: at(16, 35) });
     // 閉じていない依頼のうち、送った記録のないもの
     expect(openLlmBatches(events).filter((e) => llmSentOf(events, e.seq) === null).map((e) => e.seq)).toEqual([1]);
   });
