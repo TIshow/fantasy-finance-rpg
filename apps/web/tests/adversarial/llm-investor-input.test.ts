@@ -144,9 +144,40 @@ describe("読めない形の訂正（安全側に外す）", () => {
     expect(r.text).not.toContain("2回目の訂正");
   });
 
-  it.fails("【低】読める訂正（投稿 A の訂正）が refs で別の投稿 B も指していれば、B も外す（今は B が訂正の印なしで出る）", () => {
-    const r = shown(fix({ kind: "post", targetSeq: 14, newBodyHash: "h8" }, [14, 10]));
-    expect(r.posts).not.toContain(10);
+  // 前の【低】は lead の決定2で、今の動きが正しいと決まった：訂正する対象は targetSeq の1件だけで、refs のほかの投稿は引用
+  it("読める訂正（投稿 A の訂正）が refs で別の投稿 B も指していても、B は引用で、外さず、訂正の印も付けない（lead の決定2）", () => {
+    const log = fix({ kind: "post", targetSeq: 14, newBodyHash: "h8" }, [14, 10]);
+    const input = investorInputOf(log, ctx());
+    const b = input.posts.find((x) => x.seq === 10)!;
+    const a = input.posts.find((x) => x.seq === 14)!;
+    expect([b.text, b.correctionSeq, a.text, a.correctionSeq]).toEqual(["金曜の引けのあとの投稿", undefined, "依頼のあとの訂正", 20]);
+    expect(shown(log).withheld).toBe(0);
+  });
+
+  it("記録の形に合う、新しい本文のハッシュのない投稿の訂正は、対象だけを外す（引用の投稿は外さない。lead の決定2）", () => {
+    const r = shown(fix({ kind: "post", targetSeq: 14, reason: "誤り" }, [14, 10]));
+    expect([r.posts, r.withheld]).toEqual([[10, 16], 1]);
+  });
+
+  it("入力データの訂正が refs で投稿を引用しても、投稿は外さず、訂正の印も付けない。対象が投稿の（記録の検査を通らない）入力データの訂正なら、その投稿だけ外す", () => {
+    const quoted = investorInputOf(fix({ kind: "input", targetSeq: 6, reason: "値の訂正", newBodyHash: "h8" }, [6, 10, 14]), ctx());
+    expect(quoted.posts.map((x) => [x.seq, x.correctionSeq])).toEqual([[10, undefined], [14, undefined], [16, 18]]);
+    expect(shown(fix({ kind: "input", targetSeq: 10, reason: "r" }, [10, 14])).posts).toEqual([14, 16]);
+  });
+
+  it("seq が最大の訂正だけが効く（7d9d029）：読めない訂正（refs で A と B を指す）のあとに A の読める訂正が来れば、A は印つきで戻り、B は外したまま。記録の並びが入れ替わっていても seq で決まる", () => {
+    const rows: Row[] = [...ROWS.slice(0, 19), ["correction.issued", jst(PREV, 16, 30), { reason: "誤り" }, [10, 14]], ["correction.issued", jst(PREV, 16, 31), { kind: "post", targetSeq: 10, newBodyHash: "h8" }, [10]]];
+    const log = logOf(rows);
+    for (const l of [log, [...log].reverse()]) {
+      const input = investorInputOf(l, ctx());
+      expect(input.posts.map((x) => [x.seq, x.correctionSeq]).sort((a, b) => a[0]! - b[0]!)).toEqual([[10, 21], [16, 18]]);
+      expect(investorUserText(input).omitted.withheld).toBe(1);
+    }
+  });
+
+  it("読める訂正の targetSeq が投稿で、refs に targetSeq を入れていない（記録の検査を通らない）形でも、引用の投稿は外さない", () => {
+    const r = shown(fix({ kind: "post", targetSeq: 14, newBodyHash: "h8" }, [10]));
+    expect([r.posts, r.withheld]).toEqual([[10, 14, 16], 0]);
   });
 });
 
