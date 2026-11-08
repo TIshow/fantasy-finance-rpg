@@ -57,8 +57,10 @@ const sub = (at: number, agentId: string, tradingDate: string, maxCost: number, 
   actor: "system",
   refs: [],
   payload: {
-    agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: BODY, customId: `${agentId}-${tradingDate}`, maxCost, tradingDate,
-    submittedAt: at, yenPerUsd: 160, ...PRICE, maxInputTokens: 0, maxOutputTokens: 0, ...extra,
+    agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: BODY, maxCost, tradingDate,
+    submittedAt: at, yenPerUsd: 160, ...PRICE, maxInputTokens: 1, maxOutputTokens: 1, bodyMaxOutputTokens: 1, ...extra,
+    // customId の末尾は「-」＋本文のハッシュの先頭16文字（PR #210 の 1ce37a0）。extra.customId は、その前の部分
+    customId: `${String(extra.customId ?? `${agentId}-${tradingDate}`)}-${String(extra.sentBodyHash ?? "b".repeat(64)).slice(0, 16)}`,
   },
 });
 const close = (at: number, s: LogEvent, cost: number, extra: Record<string, unknown> = {}): Draft => ({
@@ -67,7 +69,8 @@ const close = (at: number, s: LogEvent, cost: number, extra: Record<string, unkn
   actor: "system",
   refs: [s.seq],
   payload: {
-    batchSeq: s.seq, agentId: (s.payload as { agentId: string }).agentId, result: "collected", cost, inputTokens: 0, outputTokens: cost,
+    batchSeq: s.seq, agentId: (s.payload as { agentId: string }).agentId, // 受け取り（collected）は入力・出力のトークン数がどちらも1以上（2962eda）。1トークン＝1なので、費用2以上なら入力1・出力（費用−1）にする
+    result: "collected", cost, ...((extra.result ?? "collected") === "collected" && cost >= 2 ? { inputTokens: 1, outputTokens: cost - 1 } : { inputTokens: 0, outputTokens: cost }),
     ...(extra.costUnknown === true ? {} : PRICE), ...extra,
   },
 });
@@ -77,7 +80,7 @@ const sent = (at: number, s: LogEvent, extra: Record<string, unknown> = {}): Dra
   recordedAt: at,
   actor: "system",
   refs: [s.seq],
-  payload: { batchSeq: s.seq, agentId: (s.payload as { agentId: string }).agentId, batchId: `batch_${s.seq}`, ...extra },
+  payload: { batchSeq: s.seq, agentId: (s.payload as { agentId: string }).agentId, provider: (s.payload as { provider: string }).provider, batchId: `batch_${s.seq}`, ...extra },
 });
 /** ① を書き、すぐに ③ も書く（送れた依頼）。① を返す */
 async function okSent(log: EventLog, d: Draft): Promise<LogEvent> {
@@ -235,19 +238,21 @@ describe("送る前の予約（①）と、送ったあとの記録（③）の�
     const log = await setup();
     let at = jst(DAY, 16, 0);
     const mismatches: string[] = [];
-    for (let i = 0; i < 1200; i++) {
+    /** 断られた理由ごとの数（試した範囲が偏っていないかを、失敗の出力で見られるように） */
+    const refused = new Map<string, number>();
+    for (let i = 0; i < 2400; i++) {
       at += pick([0, 1, 60_000, 60_000, 3_600_000]);
       const agentId = pick(["alpha", "beta", "gamma", "delta"]);
       const subs = log.events.filter((e) => e.type === "llm.batch.submitted");
       const closes = log.events.filter((e) => e.type === "llm.batch.closed");
       let d: Draft;
-      const kind = pick(["sub", "sent", "sent", "close", "run"]);
+      const kind = pick(["sub", "sent", "sent", "close", "run", "run"]);
       if (kind === "sub" || subs.length === 0) {
         const next = tradingDateFor(at, TABLE.dates);
         const td = pick([next, next, next, "2026-11-10", "2026-11-11", "2026-11-12"]);
-        d = sub(at, agentId, td, pick([1, 100, 100, 1000]), {
+        d = sub(at, agentId, td, pick([1, 2, 100, 100, 1000]), {
           submittedAt: at - pick([0, 0, 1, 3_600_000, 3_600_001]),
-          maxInputTokens: pick([0, 0, 100, 10_000_000]),
+          maxInputTokens: pick([0, 1, 1, 100, 10_000_000]),
           yenPerUsd: pick([160, 160, 0, 1]),
           // ①に batchId を書くのは、知らない項目として断られるはず
           ...(rnd() < 0.15 ? { batchId: pick([null, `b${i}`]) } : {}),
@@ -261,23 +266,25 @@ describe("送る前の予約（①）と、送ったあとの記録（③）の�
         const sentSeqs = new Set(log.events.filter((e) => e.type === "llm.batch.sent").map((e) => (e.payload as { batchSeq: number }).batchSeq));
         const withSent = subs.filter((e) => sentSeqs.has(e.seq));
         const s = withSent.length > 0 && rnd() < 0.7 ? pick(withSent) : pick(subs);
-        const cost = pick([0, 1, 50, (s.payload as { maxCost: number }).maxCost]);
-        d = close(at, s, cost, pick([{}, { result: "expired", costUnknown: true }, { result: "failed" }, { outputTokens: cost + 1 }, { inputCentsPer10MTok: 700_000 }, { cacheReadInputTokens: 1 }]));
+        const cost = pick([0, 1, 2, 2, 50, (s.payload as { maxCost: number }).maxCost]);
+        d = close(at, s, cost, pick([{}, {}, {}, { result: "expired", costUnknown: true }, { result: "failed" }, { outputTokens: cost + 1 }, { inputCentsPer10MTok: 700_000 }, { cacheReadInputTokens: 1 }]));
         if (rnd() < 0.2) d = { ...d, payload: { ...d.payload, agentId } };
       } else {
         const collected = closes.filter((e) => (e.payload as { result: string }).result === "collected");
-        const c = collected.length > 0 && rnd() < 0.7 ? pick(collected) : pick(closes);
+        // 締めの前に指せるよう、多くは最後に受け取った記録を指す
+        const c = collected.length > 0 && rnd() < 0.7 ? collected.at(-1)! : pick(closes);
         d = run(at, pick([agentId, (c.payload as { agentId: string }).agentId]), c.seq, pick([{}, { sentBodyHash: "a".repeat(64) }]));
       }
       const can = await log.canAppend(d);
       const r = await log.append(d);
+      if (!r.ok) refused.set(`${d.type}: ${r.reason}`, (refused.get(`${d.type}: ${r.reason}`) ?? 0) + 1);
       if ((can === null) !== r.ok || (!r.ok && can !== r.reason)) mismatches.push(`#${i} ${JSON.stringify(d)} can=${String(can)} append=${r.ok ? "ok" : r.reason}`);
     }
     expect(mismatches).toEqual([]);
     // 通る記録と断られる記録の両方を比べたことを確かめる
     const written = (t: string) => log.events.filter((e) => e.type === t).length;
     const counts = ["llm.batch.submitted", "llm.batch.sent", "llm.batch.closed", "agent.run"].map(written);
-    expect(counts.every((n) => n >= 2), counts.join("/")).toBe(true);
+    expect(counts.every((n) => n >= 2), `${counts.join("/")} ${JSON.stringify([...refused])}`).toBe(true);
   });
 });
 
@@ -303,25 +310,37 @@ describe("実際の費用は、トークン数と料金から出した値ちょ�
     }
   });
 
-  // 【低・記録からは見分けられない】予約の料金そのものは、記録の検査では本物の料金表と突き合わせない。予約の料金を0にすれば、
-  // maxCost は1でよく、閉じた記録の費用も0になる。料金が本物かは、runner が料金表（src/llm/cost.ts など）から入れることに頼る
-  it("予約の料金を0にすれば、どれだけトークンを使っても使用済みは1（予約）から0（閉じたあと）になる", async () => {
+  // 前の【低】（予約の料金を0にすれば、閉じた記録の費用も0になる）は、2962eda で単価と上限のトークン数を1以上にして断るようになった
+  it("単価0・上限のトークン数0の予約は断る（2962eda で直った）", async () => {
     const log = await setup();
-    const zero = { inputCentsPer10MTok: 0, outputCentsPer10MTok: 0 };
-    const t = await okSent(log, sub(jst(DAY, 16, 35), "beta", "2026-11-10", 1, { ...zero, maxInputTokens: 10_000_000, maxOutputTokens: 10_000_000 }));
-    expect(llmCostUsed(log.events, DAY)).toBe(1);
-    await ok(log, close(jst(DAY, 17), t, 0, { inputTokens: 10_000_000, outputTokens: 10_000_000, ...zero }));
-    expect(llmCostUsed(log.events, DAY)).toBe(0);
+    const at = jst(DAY, 16, 35);
+    const want = "prices and max token counts must be at least 1";
+    for (const extra of [{ inputCentsPer10MTok: 0 }, { outputCentsPer10MTok: 0 }, { inputCentsPer10MTok: 0, outputCentsPer10MTok: 0 }, { maxInputTokens: 0 }, { maxOutputTokens: 0, bodyMaxOutputTokens: 0 }, { maxInputTokens: 0, maxOutputTokens: 0 }]) {
+      expect(await reason(log, sub(at, "beta", "2026-11-10", 1, { maxInputTokens: 10_000_000, maxOutputTokens: 10_000_000, ...extra })), JSON.stringify(extra)).toBe(want);
+    }
+  });
+
+  // 【低・記録からは見分けられない】単価そのものは、記録の検査では本物の料金表と突き合わせない。単価を1（1,000万トークンあたり1セント）にすれば、
+  // 1,000万トークンずつ使っても使用済みはごくわずか。料金が本物かは、runner が料金表から入れることに頼る（前と同じ、残る限界）
+  it("単価を1まで下げれば、1,000万トークンずつ使っても使用済みはわずかで済む（記録の検査の外）", async () => {
+    const log = await setup();
+    const tiny = { inputCentsPer10MTok: 1, outputCentsPer10MTok: 1 };
+    const t = await okSent(log, sub(jst(DAY, 16, 35), "beta", "2026-11-10", 32, { ...tiny, maxInputTokens: 10_000_000, maxOutputTokens: 10_000_000, bodyMaxOutputTokens: 10_000_000 }));
+    const want = llmTokenCost({ inputTokens: 10_000_000, outputTokens: 10_000_000 }, { yenPerUsd: 160, ...tiny })!;
+    await ok(log, close(jst(DAY, 17), t, want, { inputTokens: 10_000_000, outputTokens: 10_000_000, ...tiny }));
+    expect(llmCostUsed(log.events, DAY)).toBe(want);
+    // 合わせて2,000万トークンでも3.2円
+    expect(want).toBe(32);
   });
 
   it("予約と違う料金・料金の欠け・悪い値は断る。費用が分からない記録に料金があれば断る。閉じた記録に yenPerUsd は書けない", async () => {
     const log = await setup();
     const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000));
     const bad = "the price must equal the reserved price";
-    expect(await reason(log, close(jst(DAY, 17), s, 1, { inputCentsPer10MTok: 625_001 }))).toBe(bad);
-    expect(await reason(log, close(jst(DAY, 17), s, 1, { outputCentsPer10MTok: 625_001 }))).toBe(bad);
+    expect(await reason(log, close(jst(DAY, 17), s, 2, { inputCentsPer10MTok: 625_001 }))).toBe(bad);
+    expect(await reason(log, close(jst(DAY, 17), s, 2, { outputCentsPer10MTok: 625_001 }))).toBe(bad);
     for (const v of [-1, 0.5, "625000", null, undefined, 625_000.0000001]) {
-      expect(await reason(log, close(jst(DAY, 17), s, 1, { inputCentsPer10MTok: v })), String(v)).toBe(bad);
+      expect(await reason(log, close(jst(DAY, 17), s, 2, { inputCentsPer10MTok: v })), String(v)).toBe(bad);
     }
     expect(await reason(log, close(jst(DAY, 17), s, 1000, { result: "expired", costUnknown: true, ...PRICE }))).toBe("an unknown cost has no price");
     expect(await reason(log, close(jst(DAY, 17), s, 1000, { result: "expired", costUnknown: true, inputCentsPer10MTok: 0 }))).toBe("an unknown cost has no price");
@@ -391,13 +410,14 @@ describe("キャッシュのトークン", () => {
   // キャッシュを使う依頼では、実際の費用が予約を超えうる。超えた分は、上限の検査がその日の合計で挙げる（予約の時点では止まらない）
   it("上限のトークン数ちょうどの予約でも、キャッシュへの書き込みがあれば実際の費用は予約を超え、その日の合計で挙がる", async () => {
     const log = await setup();
-    const maxTok = { inputTokens: 300_000, outputTokens: 0 };
+    // 受け取った記録は出力のトークン数が1以上なので、出力の上限も1にする（1ce37a0）
+    const maxTok = { inputTokens: 300_000, outputTokens: 1 };
     const maxCost = llmTokenCost(maxTok, { yenPerUsd: 160, ...SONNET })!;
-    const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", maxCost, { ...SONNET, maxInputTokens: maxTok.inputTokens }));
+    const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", maxCost, { ...SONNET, maxInputTokens: maxTok.inputTokens, maxOutputTokens: 1 }));
     await okSent(log, sub(jst(DAY, 16, 36), "beta", "2026-11-10", 1000 - maxCost));
-    const usage = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 300_000 };
+    const usage = { inputTokens: 0, outputTokens: 1, cacheCreationInputTokens: 300_000 };
     const cost = llmTokenCost(usage, { yenPerUsd: 160, ...SONNET })!;
-    expect(cost).toBe(maxCost * 2);
+    expect(cost).toBeGreaterThanOrEqual(maxCost * 2 - 1);
     await ok(log, close(jst(DAY, 17), s, cost, { ...usage, ...SONNET }));
     expect(llmCostProblems(log.events).map((p) => p.kind)).toEqual(["total"]);
   });
@@ -435,9 +455,10 @@ describe("maxCost と上限のトークン数", () => {
   // 記録に残る yenPerUsd で確かめる決まり（core の判断）。owner の決めた160と違う値でも通る。値が正しいかは記録の検査の外
   it("yenPerUsd は160に決め打ちされていない（1でも通り、費用は160分の1になる）", async () => {
     const log = await setup();
-    const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 10, { yenPerUsd: 1, ...SONNET, maxInputTokens: 1_000_000 }));
+    const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 11, { yenPerUsd: 1, ...SONNET, maxInputTokens: 1_000_000 }));
     const want = llmTokenCost({ inputTokens: 1_000_000, outputTokens: 0 }, { yenPerUsd: 1, ...SONNET })!;
-    await ok(log, close(jst(DAY, 17), s, want, { inputTokens: 1_000_000, outputTokens: 0, ...SONNET }));
+    // 出力のない受け取りは書けない（1ce37a0）ので、入力だけ課金された打ち切りとして閉じる
+    await ok(log, close(jst(DAY, 17), s, want, { result: "expired", inputTokens: 1_000_000, outputTokens: 0, ...SONNET }));
     expect(want).toBe(10);
     expect(llmTokenCost({ inputTokens: 1_000_000, outputTokens: 0 }, { yenPerUsd: 160, ...SONNET })).toBe(1600);
   });
@@ -453,7 +474,7 @@ describe("agent.run の batchSeq（元になったバッチ）", () => {
     const dl = await okSent(log, sub(jst(DAY, 16, 38), "delta", "2026-11-10", 100));
     const ca = await ok(log, close(jst("2026-11-10", 6, 50), a, 40));
     const cb = await ok(log, close(jst("2026-11-10", 6, 51), b, 100, { result: "expired", costUnknown: true }));
-    const cg = await ok(log, close(jst("2026-11-10", 6, 52), g, 0, { result: "failed" }));
+    const cg = await ok(log, close(jst("2026-11-10", 6, 52), g, 0, { result: "failed", notCreatedError: "timeout" }));
     const cd = await ok(log, close(jst("2026-11-10", 6, 53), dl, 10));
     return { log, a, ca, cb, cg, cd };
   }

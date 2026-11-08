@@ -42,14 +42,19 @@ async function setup(agents = ["alpha", "beta", "gamma"]) {
 
 /** 1トークン＝0.1円ちょうどになる料金（1ドル160円で、1,000万トークンあたり625,000セント）。費用とトークン数を同じ数にできる */
 const PRICE = { inputCentsPer10MTok: 625_000, outputCentsPer10MTok: 625_000 };
+
+/** 上限のトークン数1・1でも予約が1で済む、ごく安い料金（maxCost 1 の予約に使う。2962eda で上限のトークン数は1以上） */
+const CHEAP = { inputCentsPer10MTok: 1, outputCentsPer10MTok: 1 };
 const sub = (at: number, agentId: string, tradingDate: string, maxCost: number, extra: Record<string, unknown> = {}): Draft => ({
   type: "llm.batch.submitted",
   recordedAt: at,
   actor: "system",
   refs: [],
   payload: {
-    agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: "b".repeat(64), customId: `${agentId}-${tradingDate}`, maxCost, tradingDate,
-    submittedAt: at, yenPerUsd: 160, ...PRICE, maxInputTokens: 0, maxOutputTokens: 0, ...extra,
+    agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: "b".repeat(64), maxCost, tradingDate,
+    submittedAt: at, yenPerUsd: 160, ...PRICE, maxInputTokens: 1, maxOutputTokens: 1, bodyMaxOutputTokens: 1, ...extra,
+    // customId の末尾は「-」＋本文のハッシュの先頭16文字（PR #210 の 1ce37a0）。extra.customId は、その前の部分
+    customId: `${String(extra.customId ?? `${agentId}-${tradingDate}`)}-${String(extra.sentBodyHash ?? "b".repeat(64)).slice(0, 16)}`,
   },
 });
 const close = (at: number, s: LogEvent, cost: number, extra: Record<string, unknown> = {}): Draft => ({
@@ -58,7 +63,8 @@ const close = (at: number, s: LogEvent, cost: number, extra: Record<string, unkn
   actor: "system",
   refs: [s.seq],
   payload: {
-    batchSeq: s.seq, agentId: (s.payload as { agentId: string }).agentId, result: "collected", cost, inputTokens: 0, outputTokens: cost,
+    batchSeq: s.seq, agentId: (s.payload as { agentId: string }).agentId, // 受け取り（collected）は入力・出力のトークン数がどちらも1以上（2962eda）。1トークン＝1なので、費用2以上なら入力1・出力（費用−1）にする
+    result: "collected", cost, ...((extra.result ?? "collected") === "collected" && cost >= 2 ? { inputTokens: 1, outputTokens: cost - 1 } : { inputTokens: 0, outputTokens: cost }),
     ...(extra.costUnknown === true ? {} : PRICE), ...extra,
   },
 });
@@ -68,7 +74,7 @@ const sent = (at: number, s: LogEvent, extra: Record<string, unknown> = {}): Dra
   recordedAt: at,
   actor: "system",
   refs: [s.seq],
-  payload: { batchSeq: s.seq, agentId: (s.payload as { agentId: string }).agentId, batchId: `batch_${s.seq}`, ...extra },
+  payload: { batchSeq: s.seq, agentId: (s.payload as { agentId: string }).agentId, provider: (s.payload as { provider: string }).provider, batchId: `batch_${s.seq}`, ...extra },
 });
 /** ① を書き、すぐに ③ も書く（送れた依頼）。① を返す */
 async function okSent(log: EventLog, d: Draft): Promise<LogEvent> {
@@ -141,7 +147,8 @@ describe("上限（1日1,000＝100円）を超えた使い方を、記録から�
     await ok(log, close(jst("2026-11-10", 6, 50), a, 300));
     expect(llmCostUsed(log.events, DAY)).toBe(1200);
     expect(llmCostUsed(log.events, "2026-11-10")).toBe(0);
-    expect(llmCostProblems(log.events).map((p) => p.kind)).toEqual(["total"]);
+    // 出力のトークン数（299）が本文の出力の上限（1）を超えているので、output_tokens も挙がる（2962eda）
+    expect(llmCostProblems(log.events).map((p) => p.kind)).toEqual(["total", "output_tokens"]);
   });
 
   it("閉じない依頼は、何日たっても予約のまま数え続ける（打ち切りを書かなくても枠は空かない）", async () => {
@@ -178,7 +185,7 @@ describe("上限（1日1,000＝100円）を超えた使い方を、記録から�
   it("③のない①を、送っていないとして費用0の failed で閉じると、その日の枠は空く（lead の決定のとおり）", async () => {
     const log = await setup();
     const a = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 700));
-    await ok(log, close(jst(DAY, 16, 36), a, 0, { result: "failed" }));
+    await ok(log, close(jst(DAY, 16, 36), a, 0, { result: "failed", notCreatedError: "timeout" }));
     expect(llmCostUsed(log.events, DAY)).toBe(0);
     // 閉じた①には③を書けない（閉じたあとに送ったことにして、0の費用を隠すことはできない）
     expect(await reason(log, sent(jst(DAY, 16, 37), a))).toBe("the batch is already closed");
@@ -204,9 +211,9 @@ describe("上限（1日1,000＝100円）を超えた使い方を、記録から�
     const log = await setup();
     const a = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 600));
     await ok(log, close(jst("2026-11-10", 6, 50), a, 900));
-    expect(await reason(log, close(jst("2026-11-10", 7, 20), a, 0, { result: "expired" }))).toMatch(new RegExp(`duplicate key llmclosed:${a.seq}$`));
+    expect(await reason(log, close(jst("2026-11-10", 7, 20), a, 2))).toMatch(new RegExp(`duplicate key llmclosed:${a.seq}$`));
     // 一意キーを付けずに2つ目を足した保存済みログ（DBに書ける者の改ざん）は、照合でキーを作り直すので落ちる
-    const second = { ...draftOf(log.events.at(-1)!), recordedAt: jst("2026-11-10", 7, 20), keys: [], payload: { ...(log.events.at(-1)!.payload as object), cost: 0, outputTokens: 0 } };
+    const second = { ...draftOf(log.events.at(-1)!), recordedAt: jst("2026-11-10", 7, 20), keys: [], payload: { ...(log.events.at(-1)!.payload as object), cost: 2, outputTokens: 1 } };
     const forged = await forge([...log.events.map(draftOf), second]);
     expect(await admitAll(forged)).toMatch(new RegExp(`duplicate key llmclosed:${a.seq}$`));
     const withKey = await forge([...log.events.map(draftOf), { ...second, keys: [`llmclosed:${a.seq}`] }]);
@@ -241,7 +248,7 @@ describe("閉じた記録が指す依頼", () => {
     const log = await setup();
     // ③のない①を送れなかったとして閉じる（①と閉じた記録が隣り合うように）
     const a = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100));
-    await ok(log, close(jst(DAY, 16, 35), a, 0, { result: "failed" }));
+    await ok(log, close(jst(DAY, 16, 35), a, 0, { result: "failed", notCreatedError: "timeout" }));
     const d = log.events.map(draftOf);
     // 連鎖を作り直すこと自体ができない（refs は前の記録しか指せない）。refs を消して作り直しても、中身の batchSeq が refs にないので照合で落ちる
     await expect(forge([...d.slice(0, -2), d.at(-1)!, d.at(-2)!])).rejects.toThrow(/refs must point to earlier events/);
@@ -280,7 +287,7 @@ describe("書ける者", () => {
       expect(await reason(log, { ...sent(jst(DAY, 17), b), actor }), actor).toBe("llm.batch.sent must be written by system");
     }
     // 保存済みログで書いた者を AI に書き換えても、照合で落ちる
-    await ok(log, close(jst(DAY, 17), a, 1));
+    await ok(log, close(jst(DAY, 17), a, 2));
     const d = log.events.map(draftOf);
     expect(await admitAll(await forge([...d.slice(0, -1), { ...d.at(-1)!, actor: "agent:alpha" }]))).toMatch(/must be written by system/);
   });
@@ -295,7 +302,7 @@ describe("日本時間の0時の境目と取引日", () => {
     expect(llmCostUsed(log.events, "2026-11-10")).toBe(600);
     expect(llmCostProblems(log.events)).toEqual([]);
     // 同じ AI は、日をまたいでも同じ取引日にもう1回は頼めない
-    expect(await reason(log, sub(jst("2026-11-10", 0, 1), "alpha", "2026-11-10", 1, { customId: "x2" }))).toMatch(/duplicate key llmbatch:alpha:2026-11-10$/);
+    expect(await reason(log, sub(jst("2026-11-10", 0, 1), "alpha", "2026-11-10", 1, { ...CHEAP, customId: "x2" }))).toMatch(/duplicate key llmbatch:alpha:2026-11-10$/);
   });
 
   it("取引日は、記録の時刻で締めがまだ来ていない最初の営業日だけ（前日・当日の締め後・2営業日先・土日・祝日は断る）", async () => {
