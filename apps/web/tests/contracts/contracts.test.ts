@@ -2,7 +2,8 @@
 // 契約を満たすことの確認は conformance.ts にあり、platform は自分の実装を渡して同じテストを当てられる。
 // ここには、実装によらない型だけの確認と、偽物にだけ要る確認を置く。
 import { describe, expect, it } from "vitest";
-import type { Clock, DraftInput, EventReader, EventStore, OrderlessEventStore, PriceObservation } from "../../src/contracts";
+import type { Clock, DraftInput, EventReader, EventStore, LlmBatchRequest, LlmBatchReservation, LlmBatchTicket, OrderlessEventStore, PriceObservation } from "../../src/contracts";
+import type { LlmReservationFields, LlmTicketFields } from "../../src/events/llm-cost";
 import { EventLog } from "../../src/events/append";
 import { newAccount } from "../../src/ledger/ledger";
 import { describeEventStoreContract, describeLlmContract, describeMarketDataContract, holidayTable, seedAgent } from "./conformance";
@@ -72,5 +73,21 @@ describe("型の確認（実装によらない）", () => {
     void bad;
     const good: PriceObservation = { symbol: "TSTA", date: "2026-11-11", kind: "close", price: 1, volume: 1000, publishedAt: 1, fetchedAt: 2, source: "x" };
     void good;
+  });
+
+  it("予約と受け取りの控えは予約の料金（依頼と同じ形）を持ち、src/events の控えと同じ形", () => {
+    const base = { batchSeq: 1, agentId: "a", provider: "anthropic", modelId: "m", customId: "c", sentBodyHash: "b", reservedAt: 1, maxCost: 1, tradingDate: "2026-11-10", submittedAt: 1 };
+    // @ts-expect-error 料金のない控えは作れない（閉じるときに料金を選び直さないため）
+    const noPrice: LlmBatchReservation = base;
+    // @ts-expect-error 円のない料金は渡せない
+    const noYen: LlmBatchTicket = { ...base, batchId: "x", reservePrice: { inputCentsPer10MTok: 1, outputCentsPer10MTok: 1 } };
+    const samePrice: LlmBatchReservation["reservePrice"] = {} as LlmBatchRequest["reservePrice"];
+    const back: LlmBatchRequest["reservePrice"] = {} as LlmBatchReservation["reservePrice"];
+    // src/events/llm-cost.ts の控えは契約をそのまま満たし、逆も同じ
+    const r1: LlmBatchReservation = {} as LlmReservationFields;
+    const r2: LlmReservationFields = {} as LlmBatchReservation;
+    const t1: LlmBatchTicket = {} as LlmTicketFields;
+    const t2: LlmTicketFields = {} as LlmBatchTicket;
+    void [noPrice, noYen, samePrice, back, r1, r2, t1, t2];
   });
 });

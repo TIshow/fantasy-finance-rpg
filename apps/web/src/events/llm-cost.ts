@@ -160,6 +160,11 @@ export interface LlmReservationFields {
   maxCost: Deciyen;
   tradingDate: string;
   submittedAt: number;
+  /**
+   * 予約の料金（①の2つの単価と yenPerUsd をそのまま写したもの）。閉じるときは、この料金で費用を出し、料金を選び直さない
+   * （依頼から受け取りまでに料金表や円の設定が変わっても、閉じる記録が①の料金と合うように）
+   */
+  reservePrice: LlmPrice;
 }
 
 /** 受け取りの控え。契約の LlmBatchTicket と同じ形 */
@@ -167,10 +172,15 @@ export interface LlmTicketFields extends LlmReservationFields {
   batchId: string;
 }
 
-/** 依頼の記録（llm.batch.submitted）から、予約の控えを作り直す（②と③のあいだで止まったあとに、提供元で探すのに使う） */
+/**
+ * 依頼の記録（llm.batch.submitted）から、予約の控えを作り直す（②と③のあいだで止まったあとに、提供元で探すのに使う）。
+ * 種類が違う、または料金（2つの単価と yenPerUsd）が1以上の整数でなければ RangeError（追記の処理を通った①には必ずある）
+ */
 export function llmReservationOf(submitted: Rec): LlmReservationFields {
   if (submitted.type !== "llm.batch.submitted") throw new RangeError("not an llm.batch.submitted event");
   const p = submitted.payload as Payload;
+  const isPrice = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 1;
+  if (!isPrice(p.inputCentsPer10MTok) || !isPrice(p.outputCentsPer10MTok) || !isPrice(p.yenPerUsd)) throw new RangeError("the submission has no reserved price");
   return {
     batchSeq: submitted.seq,
     agentId: p.agentId as string,
@@ -182,6 +192,7 @@ export function llmReservationOf(submitted: Rec): LlmReservationFields {
     maxCost: p.maxCost as number,
     tradingDate: p.tradingDate as string,
     submittedAt: p.submittedAt as number,
+    reservePrice: { inputCentsPer10MTok: p.inputCentsPer10MTok as number, outputCentsPer10MTok: p.outputCentsPer10MTok as number, yenPerUsd: p.yenPerUsd as number },
   };
 }
 
