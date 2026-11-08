@@ -5,9 +5,11 @@ import { llmCostUsed } from "../../src/events/llm-cost";
 import { replay } from "../../src/events/replay";
 import { INVESTOR_PROMPT_VERSION } from "../../src/llm/investor-prompt";
 import { jst } from "../contracts/fakes";
+import { llmFailed } from "../../scripts/daily-lib";
+import type { StageResult } from "../../src/runner/day";
 import { DAYS, LLM_IDS, llmWorld, p } from "./llm-world";
 
-const submitOf = (results: { stage: string }[]) => results.find((r) => r.stage === "llm.submit");
+const submitOf = (results: StageResult[]) => results.find((r) => r.stage === "llm.submit");
 
 describe("依頼の段（前の営業日の引けのあと）", async () => {
   const w = await llmWorld();
@@ -73,6 +75,32 @@ describe("依頼の段：上限・送れなかったとき", () => {
     const gpt = runs.filter((e) => p(e).agentId === "ai-gpt");
     expect(gpt.map((e) => [p(e).ok, p(e).errorCode, p(e).cost, p(e).maxCost])).toEqual([[false, "budget_exceeded", 0, 224]]);
     expect(w.llm.providers.openai!.sent).toEqual([]);
+    // 回し直しても、同じ budget_exceeded を二重に書かない
+    w.clock.set(w.clock.now() + 60_000);
+    await w.run(DAYS[0]!);
+    expect((await w.of("agent.run")).filter((e) => p(e).agentId === "ai-gpt")).toHaveLength(1);
+  });
+
+  it("3体の予約の合計が目標（80円）を超える設定なら、どのAIも依頼せず、段を失敗（error:）にする", async () => {
+    const w = await llmWorld();
+    w.deps.llm = { ...w.deps.llm!, yenPerUsd: 400 };
+    const r = submitOf(await w.run(DAYS[0]!));
+    expect(r).toMatchObject({ status: "skipped", detail: expect.stringMatching(/^error: the daily reservations \(\d+\) exceed the target \(800\)$/) });
+    expect(llmFailed([r!])).toBe(true);
+    expect(await w.of("llm.batch.submitted")).toEqual([]);
+  });
+
+  it("1体で例外が出ても、ほかのAIは依頼する。段は失敗（error:）で、例外の文は1行・200文字までにする", async () => {
+    const w = await llmWorld();
+    const orig = w.deps.llm!.portOf;
+    w.deps.llm = { ...w.deps.llm!, portOf: (provider, clock) => (provider === "openai" ? (() => { throw new Error(`boom\r\nline2\u0085${"x".repeat(300)}`); })() : orig(provider, clock)) };
+    const results = await w.run(DAYS[0]!);
+    const r = submitOf(results)!;
+    expect(r).toMatchObject({ status: "written" });
+    expect(r.detail).toMatch(/^error: ai-gpt: boom line2 x+…$/);
+    expect(r.detail!.length).toBeLessThan(230);
+    expect(llmFailed(results)).toBe(true);
+    expect((await w.of("llm.batch.sent")).map((e) => p(e).agentId)).toEqual(["ai-claude", "ai-gemini"]);
   });
 
   it("作られていないと確か（notCreated）なら費用0で閉じ、失敗の run を残す。分からない（billingUnknown）なら①だけ残す", async () => {
@@ -93,7 +121,7 @@ describe("依頼の段：上限・送れなかったとき", () => {
     const w = await llmWorld();
     w.deps.llm = { ...w.deps.llm!, portOf: () => { throw new Error("ANTHROPIC_API_KEY is not set"); } };
     const results = await w.run(DAYS[0]!);
-    expect(submitOf(results)).toEqual({ stage: "llm.submit", status: "skipped", detail: "error: ANTHROPIC_API_KEY is not set" });
+    expect(submitOf(results)).toEqual({ stage: "llm.submit", status: "skipped", detail: LLM_IDS.map((id) => `${id}: ANTHROPIC_API_KEY is not set`).join("; ").replace(/^/, "error: ") });
     expect((await w.of("valuation.recorded")).length).toBeGreaterThan(0);
     expect(await w.of("llm.batch.submitted")).toEqual([]);
   });

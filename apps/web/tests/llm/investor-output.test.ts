@@ -1,6 +1,6 @@
 // LLM の AI 投資家の出力の形と上限の試験（#179）。合わなければ invalid_output にする理由を返す。
 import { describe, expect, it } from "vitest";
-import { parseInvestorOutput } from "../../src/llm/investor-output";
+import { SYMBOL_MAX_CHARS, parseInvestorOutput } from "../../src/llm/investor-output";
 
 const BOARDS = ["ORS1", "VRN1"];
 const read = (v: unknown, truncated = false) => parseInvestorOutput(typeof v === "string" ? v : JSON.stringify(v), { boards: BOARDS, truncated });
@@ -25,7 +25,7 @@ describe("parseInvestorOutput", () => {
     expect(read({ ...good, post: { board: "VRN1", text: "あ".repeat(400) } })).toMatchObject({ ok: true });
     expect(read({ ...good, post: { board: "VRN1", text: "🙂".repeat(400) } })).toMatchObject({ ok: true });
     expect(read({ ...good, post: { board: "VRN1", text: "あ".repeat(401) } })).toEqual({ ok: false, problem: "post_length" });
-    expect(read({ ...good, post: { board: "VRN1", text: " \n" } })).toEqual({ ok: false, problem: "post_length" });
+    expect(read({ ...good, post: { board: "VRN1", text: " \n" } })).toEqual({ ok: false, problem: "post_blank" });
   });
 
   it("掲示板は上場した取引対象の銘柄か「全体」だけ", () => {
@@ -69,5 +69,47 @@ describe("parseInvestorOutput", () => {
     expect(read(`考えた結果：${JSON.stringify(good)}`)).toEqual({ ok: false, problem: "not_json" });
     expect(read(JSON.stringify(good).slice(0, -5))).toEqual({ ok: false, problem: "not_json" });
     expect(read(good, true)).toEqual({ ok: false, problem: "truncated" });
+  });
+
+  it("note は200字まで", () => {
+    expect(read({ ...good, note: "あ".repeat(200) })).toMatchObject({ ok: true });
+    expect(read({ ...good, note: "🙂".repeat(200) })).toMatchObject({ ok: true });
+    expect(read({ ...good, note: "あ".repeat(201) })).toEqual({ ok: false, problem: "note_length" });
+  });
+
+  it("文字の決まり：NFC でない・U+0000・対になっていないサロゲートは text_chars（本文・note・銘柄）", () => {
+    const nfd = "か\u3099"; // 「が」の分解形
+    expect(read({ ...good, post: { board: "VRN1", text: nfd } })).toEqual({ ok: false, problem: "text_chars" });
+    expect(read({ ...good, post: { board: "VRN1", text: "a\u0000b" } })).toEqual({ ok: false, problem: "text_chars" });
+    expect(read({ ...good, note: "\ud800" })).toEqual({ ok: false, problem: "text_chars" });
+    expect(read({ ...good, note: "x\udc00" })).toEqual({ ok: false, problem: "text_chars" });
+    expect(read({ ...good, orders: [{ symbol: "VRN1\u0000", side: "buy", qty: 100 }] })).toEqual({ ok: false, problem: "order_shape" });
+    // 対になったサロゲート（絵文字）と NFC の「が」は通る
+    expect(read({ ...good, post: { board: "VRN1", text: "が🙂" } })).toMatchObject({ ok: true });
+  });
+
+  it("本文が空白と見えない文字（ゼロ幅スペース・BOM・ハングルの詰め物など）だけなら post_blank", () => {
+    for (const t of ["", "\u200b\u200b", "\ufeff \u200d", "\u3164", "\u2800\u00a0\u3000", "\u202e"]) {
+      expect(read({ ...good, post: { board: "VRN1", text: t } })).toEqual({ ok: false, problem: "post_blank" });
+    }
+    expect(read({ ...good, post: { board: "VRN1", text: "\u200bあ" } })).toMatchObject({ ok: true });
+  });
+
+  it("銘柄は16文字まで。__proto__ のキーは知らない項目として断る", () => {
+    expect(read({ ...good, orders: [{ symbol: "A".repeat(SYMBOL_MAX_CHARS), side: "buy", qty: 100 }] })).toMatchObject({ ok: true });
+    expect(read({ ...good, orders: [{ symbol: "A".repeat(SYMBOL_MAX_CHARS + 1), side: "buy", qty: 100 }] })).toEqual({ ok: false, problem: "order_shape" });
+    expect(read('{"post":null,"orders":[],"__proto__":{"x":1}}')).toEqual({ ok: false, problem: "shape" });
+    expect(read('{"post":{"board":"VRN1","text":"x","__proto__":{}},"orders":[]}')).toEqual({ ok: false, problem: "shape" });
+    expect(read('{"post":null,"orders":[{"symbol":"VRN1","side":"buy","qty":100,"__proto__":{"limit":1}}]}')).toEqual({ ok: false, problem: "order_shape" });
+  });
+
+  it("株数と指値は安全な整数の範囲まで（指値は0.1円単位に直しても安全な整数）", () => {
+    const order = (qty: unknown, limit?: unknown) => read({ post: null, orders: [{ symbol: "VRN1", side: "buy", qty, ...(limit === undefined ? {} : { limit }) }] });
+    expect(order(Number.MAX_SAFE_INTEGER)).toMatchObject({ ok: true });
+    expect(order(Number.MAX_SAFE_INTEGER + 1)).toEqual({ ok: false, problem: "order_shape" });
+    const maxYen = Math.floor(Number.MAX_SAFE_INTEGER / 10);
+    expect(order(100, maxYen)).toMatchObject({ ok: true, decision: { orders: [{ limit: maxYen * 10 }] } });
+    expect(order(100, maxYen + 1)).toEqual({ ok: false, problem: "order_shape" });
+    expect(order(100, null)).toEqual({ ok: false, problem: "order_shape" });
   });
 });

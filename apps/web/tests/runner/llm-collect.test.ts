@@ -107,7 +107,7 @@ describe("締めでの打ち切り・止まったあとのやり直し・試運�
     const inner = w.deps.store;
     let crash = true;
     w.deps.store = { ...inner, read: inner.read.bind(inner), last: inner.last.bind(inner), commitSheet: inner.commitSheet.bind(inner), append: (d) => (crash && d.type === "agent.run" && d.payload.agentId === "ai-claude" ? ((crash = false), Promise.reject(new Error("crashed"))) : inner.append(d)) };
-    expect(collectOf(await w.runAt(D1, 6, 50))).toMatchObject({ detail: "error: crashed" });
+    expect(collectOf(await w.runAt(D1, 6, 50))).toMatchObject({ detail: expect.stringMatching(/^error: crashed/) });
     expect((await w.of("llm.batch.closed")).map((e) => p(e).agentId)).toEqual(["ai-claude"]);
     await w.runAt(D1, 7, 20);
     expect((await llmRuns(w, "ai-claude")).map((e) => [p(e).purpose, p(e).ok])).toEqual([["post", true], ["order", true]]);

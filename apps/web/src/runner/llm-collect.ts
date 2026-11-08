@@ -7,7 +7,7 @@ import type { LlmBatchClosed, LlmPrompt } from "../contracts";
 import { canonicalize } from "../events/canonical";
 import { llmReservationOf, llmSentOf, llmTicketOf } from "../events/llm-cost";
 import type { LogEvent } from "../events/types";
-import { cutoffOf } from "../ledger/ledger";
+import { cutoffOf, previousBusinessDay } from "../ledger/ledger";
 import type { BatchClosed } from "../llm/batch-port";
 import { investorPrompt, investorUserText } from "../llm/investor-prompt";
 import { type InvestorDecision, parseInvestorOutput } from "../llm/investor-output";
@@ -124,9 +124,10 @@ async function decide(day: DayAccess, llm: LlmDeps, a: LlmInvestor, sub: LogEven
   }
   // 入力を①より前の記録から作り直し、送った本文と同じであることを確かめる
   const before = day.events().filter((e) => e.seq < sub.seq);
-  const input = investorInputOf(before, { agentId: a.id, tradingDate: date, account: day.account(a.id), body: (h) => bodyText(day.values, h) });
-  const { text, inputSeqs } = investorUserText(input);
   const at = pl(sub).submittedAt as number;
+  const prev = previousBusinessDay(date, day.holidays());
+  const input = investorInputOf(before, { agentId: a.id, tradingDate: date, prev, submittedAt: at, account: day.account(a.id), body: (h) => bodyText(day.values, h) });
+  const { text, inputSeqs } = investorUserText(input);
   const again = await llm.portOf(a.model.provider, { now: () => at }).prepare(investorRequest(a, { prompt, tradingDate: date, submittedAt: at, inputSeqs, userText: text, yenPerUsd: pl(sub).yenPerUsd as number }));
   if (again.sentBodyHash !== pl(sub).sentBodyHash || pl(sub).promptVersion !== prompt.version) {
     await run({ purpose: "order", inputSeqs: [], ok: false, errorCode: "provider_error" });
