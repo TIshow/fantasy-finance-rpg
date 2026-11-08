@@ -5,8 +5,8 @@ import { dir, latestPost, MARK, settledDates, type Direction } from "./arena";
 import { characterOf, handleOf, type Character } from "./characters";
 import { formatBp, formatJst, formatJstShort, formatMonthDay, formatSignedYenMark, formatYenMark, roundedRatio } from "./format";
 import { INTENT_LABEL, REASON, STANCE_LABEL, STATUS } from "./labels";
-import { modelsOf, runModelOf, type ModelLabel } from "./models";
-import type { View } from "./types";
+import { labelModel, modelsOf, runModelOf, type ModelLabel } from "./models";
+import type { RunModel, View } from "./types";
 
 export const CHART_W = 600;
 export const CHART_H = 200;
@@ -43,7 +43,7 @@ export interface HistoryRow {
 export interface DecisionItem {
   key: string;
   timeText: string;
-  kind: "post" | "orders" | "rejected";
+  kind: "post" | "orders" | "rejected" | "failed" | "dry";
   label: string;
   /** 投稿の本文、注文の要約（"買 TSTA 300株"）、拒否の理由 */
   text: string;
@@ -56,6 +56,8 @@ export interface DecisionItem {
   runSeq: number | null;
   /** この判断をしたときのモデル（判断の記録の runSeq から）。記録がなければ null */
   model: ModelLabel | null;
+  /** 試運転（注文を出さない実行）の判断か。判断の記録の dryRun が true のときだけ true */
+  dryRun: boolean;
 }
 export interface DecisionDay {
   /** "2026-11-18"（日本時間。見出しの key） */
@@ -119,7 +121,23 @@ export const fillKey = (seq: number, fillIndex: number) => `f${seq}-${fillIndex}
  * その日の判断：投稿と注文票を、記録された日（日本時間）ごとにまとめる。
  * 記録にある項目（投稿の本文・種類・見立て、注文票の中身、拒否の理由）だけを出す。LLM が書く「判断の理由」は、出力の形が決まってから足す
  */
-export function decisionsOf(mine: View["timeline"], modelOf: (runSeq: number | null) => ModelLabel | null = () => null): DecisionDay[] {
+/** 判断に失敗した理由（エラーコード）の、見る人向けの説明。知らないコードは記録のまま添える */
+export const RUN_FAILURE: Record<string, string> = {
+  budget_exceeded: "この日はLLMの費用の上限を超えるため、依頼を送らず、判断をしませんでした",
+  timeout: "LLMの返事が時間内に届かず、判断が出ませんでした",
+  rate_limited: "LLMの提供元の利用制限にあたり、判断が出ませんでした",
+  provider_error: "LLMの提供元でエラーが起き、判断が出ませんでした",
+  invalid_output: "LLMの出力が記録の形に合わず、判断として使いませんでした",
+};
+/** 決まったコードだけを説明にする。知らないコード・コードなしは、記録の文字を出さず固定の文にする（提供元の文面やIDが漏れないように） */
+export const failureText = (code: string | null) => (code !== null && Object.hasOwn(RUN_FAILURE, code) ? RUN_FAILURE[code]! : "判断が出ませんでした（理由の分類なし）");
+
+/**
+ * runs には、このAIの判断の記録（成功・失敗とも）を渡す。失敗した判断は「判断に失敗」の行として出し、
+ * dryRun が true の判断（投稿・注文票も）には試運転の印を付ける
+ */
+export function decisionsOf(mine: View["timeline"], modelOf: (runSeq: number | null) => ModelLabel | null = () => null, runs: readonly RunModel[] = []): DecisionDay[] {
+  const dry = (runSeq: number | null) => runSeq !== null && runs.some((r) => r.seq === runSeq && r.dryRun);
   const byDay = new Map<string, (DecisionItem & { at: number; seq: number })[]>();
   const add = (at: number, item: DecisionItem & { at: number; seq: number }) => (byDay.get(formatJst(at).slice(0, 10)) ?? byDay.set(formatJst(at).slice(0, 10), []).get(formatJst(at).slice(0, 10))!).push(item);
   for (const t of mine) {
@@ -127,13 +145,23 @@ export function decisionsOf(mine: View["timeline"], modelOf: (runSeq: number | n
     if (t.kind === "post") {
       const tags = [...(t.intent ? [INTENT_LABEL[t.intent]] : []), ...(t.stance ? [`${STANCE_LABEL[t.stance].mark} ${STANCE_LABEL[t.stance].text}`] : [])];
       const note = t.withdrawn ? `非表示（${t.withdrawn.reason || "理由の記載なし"}）` : t.text === null ? "本文が保管にありません" : null;
-      add(t.at, { at: t.at, seq: t.seq, key: `p${t.seq}`, timeText: time, kind: "post", label: "投稿", text: t.text ?? "", note, symbol: t.symbol, tags, runSeq: t.runSeq, model: modelOf(t.runSeq) });
+      add(t.at, { at: t.at, seq: t.seq, key: `p${t.seq}`, timeText: time, kind: "post", label: "投稿", text: t.text ?? "", note, symbol: t.symbol, tags, runSeq: t.runSeq, model: modelOf(t.runSeq), dryRun: dry(t.runSeq) });
     } else if (t.kind === "order_sheet") {
       const text = t.orders.length === 0 ? "注文なし" : t.orders.map((o) => `${SIDE[o.side]} ${o.symbol} ${o.qty}株`).join("、");
-      add(t.at, { at: t.at, seq: t.seq, key: `s${t.seq}`, timeText: time, kind: "orders", label: `注文票（約定日 ${formatMonthDay(t.tradingDate)}）`, text, note: null, symbol: null, tags: [], runSeq: t.runSeq, model: modelOf(t.runSeq) });
+      add(t.at, { at: t.at, seq: t.seq, key: `s${t.seq}`, timeText: time, kind: "orders", label: `注文票（約定日 ${formatMonthDay(t.tradingDate)}）`, text, note: null, symbol: null, tags: [], runSeq: t.runSeq, model: modelOf(t.runSeq), dryRun: dry(t.runSeq) });
     } else if (t.kind === "rejected") {
-      add(t.at, { at: t.at, seq: t.seq, key: `r${t.seq}`, timeText: time, kind: "rejected", label: "注文票を拒否", text: REASON[t.reason] ?? t.reason, note: null, symbol: null, tags: [], runSeq: t.runSeq, model: modelOf(t.runSeq) });
+      add(t.at, { at: t.at, seq: t.seq, key: `r${t.seq}`, timeText: time, kind: "rejected", label: "注文票を拒否", text: dry(t.runSeq) && t.reason === "invalid_sheet" ? "試運転の判断のため、注文にしませんでした" : (REASON[t.reason] ?? t.reason), note: null, symbol: null, tags: [], runSeq: t.runSeq, model: modelOf(t.runSeq), dryRun: dry(t.runSeq) });
     }
+  }
+  const sheetRuns = new Set(mine.flatMap((t) => ((t.kind === "order_sheet" || t.kind === "rejected") && t.runSeq !== null ? [t.runSeq] : [])));
+  for (const r of runs) {
+    // 成功した試運転の注文の判断は注文票にならない。その日の判断が消えないよう、行を出す（注文の中身は記録の外にあるので出さない）
+    if (r.ok && r.dryRun && r.purpose === "order" && !sheetRuns.has(r.seq)) {
+      add(r.at, { at: r.at, seq: r.seq, key: `d${r.seq}`, timeText: formatJstShort(r.at).slice(-5), kind: "dry", label: "試運転", text: "試運転：注文は出していません", note: null, symbol: null, tags: [], runSeq: r.seq, model: labelModel(r.provider, r.modelId), dryRun: true });
+      continue;
+    }
+    if (r.ok) continue;
+    add(r.at, { at: r.at, seq: r.seq, key: `x${r.seq}`, timeText: formatJstShort(r.at).slice(-5), kind: "failed", label: "判断に失敗", text: failureText(r.errorCode), note: null, symbol: null, tags: [], runSeq: r.seq, model: labelModel(r.provider, r.modelId), dryRun: r.dryRun });
   }
   const days = [...byDay].sort((x, y) => (x[0] < y[0] ? 1 : -1)).slice(0, DECISION_DAYS);
   const crossesYear = new Set(days.map(([day]) => day.slice(0, 4))).size > 1;
@@ -220,7 +248,7 @@ export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account
   const history = rows.sort((p, q) => (key(p.date) < key(q.date) ? 1 : key(p.date) > key(q.date) ? -1 : p.seq - q.seq || p.idx - q.idx)).map((r) => r.row);
 
   const suspended = suspensionOf(view, agentId);
-  const decisions = decisionsOf(mine, (n) => runModelOf(view, n, agentId));
+  const decisions = decisionsOf(mine, (n) => runModelOf(view, n, agentId), view.runs.filter((r) => r.agentId === agentId));
 
   return {
     agentId, character, model: modelsOf(view).get(agentId) ?? null, loggedName: a.agentName, handle: handleOf(agentId), rank: settledDays.at(-1)?.rank ?? null, rankAsOf: settledDays.at(-1) ? formatMonthDay(settledDays.at(-1)!.date) : null, suspended, badges, latestPost: latestPost(view, agentId), chart, holdings, cash, history, decisions,

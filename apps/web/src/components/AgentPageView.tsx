@@ -45,8 +45,9 @@ function Decisions({ days, symbols }: { days: DecisionDay[]; symbols?: ReadonlyS
             {d.items.map((i) => (
               <li key={i.key} className="flex flex-col gap-1 border-b border-[#2A1745] px-3 py-2 last:border-b-0">
                 <div className="flex flex-wrap items-baseline gap-x-3 font-num text-xs text-sub">
-                  <span className={i.kind === "rejected" ? "font-bold text-neon-pink" : "font-bold text-ink"}>{i.label}</span>
+                  <span className={i.kind === "rejected" || i.kind === "failed" ? "font-bold text-neon-pink" : "font-bold text-ink"}>{i.label}</span>
                   <span>{i.timeText}</span>
+                  {i.dryRun && <span className="border border-neon-cyan px-1.5 text-neon-cyan">試運転（注文は出していません）</span>}
                   {i.tags.map((t) => <span key={t} className="border border-line px-1.5">{t}</span>)}
                   {i.model && <span>{i.model.text}</span>}
                   {i.runSeq !== null && <span className="ml-auto">判断の実行 #{i.runSeq}</span>}

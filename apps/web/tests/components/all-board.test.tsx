@@ -25,15 +25,18 @@ const view = () => {
 };
 
 describe("「全体」の掲示板（銘柄ではないのでページにもリンクにもしない）", () => {
-  it("銘柄はリンク、全体は文字だけ。下線以外の見た目の指定は残す", () => {
+  it("銘柄は銘柄のページ、全体は全体のページへのリンク、知らない掲示板は文字だけ。下線以外の見た目の指定は残す", () => {
     expect(isSymbolBoard("7203")).toBe(true);
     expect(isSymbolBoard("全体")).toBe(false);
     expect(renderToStaticMarkup(<BoardLink board="7203" suffix=" 掲示板" />)).toContain('href="/symbols/7203"');
     const all = renderToStaticMarkup(<BoardLink board="全体" symbols={new Set(["7203"])} className="font-num text-xs underline" />);
-    expect(all).not.toContain("href");
+    expect(all).toContain('href="/board"');
+    expect(all).not.toContain("/symbols/");
     expect(all).toContain("全体の掲示板");
-    expect(all).toContain("font-num text-xs");
-    expect(all).not.toContain("underline");
+    const other = renderToStaticMarkup(<BoardLink board="ZZZZ" symbols={new Set(["7203"])} className="font-num text-xs underline" />);
+    expect(other).not.toContain("href");
+    expect(other).toContain("font-num text-xs");
+    expect(other).not.toContain("underline");
   });
 
   it("銘柄のページにする記号は、知っている銘柄だけ（全体の別の書き方・小文字・存在しない記号は含めない）", () => {

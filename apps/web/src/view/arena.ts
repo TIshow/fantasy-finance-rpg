@@ -37,7 +37,7 @@ export function sparkline(values: number[], baseline: number): Sparkline {
 /** 直近の（非表示でなく本文が保管にある）投稿 */
 export function latestPost(view: View, agentId: string) {
   const p = findLast(view.timeline, (t) => t.kind === "post" && t.agentId === agentId && t.withdrawn === null && t.text !== null);
-  return p && p.kind === "post" ? { text: p.text as string, symbol: p.symbol, atText: formatJstShort(p.at) } : null;
+  return p && p.kind === "post" ? { text: p.text as string, symbol: p.symbol, atText: formatJstShort(p.at) + (p.dryRun ? "・試運転" : "") } : null;
 }
 
 /**
@@ -154,7 +154,7 @@ export function buildArena(view: View): Arena {
   for (const p of posts) {
     const c = charOf(p.agentId, p.agentName);
     const text = p.withdrawn ? `${c.name}の投稿（非表示：${p.withdrawn.reason || "理由の記載なし"}）` : p.text === null ? `${c.name}の投稿（本文が保管にありません）` : `${c.name}「${p.text}」`;
-    feed.push({ at: p.at, seq: p.seq, key: `post-${p.seq}`, timeText: formatJstShort(p.at), kind: "post", label: "投稿", color: "#D9C8F2", text, symbol: p.symbol });
+    feed.push({ at: p.at, seq: p.seq, key: `post-${p.seq}`, timeText: formatJstShort(p.at), kind: "post", label: p.dryRun ? "投稿（試運転）" : "投稿", color: "#D9C8F2", text, symbol: p.symbol });
   }
   // 順位：評価の記録の日ごとに、首位のAI。前の評価の日の首位と同じなら「守る」
   const byDate = new Map<string, (TimelineItem & { kind: "valuation" })[]>();

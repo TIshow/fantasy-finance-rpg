@@ -14,7 +14,7 @@ function Body({ item, symbols }: { item: TimelineItem; symbols?: ReadonlySet<str
     case "post":
       return (
         <>
-          <span className="text-sub">投稿</span> <Symbol symbol={item.symbol} symbols={symbols} />
+          <span className="text-sub">投稿</span> <Symbol symbol={item.symbol} symbols={symbols} />{item.dryRun && <span className="ml-2 border border-neon-cyan px-1.5 font-num text-[11px] text-neon-cyan">試運転</span>}
           {item.withdrawn ? (
             <p className="mt-1 italic text-sub">非表示（{item.withdrawn.reason || "理由の記載なし"}）</p>
           ) : (
