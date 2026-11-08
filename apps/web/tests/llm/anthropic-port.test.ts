@@ -106,12 +106,12 @@ describe("Anthropic のバッチの口", () => {
   it("探す：名前も中身も確かめられないので、いつも not_found（提供元に問い合わせない）", async () => {
     const { f, seen } = fakeFetch(() => new Response("{}"));
     const hash = "c".repeat(64);
-    expect(await make(f).find({ batchSeq: 3, agentId: "claude-ai", provider: "anthropic", modelId: "claude-sonnet-5-5", customId: `${CID}-${hash.slice(0, 16)}`, sentBodyHash: hash, reservedAt: AT, maxCost: 200, tradingDate: "2026-11-10", submittedAt: AT })).toEqual({ status: "not_found" });
+    expect(await make(f).find({ batchSeq: 3, agentId: "claude-ai", provider: "anthropic", modelId: "claude-sonnet-5-5", customId: `${CID}-${hash.slice(0, 16)}`, sentBodyHash: hash, reservedAt: AT, maxCost: 200, tradingDate: "2026-11-10", submittedAt: AT, reservePrice: { ...PRICE, yenPerUsd: 160 } })).toEqual({ status: "not_found" });
     expect(seen).toHaveLength(0);
   });
 
   describe("受け取り", () => {
-    const ticket: LlmBatchTicket = { batchSeq: 3, agentId: "claude-ai", provider: "anthropic", modelId: "claude-sonnet-5-5", customId: `${CID}-${"c".repeat(16)}`, sentBodyHash: "c".repeat(64), reservedAt: AT, maxCost: 200, tradingDate: "2026-11-10", submittedAt: AT, batchId: ID };
+    const ticket: LlmBatchTicket = { batchSeq: 3, agentId: "claude-ai", provider: "anthropic", modelId: "claude-sonnet-5-5", customId: `${CID}-${"c".repeat(16)}`, sentBodyHash: "c".repeat(64), reservedAt: AT, maxCost: 200, tradingDate: "2026-11-10", submittedAt: AT, reservePrice: { ...PRICE, yenPerUsd: 160 }, batchId: ID };
     /** 記録済みの結果の run-a（成功）・run-b（errored）・run-d（expired）を、本文の中の1件のIDに置き換える */
     const results = (as: string) => recorded("anthropic-batch-results.jsonl").replace(`"${as}"`, `"${CID}"`);
     const ended = (resultsBody: string) => fakeFetch((_m, url) => new Response(url.endsWith("/results") ? resultsBody : recorded("anthropic-batch-ended.json")));
@@ -131,6 +131,17 @@ describe("Anthropic のバッチの口", () => {
       const cached = await make(ended(results("run-a").replace('"cache_creation_input_tokens":null', '"cache_creation_input_tokens":3000')).f).collect(ticket);
       expect(cached).toMatchObject({ result: "collected", usage: { cacheCreationInputTokens: 3000, cost: 200 }, costUnknown: true });
       expect(cached).not.toHaveProperty("price");
+    });
+
+    it("費用と料金は控えの予約の料金で出す（口の料金表・円が控えと違っても選び直さない）。打ち切りも同じ", async () => {
+      const rp = { inputCentsPer10MTok: 1500, outputCentsPer10MTok: 7000, yenPerUsd: 150 };
+      const t = { ...ticket, reservePrice: rp, maxCost: 1000 };
+      const cost = llmTokenCost({ inputTokens: 20_000, outputTokens: 1500 }, rp);
+      expect(cost).toBe(61); // (20,000×1.5ドル＋1,500×7ドル)/100万 × 150円 ＝ 6.075円
+      const other = (f: typeof fetch) => anthropicBatchPort({ policy: { dailyCostLimit: 1000, dryRun: false }, clock: { now: () => AT + 5000 }, yenPerUsd: 170, client: new AnthropicBatchClient({ apiKey: KEY, fetch: f }) });
+      const price = { inputCentsPer10MTok: 1500, outputCentsPer10MTok: 7000 };
+      expect(await other(ended(results("run-a")).f).collect(t)).toMatchObject({ result: "collected", usage: { cost }, price });
+      expect(await other(ended(results("run-a")).f).abandon(t)).toMatchObject({ result: "expired", usage: { cost }, price });
     });
 
     it("errored・expired は資料では課金されないが、送ったバッチなので予約した費用（costUnknown）。結果にないときも同じ", async () => {
