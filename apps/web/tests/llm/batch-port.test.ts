@@ -1,36 +1,32 @@
-// バッチの口の共通部分（費用の上限の予約・送る前の確かめ・閉じた結果）の試験。提供元は呼ばず、偽の driver を使う。
+// バッチの口の共通部分（本文を作る・送る・探す・受け取り・打ち切り）の試験。提供元は呼ばず、偽の driver を使う。
 import { describe, expect, it } from "vitest";
-import type { LlmBatchRequest, LlmBatchTicket } from "../../src/contracts";
-import { EventLog } from "../../src/events/append";
+import type { LlmBatchRequest, LlmBatchReservation, LlmBatchTicket } from "../../src/contracts";
 import { sha256Hex } from "../../src/events/hash";
-import { llmCostUsed, llmTokenCost } from "../../src/events/llm-cost";
-import { newAccount } from "../../src/ledger/ledger";
-import { INITIAL_CASH } from "../../src/ledger/types";
-import { BatchBudget, BatchPort, batchCustomIdOf, batchKeyOf, batchSpendOf, unknownCostDrafts, type BatchDriver, type BatchOutcome, type BatchSpend, type SendResult } from "../../src/llm/batch-port";
+import { llmTokenCost } from "../../src/events/llm-cost";
+import { BatchPort, FIND_AFTER_MS, FIND_BEFORE_MS, batchCustomIdOf, batchItemIdOf, batchItemIdOfCustomId, type BatchDriver, type BatchOutcome, type SendResult } from "../../src/llm/batch-port";
 
 const PRICE = { inputCentsPer10MTok: 1000, outputCentsPer10MTok: 5000 };
 const AT = Date.parse("2026-11-09T07:35:00Z"); // 日本時間 16:35
-const DAY = "2026-11-09";
 const clock = { now: () => AT + 1000 };
+const H = "ab".repeat(32);
 
-function fakeDriver(over: Partial<BatchDriver> = {}, send: () => Promise<SendResult> = async () => ({ ok: true, batchId: "b1", sentBodyHash: "h" })) {
-  const calls = { send: 0, cancel: 0 };
+function fakeDriver(over: Partial<BatchDriver> = {}, send: () => Promise<SendResult> = async () => ({ ok: true, batchId: "b1" })) {
+  const calls = { send: [] as string[], cancel: 0, itemIds: [] as string[] };
   const driver: BatchDriver = {
     provider: "fake",
     settingKeys: ["max_tokens"],
     maxOutputTokens: 2000,
     priceAt: (m) => (m === "m1" ? PRICE : undefined),
-    prepare: (r) => ({ body: JSON.stringify(r.messages), send: () => ((calls.send += 1), send()) }),
-    outcome: async () => "pending",
+    body: (r, itemId) => JSON.stringify({ id: itemId, messages: r.messages }),
+    send: (body) => (calls.send.push(body), send()),
+    find: async () => ({ status: "not_found" }),
+    outcome: async (_t, itemId) => (calls.itemIds.push(itemId), "pending"),
     cancel: async () => ((calls.cancel += 1), true),
-    lookup: async () => ({ kind: "none" }),
     ...over,
   };
   return { driver, calls };
 }
-const source = (s: Partial<BatchSpend> = {}) => async (): Promise<BatchSpend> => ({ used: 0, recordedKeys: new Set(), ...s });
-const budget = (limit = 1000, src = source()) => new BatchBudget({ dailyCostLimit: limit, dryRun: false }, src);
-const port = (d: BatchDriver, b = budget()) => new BatchPort(d, { budget: b, clock });
+const port = (d: BatchDriver, sendTimeoutMs?: number) => new BatchPort(d, { policy: { dailyCostLimit: 1000, dryRun: false }, clock, ...(sendTimeoutMs ? { sendTimeoutMs } : {}) });
 
 const req = (over: Partial<LlmBatchRequest> = {}): LlmBatchRequest => ({
   agentId: "ai-1",
@@ -47,82 +43,28 @@ const req = (over: Partial<LlmBatchRequest> = {}): LlmBatchRequest => ({
   maxOutputTokens: 2000,
   ...over,
 });
-const ticket = (over: Partial<LlmBatchTicket> = {}): LlmBatchTicket => ({ agentId: "ai-1", provider: "fake", modelId: "m1", batchId: "b1", customId: "llm-x", maxCost: 160, tradingDate: "2026-11-10", submittedAt: AT, ...over });
+const reservation = (over: Partial<LlmBatchReservation> = {}): LlmBatchReservation => ({ batchSeq: 5, agentId: "ai-1", provider: "fake", modelId: "m1", customId: `ai-1-20261110-${H.slice(0, 16)}`, sentBodyHash: H, reservedAt: AT, maxCost: 160, tradingDate: "2026-11-10", submittedAt: AT, ...over });
+const ticket = (over: Partial<LlmBatchTicket> = {}): LlmBatchTicket => ({ ...reservation(), batchId: "b1", ...over });
 
-describe("費用の上限の予約（BatchBudget・submit）", () => {
-  it("policy が外れていれば作れない。作ったあとに書き換えても効かない", () => {
-    for (const bad of [-1, 1.5, Number.NaN, Infinity]) expect(() => budget(bad)).toThrow(RangeError);
-    const p = { dailyCostLimit: 10, dryRun: false };
-    const b = new BatchBudget(p, source());
-    p.dailyCostLimit = 99999;
-    expect(b.policy.dailyCostLimit).toBe(10);
-  });
-
-  it("記録の分＋予約＋maxCost が上限を超えるなら送らずに budget_exceeded。ちょうどなら送る", async () => {
+describe("本文を作る（prepare）", () => {
+  it("本文・そのハッシュ・customId（前半＋ハッシュの先頭16文字）・本文の出力の上限を返し、送らない", async () => {
     const { driver, calls } = fakeDriver();
-    const b = budget(1000, source({ used: 840 }));
-    expect(await port(driver, b).submit(req({ maxCost: 161 }))).toEqual({ ok: false, errorCode: "budget_exceeded", submittedAt: AT });
-    expect(calls.send).toBe(0);
-    expect((await port(driver, b).submit(req({ maxCost: 160 }))).ok).toBe(true);
-    expect(await b.spent(DAY)).toBe(1000);
+    const p = await port(driver).prepare(req());
+    const body = JSON.stringify({ id: "ai-1-20261110", messages: req().messages });
+    const hash = await sha256Hex(new TextEncoder().encode(body));
+    expect(p).toMatchObject({ body, sentBodyHash: hash, customId: `ai-1-20261110-${hash.slice(0, 16)}`, bodyMaxOutputTokens: 2000 });
+    expect(Object.isFrozen(p)).toBe(true);
+    expect(calls.send).toHaveLength(0);
   });
 
-  it("同時に呼んでも上限を超えない（判定と予約は1つずつ）", async () => {
-    const { driver } = fakeDriver();
-    const p = port(driver, budget(1000));
-    const rs = await Promise.all([p.submit(req({ maxCost: 600 })), p.submit(req({ agentId: "ai-2", maxCost: 600 }))]);
-    expect(rs.map((r) => r.ok)).toEqual([true, false]);
+  it("customId の前半は47文字まで（長い agentId は先頭から切り詰める）。全体は64文字以内", () => {
+    const long = `a${"x".repeat(99)}`;
+    expect(batchItemIdOf(long, "2026-11-10")).toBe(`${long.slice(0, 38)}-20261110`);
+    const id = batchCustomIdOf(batchItemIdOf(long, "2026-11-10"), H);
+    expect(id).toHaveLength(64);
+    expect(batchItemIdOfCustomId(id)).toBe(`${long.slice(0, 38)}-20261110`);
   });
 
-  it("予約は記録に現れたら記録の側で数え、二重に数えない。同じ AI・同じ取引日は2回送らない", async () => {
-    const recorded = new Set<string>();
-    let used = 0;
-    const b = budget(1000, async () => ({ used, recordedKeys: recorded }));
-    const { driver } = fakeDriver();
-    expect((await port(driver, b).submit(req())).ok).toBe(true);
-    await expect(port(driver, b).submit(req())).rejects.toThrow(RangeError);
-    recorded.add(batchKeyOf("ai-1", "2026-11-10"));
-    used = 160;
-    expect(await b.spent(DAY)).toBe(160);
-    await expect(port(driver, b).submit(req())).rejects.toThrow(RangeError);
-  });
-
-  it("作られたか分からない失敗は予約を残す（rate_limited でも billingUnknown を返す）。作られていない失敗は予約を外す", async () => {
-    const b = budget();
-    const unknown = fakeDriver({}, async () => ({ ok: false, errorCode: "rate_limited", billingUnknown: true }));
-    const r = await port(unknown.driver, b).submit(req());
-    expect(r).toEqual({ ok: false, errorCode: "rate_limited", billingUnknown: true, sentBodyHash: await sha256Hex(new TextEncoder().encode(JSON.stringify(req().messages))), submittedAt: AT });
-    expect(await b.spent(DAY)).toBe(160);
-    const refused = fakeDriver({}, async () => ({ ok: false, errorCode: "provider_error" }));
-    expect(await port(refused.driver, b).submit(req({ agentId: "ai-2" }))).toMatchObject({ ok: false, errorCode: "provider_error" });
-    expect(await b.spent(DAY)).toBe(160);
-    const thrown = fakeDriver({}, async () => {
-      throw new Error("request-id=req_secret123");
-    });
-    const t = await port(thrown.driver, b).submit(req({ agentId: "ai-3" }));
-    expect(t).toMatchObject({ ok: false, errorCode: "provider_error", billingUnknown: true });
-    expect(JSON.stringify(t)).not.toContain("secret");
-  });
-
-  it("記録が読めないときは送らずに budget_exceeded", async () => {
-    const { driver, calls } = fakeDriver();
-    const b = budget(1000, async () => {
-      throw new Error("db down");
-    });
-    expect(await port(driver, b).submit(req())).toMatchObject({ ok: false, errorCode: "budget_exceeded" });
-    expect(calls.send).toBe(0);
-  });
-
-  it("記録から使用済みと一意キーを出す（暦日は submittedAt の日本時間）", () => {
-    const sub = (seq: number, agentId: string, submittedAt: number) => ({ seq, type: "llm.batch.submitted" as const, recordedAt: submittedAt, payload: { agentId, tradingDate: "2026-11-10", submittedAt, maxCost: 300 } });
-    const events = [sub(1, "a", AT), sub(2, "b", AT), { seq: 3, type: "llm.batch.closed" as const, recordedAt: AT, payload: { batchSeq: 1, cost: 12 } }, sub(4, "c", Date.parse("2026-11-09T15:30:00Z"))];
-    const s = batchSpendOf(events as never, DAY);
-    expect(s.used).toBe(312);
-    expect([...s.recordedKeys]).toEqual(["llmbatch:a:2026-11-10", "llmbatch:b:2026-11-10", "llmbatch:c:2026-11-10"]);
-  });
-});
-
-describe("送る前の確かめ（RangeError で reject し、送らない）", () => {
   it.each<[string, Partial<LlmBatchRequest>]>([
     ["maxCost が 0", { maxCost: 0 }],
     ["maxCost が NaN", { maxCost: Number.NaN }],
@@ -138,23 +80,61 @@ describe("送る前の確かめ（RangeError で reject し、送らない）", 
     ["max_tokens が提供元の出力の上限と違う", { model: { provider: "fake", modelId: "m1", settings: { max_tokens: "1999" } } }],
     ["maxInputTokens が入力の上限（20,000）を超える", { maxInputTokens: 20_001, maxCost: 1000 }],
     ["maxInputTokens が送る本文のバイト数より小さい", { maxInputTokens: 10 }],
-    ["maxInputTokens が送る本文のバイト数×inputCostFactor より小さい", { maxInputTokens: 60, maxCost: 1000 }],
+    ["maxInputTokens が送る本文のバイト数×inputCostFactor より小さい", { maxInputTokens: 100, maxCost: 1000 }],
+    ["agentId に名前に使えない文字がある", { agentId: "ai 1" }],
     ["取引日の形が違う", { tradingDate: "2026/11/10" }],
     ["submittedAt が今から5分より前", { submittedAt: AT - 300_000 }],
-    ["submittedAt が今から5分より後", { submittedAt: AT + 302_000 }],
     ["messages が配列でない", { messages: "入力" as never }],
     ["messages の content が文字列でない・role が決まりの外", { messages: [{ role: "user", content: 1 }, { role: "tool", content: "x" }] as never }],
-  ])("%s", async (_name, over) => {
-    const { driver, calls } = fakeDriver({ inputCostFactor: 3 });
-    await expect(port(driver).submit(req(over))).rejects.toThrow(RangeError);
-    expect(calls.send).toBe(0);
+  ])("断る（RangeError）：%s", async (_name, over) => {
+    const { driver } = fakeDriver({ inputCostFactor: 3 });
+    await expect(port(driver).prepare(req(over))).rejects.toThrow(RangeError);
   });
 
-  it("customId は一意キーから決まり、決まりに合う", async () => {
-    const id = await batchCustomIdOf("ai-1", "2026-11-10");
-    expect(id).toMatch(/^llm-[0-9a-f]{48}$/);
-    expect(await batchCustomIdOf("ai-1", "2026-11-10")).toBe(id);
-    expect(await batchCustomIdOf("ai-1", "2026-11-11")).not.toBe(id);
+  it("policy・送る時間の上限が外れていれば作れない", () => {
+    const { driver } = fakeDriver();
+    expect(() => new BatchPort(driver, { policy: { dailyCostLimit: -1, dryRun: false }, clock })).toThrow(RangeError);
+    expect(() => port(driver, 600_001)).toThrow(RangeError);
+  });
+});
+
+describe("送る（send）", () => {
+  it("本文を加工せずに送り、作られたら batchId を返す。作られていない・分からないもそのまま返す", async () => {
+    const { driver, calls } = fakeDriver();
+    const p = await port(driver).prepare(req());
+    expect(await port(driver).send(p, 5)).toEqual({ ok: true, batchId: "b1" });
+    expect(calls.send).toEqual([p.body]);
+    for (const r of [{ ok: false, errorCode: "provider_error", notCreated: true }, { ok: false, errorCode: "rate_limited", billingUnknown: true }] as const) {
+      expect(await port(fakeDriver({}, async () => r).driver).send(p, 5)).toEqual(r);
+    }
+  });
+
+  it("思いがけない例外と、送る時間の上限を超えたものは billingUnknown（文は返さない）", async () => {
+    const p = await port(fakeDriver().driver).prepare(req());
+    const thrown = fakeDriver({}, async () => Promise.reject(new Error("request-id=req_secret123")));
+    expect(await port(thrown.driver).send(p, 5)).toEqual({ ok: false, errorCode: "provider_error", billingUnknown: true });
+    const slow = fakeDriver({}, () => new Promise(() => undefined));
+    expect(await port(slow.driver, 20).send(p, 5)).toEqual({ ok: false, errorCode: "timeout", billingUnknown: true });
+  });
+
+  it("本文を書き換えた・customId が合わないものは送らない（RangeError）", async () => {
+    const { driver, calls } = fakeDriver();
+    const p = await port(driver).prepare(req());
+    await expect(port(driver).send({ ...p, body: `${p.body} ` }, 5)).rejects.toThrow(RangeError);
+    await expect(port(driver).send({ ...p, customId: `x-${p.sentBodyHash.slice(0, 16)}` }, 5)).rejects.toThrow(RangeError);
+    expect(calls.send).toHaveLength(0);
+  });
+});
+
+describe("探す（find）", () => {
+  it("時刻の範囲（reservedAt の5分前〜15分後）を渡す。例外は unknown。予約の形が違えば RangeError", async () => {
+    const seen: number[] = [];
+    const { driver } = fakeDriver({ find: async (q) => (seen.push(q.from, q.to), { status: "found", batchId: "b9" }) });
+    expect(await port(driver).find(reservation())).toEqual({ status: "found", batchId: "b9" });
+    expect(seen).toEqual([AT - FIND_BEFORE_MS, AT + FIND_AFTER_MS]);
+    expect(FIND_AFTER_MS).toBe(900_000);
+    expect(await port(fakeDriver({ find: async () => Promise.reject(new Error("x")) }).driver).find(reservation())).toEqual({ status: "unknown" });
+    await expect(port(driver).find(reservation({ provider: "other" }))).rejects.toThrow(RangeError);
   });
 });
 
@@ -162,24 +142,24 @@ describe("受け取りと打ち切り", () => {
   const usage = { inputTokens: 20_000, outputTokens: 1500, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 };
   const succeeded: BatchOutcome = { kind: "succeeded", output: "{}", respondedModel: "m1-2026", usage, truncated: false };
 
-  it("受け取り：費用は予約の料金で、llmTokenCost ちょうど。料金をそのまま写す", async () => {
-    const { driver } = fakeDriver({ outcome: async () => succeeded });
+  it("受け取り：費用は予約の料金で llmTokenCost ちょうど。本文の中の1件のID（customId の前半）で探す。上限で切れたら truncated", async () => {
+    const { driver, calls } = fakeDriver({ outcome: async (_t, id) => (calls.itemIds.push(id), succeeded) });
     const r = await port(driver).collect(ticket());
     const cost = llmTokenCost(usage, { ...PRICE, yenPerUsd: 160 });
     expect(r).toEqual({ status: "closed", result: "collected", output: "{}", respondedModel: "m1-2026", usage: { inputTokens: 20_000, outputTokens: 1500, cost }, price: PRICE, finishedAt: AT + 1000 });
     expect(cost).toBe(44); // (20,000×1ドル＋1,500×5ドル)/100万 × 160円 ＝ 4.4円
-    // 出力の上限で切れた答えは truncated: true
+    expect(calls.itemIds).toEqual(["ai-1-20261110"]);
     expect(await port(fakeDriver({ outcome: async () => ({ ...succeeded, truncated: true }) }).driver).collect(ticket())).toMatchObject({ result: "collected", truncated: true });
   });
 
-  it("課金されないもの・分からないもの・読めないとき", async () => {
-    const notBilled = fakeDriver({ outcome: async () => ({ kind: "notBilled", result: "expired", errorCode: "timeout" }) });
-    expect(await port(notBilled.driver).collect(ticket())).toEqual({ status: "closed", result: "expired", errorCode: "timeout", usage: { inputTokens: 0, outputTokens: 0, cost: 0 }, price: PRICE, finishedAt: AT + 1000 });
+  it("答えのないもの・トークン数が0のものは、予約した費用（costUnknown）。読めないときは pending", async () => {
     const unknown = fakeDriver({ outcome: async () => ({ kind: "costUnknown", result: "failed", errorCode: "provider_error" }) });
     expect(await port(unknown.driver).collect(ticket())).toEqual({ status: "closed", result: "failed", errorCode: "provider_error", usage: { inputTokens: 0, outputTokens: 0, cost: 160 }, costUnknown: true, finishedAt: AT + 1000 });
-    const thrown = fakeDriver({ outcome: async () => Promise.reject(new Error("x")) });
-    expect(await port(thrown.driver).collect(ticket())).toEqual({ status: "pending" });
-    await expect(port(thrown.driver).collect(ticket({ provider: "other" }))).rejects.toThrow(RangeError);
+    for (const u of [{ ...usage, outputTokens: 0 }, { ...usage, inputTokens: 0 }]) {
+      expect(await port(fakeDriver({ outcome: async () => ({ ...succeeded, usage: u }) }).driver).collect(ticket())).toMatchObject({ result: "failed", usage: { cost: 160 }, costUnknown: true });
+    }
+    expect(await port(fakeDriver({ outcome: async () => Promise.reject(new Error("x")) }).driver).collect(ticket())).toEqual({ status: "pending" });
+    await expect(port(unknown.driver).collect(ticket({ provider: "other" }))).rejects.toThrow(RangeError);
   });
 
   it("打ち切り：終わっていなければ取り消しを頼み、まだ終わらなければ maxCost・costUnknown の expired", async () => {
@@ -188,48 +168,11 @@ describe("受け取りと打ち切り", () => {
     expect(calls.cancel).toBe(1);
   });
 
-  it("打ち切り：答えが出ていても使わず expired。費用は実際の値", async () => {
+  it("打ち切り：終わってトークン数が取れたときだけ実際の値（答えは使わない）。0 なら costUnknown", async () => {
     const { driver, calls } = fakeDriver({ outcome: async () => succeeded });
     expect(await port(driver).abandon(ticket())).toEqual({ status: "closed", result: "expired", errorCode: "timeout", usage: { inputTokens: 20_000, outputTokens: 1500, cost: 44 }, price: PRICE, finishedAt: AT + 1000 });
     expect(calls.cancel).toBe(0);
-  });
-
-  it("記録にないバッチを探す：customId を渡し、例外は unknown", async () => {
-    const seen: string[] = [];
-    const { driver } = fakeDriver({ lookup: async (q) => (seen.push(q.customId), { kind: "found", batchIds: ["b9"] }) });
-    expect(await port(driver).findUnrecorded({ agentId: "ai-1", tradingDate: "2026-11-10", since: AT, now: AT, recordedBatchIds: new Set() })).toEqual({ kind: "found", batchIds: ["b9"] });
-    expect(seen).toEqual([await batchCustomIdOf("ai-1", "2026-11-10")]);
-    const bad = fakeDriver({ lookup: async () => Promise.reject(new Error("x")) });
-    expect(await port(bad.driver).findUnrecorded({ agentId: "ai-1", tradingDate: "2026-11-10", since: AT, now: AT, recordedBatchIds: new Set() })).toEqual({ kind: "unknown" });
-  });
-});
-
-describe("課金されたか分からない依頼の2つの記録（unknownCostDrafts・unrecordedDrafts）", () => {
-  const H = "a".repeat(64);
-  const l = new EventLog({ holidayTables: new Map([[H, { firstYear: 2026, lastYear: 2027, sourceSha256: "0".repeat(64), contentSha256: H, dates: new Set<string>() }]]), accountOf: () => newAccount() });
-  async function write(d: Awaited<ReturnType<typeof unknownCostDrafts>>) {
-    expect(await l.canAppend(d.submitted)).toBeNull();
-    const s = await l.append(d.submitted);
-    expect(s.ok && (await l.canAppend(d.closedFor(s.event.seq))) === null && (await l.append(d.closedFor(s.event.seq))).ok).toBe(true);
-  }
-
-  it("止まる前に送った依頼（found・unknown）：送らずに書け、費用は maxCost で一意キーも埋まる。billingUnknown でも同じ形で書ける", async () => {
-    await l.append({ type: "holidays.adopted", recordedAt: 0, actor: "operator:owner", refs: [], payload: { holidaysSha256: H } });
-    for (const agentId of ["ai-1", "ai-2"]) await l.append({ type: "agent.registered", recordedAt: AT - 6 * 3_600_000, actor: "operator:owner", refs: [], payload: { agentId, startDate: "2026-11-10", initialCash: INITIAL_CASH } });
-    const { driver, calls } = fakeDriver();
-    const d = await port(driver).unrecordedDrafts(req(), AT + 1000);
-    expect(d.submitted.payload).toMatchObject({ batchId: null, maxCost: 160, customId: await batchCustomIdOf("ai-1", "2026-11-10"), sentBodyHash: await sha256Hex(new TextEncoder().encode(JSON.stringify(req().messages))) });
-    expect(d.closedFor(9).payload).toEqual({ batchSeq: 9, agentId: "ai-1", result: "failed", cost: 160, costUnknown: true, inputTokens: 0, outputTokens: 0 });
-    await write(d);
-    expect(calls.send).toBe(0);
-    expect(llmCostUsed(l.events, DAY)).toBe(160);
-    expect(await l.canAppend((await port(driver).unrecordedDrafts(req(), AT + 2000)).submitted)).toMatch(/duplicate key/);
-    await expect(port(driver).unrecordedDrafts(req({ maxCost: 47 }), AT + 1000)).rejects.toThrow(RangeError);
-    // submit が billingUnknown を返したとき。予約は記録の側に移り、二重に数えない
-    const b = new BatchBudget({ dailyCostLimit: 1000, dryRun: false }, async (day: string) => batchSpendOf(l.events, day));
-    const r = await port(fakeDriver({}, async () => ({ ok: false, errorCode: "timeout", billingUnknown: true })).driver, b).submit(req({ agentId: "ai-2" }));
-    if (r.ok || r.errorCode === "budget_exceeded") throw new Error("unexpected");
-    await write(await unknownCostDrafts(req({ agentId: "ai-2" }), r.sentBodyHash, AT + 1000));
-    expect(await b.spent(DAY)).toBe(320);
+    const zero = fakeDriver({ outcome: async () => ({ ...succeeded, usage: { ...usage, outputTokens: 0 } }) });
+    expect(await port(zero.driver).abandon(ticket())).toMatchObject({ result: "expired", costUnknown: true, usage: { cost: 160 } });
   });
 });
