@@ -11,6 +11,7 @@ import { jstDayOf, llmCostProblems, llmCostUsed, llmTokenCost } from "../../src/
 import type { LogEvent } from "../../src/events/types";
 import type { HolidayTable } from "../../src/holidays/table";
 import { newAccount } from "../../src/ledger/ledger";
+import { tradingDateFor } from "../../src/ledger/calendar";
 import { INITIAL_CASH } from "../../src/ledger/types";
 import { batchCostDeciyen } from "../../src/llm/cost";
 import { GEMINI_PRICE_SWITCH_AT, geminiBatchCostDeciyen, geminiBatchPrice } from "../../src/llm/gemini-pricing";
@@ -56,7 +57,7 @@ const sub = (at: number, agentId: string, tradingDate: string, maxCost: number, 
   actor: "system",
   refs: [],
   payload: {
-    agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: BODY, batchId: `batch_${agentId}_${tradingDate}`, customId: `${agentId}-${tradingDate}`, maxCost, tradingDate,
+    agentId, provider: "anthropic", modelId: "m", promptVersion: "v1", sentBodyHash: BODY, customId: `${agentId}-${tradingDate}`, maxCost, tradingDate,
     submittedAt: at, yenPerUsd: 160, ...PRICE, maxInputTokens: 0, maxOutputTokens: 0, ...extra,
   },
 });
@@ -70,6 +71,20 @@ const close = (at: number, s: LogEvent, cost: number, extra: Record<string, unkn
     ...(extra.costUnknown === true ? {} : PRICE), ...extra,
   },
 });
+/** ③ 送った記録（llm.batch.sent）。①（s）を指し、提供元のバッチのIDを足す */
+const sent = (at: number, s: LogEvent, extra: Record<string, unknown> = {}): Draft => ({
+  type: "llm.batch.sent",
+  recordedAt: at,
+  actor: "system",
+  refs: [s.seq],
+  payload: { batchSeq: s.seq, agentId: (s.payload as { agentId: string }).agentId, batchId: `batch_${s.seq}`, ...extra },
+});
+/** ① を書き、すぐに ③ も書く（送れた依頼）。① を返す */
+async function okSent(log: EventLog, d: Draft): Promise<LogEvent> {
+  const s = await ok(log, d);
+  await ok(log, sent(d.recordedAt, s));
+  return s;
+}
 const run = (at: number, agentId: string, batchSeq: number | undefined, extra: Record<string, unknown> = {}): Draft => ({
   type: "agent.run",
   recordedAt: at,
@@ -87,7 +102,7 @@ describe("submittedAt（依頼を決めた時刻）で、費用の日と取引�
     expect(LLM_RECORD_WINDOW_MS).toBe(3_600_000);
     expect(await reason(log, sub(at, "alpha", "2026-11-10", 100, { submittedAt: at + 1 }))).toBe("submittedAt must be within an hour before recordedAt");
     expect(await reason(log, sub(at, "alpha", "2026-11-10", 100, { submittedAt: at - 3_600_001 }))).toBe("submittedAt must be within an hour before recordedAt");
-    await ok(log, sub(at, "alpha", "2026-11-10", 100, { submittedAt: at - 3_600_000 }));
+    await okSent(log, sub(at, "alpha", "2026-11-10", 100, { submittedAt: at - 3_600_000 }));
   });
 
   it("submittedAt に、文字列・小数・負・null・NaN・大きすぎる数は使えない", async () => {
@@ -100,7 +115,7 @@ describe("submittedAt（依頼を決めた時刻）で、費用の日と取引�
 
   it("前回の低の指摘：0時をまたいで記録しても、費用は依頼を決めた日（submittedAt の日本時間）に付く（直った）", async () => {
     const log = await setup();
-    await ok(log, sub(jst("2026-11-10", 0, 0, 0, 500), "alpha", "2026-11-10", 600, { submittedAt: jst(DAY, 23, 59, 59, 999) }));
+    await okSent(log, sub(jst("2026-11-10", 0, 0, 0, 500), "alpha", "2026-11-10", 600, { submittedAt: jst(DAY, 23, 59, 59, 999) }));
     expect(llmCostUsed(log.events, DAY)).toBe(600);
     expect(llmCostUsed(log.events, "2026-11-10")).toBe(0);
   });
@@ -109,9 +124,9 @@ describe("submittedAt（依頼を決めた時刻）で、費用の日と取引�
   // 0:30 に送った依頼を 23:31 に決めたと書けば、前の日の枠の残りを使える。実際の暦日（記録した日）では1日に 1,400 を使っても、検査は何も挙げない
   it("submittedAt を最大1時間さかのぼると、前の日の枠の残りで払える（実際の暦日では100円を超えても挙がらない）", async () => {
     const log = await setup();
-    await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 600));
-    await ok(log, sub(jst("2026-11-10", 0, 30), "beta", "2026-11-10", 400, { submittedAt: jst(DAY, 23, 31) }));
-    await ok(log, sub(jst("2026-11-10", 0, 31), "gamma", "2026-11-10", 1000));
+    await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 600));
+    await okSent(log, sub(jst("2026-11-10", 0, 30), "beta", "2026-11-10", 400, { submittedAt: jst(DAY, 23, 31) }));
+    await okSent(log, sub(jst("2026-11-10", 0, 31), "gamma", "2026-11-10", 1000));
     expect(llmCostProblems(log.events)).toEqual([]);
     const byRecordedDay = log.events.filter((e) => e.type === "llm.batch.submitted" && jstDayOf(e.recordedAt) === "2026-11-10").reduce((s, e) => s + (e.payload as { maxCost: number }).maxCost, 0);
     expect(byRecordedDay).toBe(1400);
@@ -121,73 +136,90 @@ describe("submittedAt（依頼を決めた時刻）で、費用の日と取引�
     const log = await setup();
     const at = jst("2026-11-10", 8, 30, 1);
     expect(await reason(log, sub(at, "alpha", "2026-11-11", 100, { submittedAt: jst("2026-11-10", 8, 29, 59) }))).toBe("tradingDate must be the next trading date");
-    const s = await ok(log, sub(at, "alpha", "2026-11-10", 100, { submittedAt: jst("2026-11-10", 8, 29, 59) }));
+    const s = await okSent(log, sub(at, "alpha", "2026-11-10", 100, { submittedAt: jst("2026-11-10", 8, 29, 59) }));
     const c = await ok(log, close(jst("2026-11-10", 8, 31), s, 50));
     expect(await reason(log, run(jst("2026-11-10", 8, 32), "alpha", c.seq))).toBe("the run must be recorded before the cutoff of the batch's trading date");
   });
 
   it("submittedAt をさかのぼっても、同じ AI・同じ取引日の2つ目の依頼にはならない", async () => {
     const log = await setup();
-    await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100));
-    expect(await reason(log, sub(jst("2026-11-10", 8, 40), "alpha", "2026-11-10", 100, { submittedAt: jst("2026-11-10", 8, 0), batchId: "x", customId: "x" }))).toMatch(/duplicate key llmbatch:alpha:2026-11-10$/);
+    await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100));
+    expect(await reason(log, sub(jst("2026-11-10", 8, 40), "alpha", "2026-11-10", 100, { submittedAt: jst("2026-11-10", 8, 0), customId: "x" }))).toMatch(/duplicate key llmbatch:alpha:2026-11-10$/);
   });
 });
 
-describe("送る前の確かめ（canAppend）と、送ったあとの記録（append）の食い違い", () => {
-  /** runner が送る前に通す仮の記録（batchId は null、本文のハッシュは0を64個） */
-  const probe = (at: number, agentId: string, tradingDate: string, maxCost: number, extra: Record<string, unknown> = {}) =>
-    sub(at, agentId, tradingDate, maxCost, { batchId: null, sentBodyHash: "0".repeat(64), ...extra });
-
-  it("canAppend は何も書かない（何度呼んでも、そのあと本物の記録を書ける）。書いたあとは同じ取引日を断る", async () => {
+// 2026-11-08 の lead の決定で、送る前の確かめは ①（予約）の追記そのものになった。前の「batchId が null の仮の記録を canAppend に通す」前提はなくなった。
+// ここでは、canAppend と append が同じ答えを返すこと、①を書いたあとの ②（送る）・③（送った記録）で予約が消えないことを確かめる
+describe("送る前の予約（①）と、送ったあとの記録（③）の食い違い", () => {
+  it("canAppend は何も書かない（何度呼んでも、そのあと本物の予約を書ける）。書いたあとは同じ取引日を断る", async () => {
     const log = await setup();
     const at = jst(DAY, 16, 35);
     const before = log.events.length;
-    expect(await log.canAppend(probe(at, "alpha", "2026-11-10", 100))).toBeNull();
-    expect(await log.canAppend(probe(at, "alpha", "2026-11-10", 100))).toBeNull();
+    expect(await log.canAppend(sub(at, "alpha", "2026-11-10", 100))).toBeNull();
+    expect(await log.canAppend(sub(at, "alpha", "2026-11-10", 100))).toBeNull();
     expect(log.events.length).toBe(before);
-    await ok(log, sub(at + 1000, "alpha", "2026-11-10", 100, { submittedAt: at }));
-    expect(await log.canAppend(probe(at + 2000, "alpha", "2026-11-10", 100))).toMatch(/duplicate key llmbatch:alpha:2026-11-10$/);
-    expect(await log.canAppend({ ...probe(at, "alpha", "2026-11-10", 100), type: "order_sheet.committed" })).toBe("use commitSheet");
+    const s = await ok(log, sub(at + 1000, "alpha", "2026-11-10", 100, { submittedAt: at }));
+    expect(await log.canAppend(sub(at + 2000, "alpha", "2026-11-10", 100))).toMatch(/duplicate key llmbatch:alpha:2026-11-10$/);
+    expect(await log.canAppend({ ...sub(at, "alpha", "2026-11-10", 100), type: "order_sheet.committed" })).toBe("use commitSheet");
+    // ③ も canAppend で確かめられ、何も書かない
+    expect(await log.canAppend(sent(at + 3000, s))).toBeNull();
+    expect(log.events.length).toBe(before + 1);
   });
 
-  it("仮の値で通っても、提供元が返した batchId が形に合わなければ記録は断られる。そのときは batchId を null にして書ける（予約は残る）", async () => {
+  it("提供元が返した batchId が形に合わなければ③は断られる。そのときも①の予約は残り、予約した費用で閉じるほかない", async () => {
     const log = await setup();
     const at = jst(DAY, 16, 35);
-    expect(await log.canAppend(probe(at, "alpha", "2026-11-10", 100))).toBeNull();
-    for (const batchId of ["a".repeat(257), "batch 1", "batché"]) {
-      expect(await reason(log, sub(at + 1000, "alpha", "2026-11-10", 100, { submittedAt: at, batchId })), batchId).toBe("batchId must be a provider batch id or null");
+    const s = await ok(log, sub(at, "alpha", "2026-11-10", 100));
+    for (const batchId of ["a".repeat(257), "batch 1", "batché", "", null, 1, undefined]) {
+      expect(await reason(log, sent(at + 1000, s, { batchId })), String(batchId)).toBe("batchId must be a provider batch id");
     }
-    await ok(log, sub(at + 1000, "alpha", "2026-11-10", 100, { submittedAt: at, batchId: null }));
+    expect(llmCostUsed(log.events, DAY)).toBe(100);
+    // ③がないので、受け取り・打ち切りでは閉じられない
+    expect(await reason(log, close(at + 2000, s, 0, { result: "expired" }))).toBe("a batch that was not sent can only close as failed");
+    await ok(log, close(at + 2000, s, 100, { result: "failed", costUnknown: true }));
     expect(llmCostUsed(log.events, DAY)).toBe(100);
   });
 
-  // 【低】送る口（submit）が1時間より長くかかると、送ったあとの記録をどうしても書けない（submittedAt を今に直すと、別の日・別の取引日になりうる）。
-  // 課金された依頼が記録に残らず、上限の検査に入らない。runner の送る口の待ち時間を1時間より十分短くする必要がある（宛先 platform）
-  it("送るのに1時間より長くかかると、canAppend は通ったのに、本物の記録は断られる", async () => {
+  // 前は【低】「送るのに1時間より長くかかると、送ったあとの記録を書けない」だった。新しい形では①を送る前に書くので、送るのが遅れても予約は記録にある。
+  // ③には時刻の決まりがない（1時間を過ぎても、取引日の締めを過ぎても書ける）。締めのあとの答えは agent.run の検査で使えない
+  it("送るのに1時間より長くかかっても、①はもう書けていて、③は時刻に関係なく書ける", async () => {
     const log = await setup();
     const at = jst(DAY, 16, 35);
-    expect(await log.canAppend(probe(at, "alpha", "2026-11-10", 100))).toBeNull();
-    expect(await reason(log, sub(at + LLM_RECORD_WINDOW_MS + 1, "alpha", "2026-11-10", 100, { submittedAt: at }))).toBe("submittedAt must be within an hour before recordedAt");
+    const s = await ok(log, sub(at, "alpha", "2026-11-10", 100));
+    await ok(log, sent(at + LLM_RECORD_WINDOW_MS + 1, s));
+    const t = await ok(log, sub(at + LLM_RECORD_WINDOW_MS + 2, "beta", "2026-11-10", 100));
+    await ok(log, sent(jst("2026-11-12", 9), t));
+    expect(llmCostUsed(log.events, DAY)).toBe(200);
   });
 
-  it("同じ AI の canAppend が2回続けて通っても、2つ目の本物の記録は一意キーで断られる（runner は AI ごとに1本ずつ送る必要がある）", async () => {
+  it("同じ AI の canAppend が2回続けて通っても、2つ目の予約は一意キーで断られる（同時に動いた2つの実行の片方だけが送れる）", async () => {
     const log = await setup();
     const at = jst(DAY, 16, 35);
-    expect(await log.canAppend(probe(at, "alpha", "2026-11-10", 100))).toBeNull();
-    expect(await log.canAppend(probe(at, "alpha", "2026-11-10", 100))).toBeNull();
-    await ok(log, sub(at, "alpha", "2026-11-10", 100));
-    expect(await reason(log, sub(at, "alpha", "2026-11-10", 100, { batchId: "b2", customId: "b2" }))).toMatch(/duplicate key llmbatch:alpha:2026-11-10$/);
+    expect(await log.canAppend(sub(at, "alpha", "2026-11-10", 100))).toBeNull();
+    expect(await log.canAppend(sub(at, "alpha", "2026-11-10", 100, { customId: "b2" }))).toBeNull();
+    await okSent(log, sub(at, "alpha", "2026-11-10", 100));
+    expect(await reason(log, sub(at, "alpha", "2026-11-10", 100, { customId: "b2" }))).toMatch(/duplicate key llmbatch:alpha:2026-11-10$/);
+  });
+
+  it("別の AI の予約が同時に canAppend を通っても、合わせて上限を超える2つ目は追記で断る", async () => {
+    const log = await setup();
+    const at = jst(DAY, 16, 35);
+    await okSent(log, sub(at, "alpha", "2026-11-10", 400));
+    expect(await log.canAppend(sub(at, "beta", "2026-11-10", 500))).toBeNull();
+    expect(await log.canAppend(sub(at, "gamma", "2026-11-10", 500))).toBeNull();
+    await ok(log, sub(at, "beta", "2026-11-10", 500));
+    expect(await reason(log, sub(at, "gamma", "2026-11-10", 500))).toBe("daily LLM cost limit exceeded (1400 > 1000)");
   });
 
   it("canAppend のあとに祝日の一覧が変わると、取引日が変わって本物の記録は断られる", async () => {
     const log = await setup();
     const at = jst(DAY, 16, 35);
-    expect(await log.canAppend(probe(at, "alpha", "2026-11-10", 100))).toBeNull();
+    expect(await log.canAppend(sub(at, "alpha", "2026-11-10", 100))).toBeNull();
     await ok(log, { type: "holidays.adopted", recordedAt: at, actor: "operator:owner", refs: [], payload: { holidaysSha256: H2 } });
     expect(await reason(log, sub(at, "alpha", "2026-11-10", 100))).toBe("tradingDate must be the next trading date");
     // 記録が書けたあとは、その取引日を休みにする一覧には変えられない（逆向きは守られている）
     const log2 = await setup();
-    await ok(log2, sub(at, "alpha", "2026-11-10", 100));
+    await okSent(log2, sub(at, "alpha", "2026-11-10", 100));
     expect(await reason(log2, { type: "holidays.adopted", recordedAt: at, actor: "operator:owner", refs: [], payload: { holidaysSha256: H2 } })).toMatch(/changes 2026-11-10, which the log already used/);
   });
 
@@ -203,28 +235,38 @@ describe("送る前の確かめ（canAppend）と、送ったあとの記録（a
     const log = await setup();
     let at = jst(DAY, 16, 0);
     const mismatches: string[] = [];
-    for (let i = 0; i < 400; i++) {
+    for (let i = 0; i < 1200; i++) {
       at += pick([0, 1, 60_000, 60_000, 3_600_000]);
       const agentId = pick(["alpha", "beta", "gamma", "delta"]);
       const subs = log.events.filter((e) => e.type === "llm.batch.submitted");
       const closes = log.events.filter((e) => e.type === "llm.batch.closed");
       let d: Draft;
-      const kind = pick(["sub", "close", "run"]);
+      const kind = pick(["sub", "sent", "sent", "close", "run"]);
       if (kind === "sub" || subs.length === 0) {
-        const td = pick(["2026-11-10", "2026-11-11", "2026-11-12"]);
-        d = sub(at, agentId, td, pick([1, 100, 1000]), {
+        const next = tradingDateFor(at, TABLE.dates);
+        const td = pick([next, next, next, "2026-11-10", "2026-11-11", "2026-11-12"]);
+        d = sub(at, agentId, td, pick([1, 100, 100, 1000]), {
           submittedAt: at - pick([0, 0, 1, 3_600_000, 3_600_001]),
           maxInputTokens: pick([0, 0, 100, 10_000_000]),
-          batchId: pick([null, `b${i}`, `b${i}`, "x y"]),
           yenPerUsd: pick([160, 160, 0, 1]),
+          // ①に batchId を書くのは、知らない項目として断られるはず
+          ...(rnd() < 0.15 ? { batchId: pick([null, `b${i}`]) } : {}),
         });
-      } else if (kind === "close" || closes.length === 0) {
+      } else if (kind === "sent") {
         const s = pick(subs);
+        d = sent(at, s, pick([{}, {}, { batchId: "x y" }, { agentId }, { batchSeq: s.seq + 1 }]));
+        if ((d.payload as { batchSeq: number }).batchSeq !== s.seq) d = { ...d, refs: [(d.payload as { batchSeq: number }).batchSeq] };
+      } else if (kind === "close" || closes.length === 0) {
+        // 受け取りの記録（と、それを指す実行）も試せるよう、多くは③のある①を閉じる
+        const sentSeqs = new Set(log.events.filter((e) => e.type === "llm.batch.sent").map((e) => (e.payload as { batchSeq: number }).batchSeq));
+        const withSent = subs.filter((e) => sentSeqs.has(e.seq));
+        const s = withSent.length > 0 && rnd() < 0.7 ? pick(withSent) : pick(subs);
         const cost = pick([0, 1, 50, (s.payload as { maxCost: number }).maxCost]);
         d = close(at, s, cost, pick([{}, { result: "expired", costUnknown: true }, { result: "failed" }, { outputTokens: cost + 1 }, { inputCentsPer10MTok: 700_000 }, { cacheReadInputTokens: 1 }]));
         if (rnd() < 0.2) d = { ...d, payload: { ...d.payload, agentId } };
       } else {
-        const c = pick(closes);
+        const collected = closes.filter((e) => (e.payload as { result: string }).result === "collected");
+        const c = collected.length > 0 && rnd() < 0.7 ? pick(collected) : pick(closes);
         d = run(at, pick([agentId, (c.payload as { agentId: string }).agentId]), c.seq, pick([{}, { sentBodyHash: "a".repeat(64) }]));
       }
       const can = await log.canAppend(d);
@@ -234,14 +276,15 @@ describe("送る前の確かめ（canAppend）と、送ったあとの記録（a
     expect(mismatches).toEqual([]);
     // 通る記録と断られる記録の両方を比べたことを確かめる
     const written = (t: string) => log.events.filter((e) => e.type === t).length;
-    expect([written("llm.batch.submitted"), written("llm.batch.closed"), written("agent.run")].every((n) => n >= 2), `${written("llm.batch.submitted")}/${written("llm.batch.closed")}/${written("agent.run")}`).toBe(true);
+    const counts = ["llm.batch.submitted", "llm.batch.sent", "llm.batch.closed", "agent.run"].map(written);
+    expect(counts.every((n) => n >= 2), counts.join("/")).toBe(true);
   });
 });
 
 describe("実際の費用は、トークン数と料金から出した値ちょうど", () => {
   it("1つ少ない・1つ多い費用は断る。値は src/llm/cost.ts の batchCostDeciyen と同じ", async () => {
     const log = await setup();
-    const s = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000, { ...SONNET }));
+    const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000, { ...SONNET }));
     const tokens = { inputTokens: 123_457, outputTokens: 6_789 };
     const want = llmTokenCost(tokens, { yenPerUsd: 160, ...SONNET })!;
     expect(want).toBe(batchCostDeciyen({ ...tokens, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, { inputCentsPerMTok: 100, outputCentsPerMTok: 500 }, 160));
@@ -253,7 +296,7 @@ describe("実際の費用は、トークン数と料金から出した値ちょ�
 
   it("閉じた記録の料金を予約より下げて（0まで）費用を小さく書くことはできない（d4bb3e4 で直った）", async () => {
     const log = await setup();
-    const s = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000, { ...SONNET }));
+    const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000, { ...SONNET }));
     for (const price of [{ inputCentsPer10MTok: 0, outputCentsPer10MTok: 0 }, { inputCentsPer10MTok: 999, outputCentsPer10MTok: 5_000 }, { inputCentsPer10MTok: 1_000, outputCentsPer10MTok: 4_999 }]) {
       const want = llmTokenCost({ inputTokens: 5_000_000, outputTokens: 1_000_000 }, { yenPerUsd: 160, ...price })!;
       expect(await reason(log, close(jst(DAY, 17), s, want, { inputTokens: 5_000_000, outputTokens: 1_000_000, ...price })), JSON.stringify(price)).toBe("the price must equal the reserved price");
@@ -265,7 +308,7 @@ describe("実際の費用は、トークン数と料金から出した値ちょ�
   it("予約の料金を0にすれば、どれだけトークンを使っても使用済みは1（予約）から0（閉じたあと）になる", async () => {
     const log = await setup();
     const zero = { inputCentsPer10MTok: 0, outputCentsPer10MTok: 0 };
-    const t = await ok(log, sub(jst(DAY, 16, 35), "beta", "2026-11-10", 1, { ...zero, maxInputTokens: 10_000_000, maxOutputTokens: 10_000_000 }));
+    const t = await okSent(log, sub(jst(DAY, 16, 35), "beta", "2026-11-10", 1, { ...zero, maxInputTokens: 10_000_000, maxOutputTokens: 10_000_000 }));
     expect(llmCostUsed(log.events, DAY)).toBe(1);
     await ok(log, close(jst(DAY, 17), t, 0, { inputTokens: 10_000_000, outputTokens: 10_000_000, ...zero }));
     expect(llmCostUsed(log.events, DAY)).toBe(0);
@@ -273,7 +316,7 @@ describe("実際の費用は、トークン数と料金から出した値ちょ�
 
   it("予約と違う料金・料金の欠け・悪い値は断る。費用が分からない記録に料金があれば断る。閉じた記録に yenPerUsd は書けない", async () => {
     const log = await setup();
-    const s = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000));
+    const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000));
     const bad = "the price must equal the reserved price";
     expect(await reason(log, close(jst(DAY, 17), s, 1, { inputCentsPer10MTok: 625_001 }))).toBe(bad);
     expect(await reason(log, close(jst(DAY, 17), s, 1, { outputCentsPer10MTok: 625_001 }))).toBe(bad);
@@ -300,7 +343,7 @@ describe("実際の費用は、トークン数と料金から出した値ちょ�
     const maxTok = { inputTokens: 200_000, outputTokens: 100_000 };
     const maxCost = llmTokenCost(maxTok, { yenPerUsd: 160, ...oldPrice })!;
     const log = await setup();
-    const s = await ok(log, sub(decided + 500, "alpha", "2026-12-30", maxCost, { provider: "gemini", modelId: model, submittedAt: decided, ...oldPrice, maxInputTokens: maxTok.inputTokens, maxOutputTokens: maxTok.outputTokens }));
+    const s = await okSent(log, sub(decided + 500, "alpha", "2026-12-30", maxCost, { provider: "gemini", modelId: model, submittedAt: decided, ...oldPrice, maxInputTokens: maxTok.inputTokens, maxOutputTokens: maxTok.outputTokens }));
     const real = geminiBatchCostDeciyen({ ...maxTok, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 }, model, created, 160)!;
     expect(real).toBe(llmTokenCost(maxTok, { yenPerUsd: 160, ...newPrice }));
     expect(await reason(log, close(decided + 60_000, s, real, { ...maxTok, ...newPrice }))).toBe("the price must equal the reserved price");
@@ -325,7 +368,7 @@ describe("実際の費用は、トークン数と料金から出した値ちょ�
 describe("キャッシュのトークン", () => {
   it("キャッシュへの書き込みは入力の2倍、読み出しは入力と同じ単価で数える（batchCostDeciyen と同じ）。数えずに安く書けば断る", async () => {
     const log = await setup();
-    const s = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000, { ...SONNET }));
+    const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000, { ...SONNET }));
     const usage = { inputTokens: 1_000, outputTokens: 2_000, cacheCreationInputTokens: 300_000, cacheReadInputTokens: 700_000 };
     const want = llmTokenCost(usage, { yenPerUsd: 160, ...SONNET })!;
     expect(want).toBe(batchCostDeciyen(usage, { inputCentsPerMTok: 100, outputCentsPerMTok: 500 }, 160));
@@ -336,7 +379,7 @@ describe("キャッシュのトークン", () => {
 
   it("キャッシュの欄に、負・小数・文字列・null は使えない", async () => {
     const log = await setup();
-    const s = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000));
+    const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 1000));
     for (const f of ["cacheCreationInputTokens", "cacheReadInputTokens"]) {
       for (const v of [-1, 0.5, "1", null, 2 ** 53]) {
         expect(await reason(log, close(jst(DAY, 17), s, 1, { [f]: v })), `${f}=${String(v)}`).toBe("cost and token counts must be non-negative integers");
@@ -350,8 +393,8 @@ describe("キャッシュのトークン", () => {
     const log = await setup();
     const maxTok = { inputTokens: 300_000, outputTokens: 0 };
     const maxCost = llmTokenCost(maxTok, { yenPerUsd: 160, ...SONNET })!;
-    const s = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", maxCost, { ...SONNET, maxInputTokens: maxTok.inputTokens }));
-    await ok(log, sub(jst(DAY, 16, 36), "beta", "2026-11-10", 1000 - maxCost));
+    const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", maxCost, { ...SONNET, maxInputTokens: maxTok.inputTokens }));
+    await okSent(log, sub(jst(DAY, 16, 36), "beta", "2026-11-10", 1000 - maxCost));
     const usage = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 300_000 };
     const cost = llmTokenCost(usage, { yenPerUsd: 160, ...SONNET })!;
     expect(cost).toBe(maxCost * 2);
@@ -368,7 +411,7 @@ describe("maxCost と上限のトークン数", () => {
       const bound = llmTokenCost(maxTok, { yenPerUsd: 160, ...price })!;
       const extra = { ...price, maxInputTokens: maxTok.inputTokens, maxOutputTokens: maxTok.outputTokens };
       expect(await reason(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", bound - 1, extra))).toBe(`maxCost must be at least ${bound} (the cost of the max tokens)`);
-      await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", bound, extra));
+      await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", bound, extra));
     }
   });
 
@@ -385,14 +428,14 @@ describe("maxCost と上限のトークン数", () => {
     }
     const huge = { maxInputTokens: Number.MAX_SAFE_INTEGER, inputCentsPer10MTok: Number.MAX_SAFE_INTEGER, yenPerUsd: Number.MAX_SAFE_INTEGER };
     expect(await reason(log, sub(at, "alpha", "2026-11-10", Number.MAX_SAFE_INTEGER, huge))).toBe("maxCost must be at least null (the cost of the max tokens)");
-    const s = await ok(log, sub(at, "alpha", "2026-11-10", 100));
+    const s = await okSent(log, sub(at, "alpha", "2026-11-10", 100));
     expect(await reason(log, close(at + 1, s, 1, { inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: Number.MAX_SAFE_INTEGER, cacheCreationInputTokens: Number.MAX_SAFE_INTEGER }))).toBe("cost must be null (from the tokens and the price)");
   });
 
   // 記録に残る yenPerUsd で確かめる決まり（core の判断）。owner の決めた160と違う値でも通る。値が正しいかは記録の検査の外
   it("yenPerUsd は160に決め打ちされていない（1でも通り、費用は160分の1になる）", async () => {
     const log = await setup();
-    const s = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 10, { yenPerUsd: 1, ...SONNET, maxInputTokens: 1_000_000 }));
+    const s = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 10, { yenPerUsd: 1, ...SONNET, maxInputTokens: 1_000_000 }));
     const want = llmTokenCost({ inputTokens: 1_000_000, outputTokens: 0 }, { yenPerUsd: 1, ...SONNET })!;
     await ok(log, close(jst(DAY, 17), s, want, { inputTokens: 1_000_000, outputTokens: 0, ...SONNET }));
     expect(want).toBe(10);
@@ -401,13 +444,13 @@ describe("maxCost と上限のトークン数", () => {
 });
 
 describe("agent.run の batchSeq（元になったバッチ）", () => {
-  /** 4体が 11-09 の夕方に 11-10 の分を頼み、alpha と delta は受け取り、beta は期限切れ、gamma は失敗 */
+  /** 4体が 11-09 の夕方に 11-10 の分を頼み、alpha と delta は受け取り、beta は期限切れ、gamma は送れずに失敗（③なし・費用0） */
   async function flow() {
     const log = await setup(["alpha", "beta", "gamma", "delta"]);
-    const a = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100));
-    const b = await ok(log, sub(jst(DAY, 16, 36), "beta", "2026-11-10", 100));
+    const a = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100));
+    const b = await okSent(log, sub(jst(DAY, 16, 36), "beta", "2026-11-10", 100));
     const g = await ok(log, sub(jst(DAY, 16, 37), "gamma", "2026-11-10", 100));
-    const dl = await ok(log, sub(jst(DAY, 16, 38), "delta", "2026-11-10", 100));
+    const dl = await okSent(log, sub(jst(DAY, 16, 38), "delta", "2026-11-10", 100));
     const ca = await ok(log, close(jst("2026-11-10", 6, 50), a, 40));
     const cb = await ok(log, close(jst("2026-11-10", 6, 51), b, 100, { result: "expired", costUnknown: true }));
     const cg = await ok(log, close(jst("2026-11-10", 6, 52), g, 0, { result: "failed" }));
@@ -451,7 +494,7 @@ describe("agent.run の batchSeq（元になったバッチ）", () => {
 
   it("前回の低の指摘：締めのあとに collected で閉じることは今も書けるが、その答えを batchSeq で指す実行は書けない", async () => {
     const log = await setup();
-    const a = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100));
+    const a = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100));
     const c = await ok(log, close(jst("2026-11-10", 9), a, 40));
     expect(await reason(log, run(jst("2026-11-10", 9, 1), "alpha", c.seq))).toBe("the run must be recorded before the cutoff of the batch's trading date");
   });
@@ -460,7 +503,7 @@ describe("agent.run の batchSeq（元になったバッチ）", () => {
   // 取引の先読みにはならない（注文票の入力は締めで確かめる）が、「どのバッチの答えか」は記録から確かめられない
   it("batchSeq を書かなければ、締めのあとに受け取った答えと同じ本文のハッシュの実行も書ける", async () => {
     const log = await setup();
-    const a = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100));
+    const a = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100));
     await ok(log, close(jst("2026-11-10", 9), a, 40));
     await ok(log, run(jst("2026-11-10", 9, 1), "alpha", undefined, { cost: 40, inputTokens: 0, outputTokens: 40 }));
   });
@@ -477,7 +520,7 @@ describe("agent.run の batchSeq（元になったバッチ）", () => {
   // 直し方の方針：batchSeq があるとき、inputSeqs はすべて元の依頼（llm.batch.submitted）の seq より小さいことを求める（72f340b で直った）
   it("バッチの答えを使った実行の入力に、依頼のあとに取り込んだ情報は入れられない", async () => {
     const log = await setup();
-    const a = await ok(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100));
+    const a = await okSent(log, sub(jst(DAY, 16, 35), "alpha", "2026-11-10", 100));
     const src = await ok(log, { type: "source.captured", recordedAt: jst(DAY, 20), actor: "system", refs: [], payload: { publishedAt: jst(DAY, 19), fetchedAt: jst(DAY, 20) } });
     const c = await ok(log, close(jst("2026-11-10", 6, 50), a, 40));
     expect(src.seq).toBeGreaterThan(a.seq);
