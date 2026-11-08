@@ -57,6 +57,13 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           # 入力は環境変数で渡し、シェルの文に直接埋め込まない
           INPUT_DATE: ${{ inputs.date }}
+          # LLM の AI 投資家（#179）。LLM_ENABLED が "true" のときだけ呼ぶ。LLM_DRY_RUN が "false" のときだけ注文を出す（値がなければ試運転）
+          LLM_ENABLED: ${{ vars.LLM_ENABLED }}
+          LLM_DRY_RUN: ${{ vars.LLM_DRY_RUN }}
+          # API キーは、毎日の実行の手順にだけ渡す（npm ci と照合には渡さない）
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set +e
           args=(run)
