@@ -4,13 +4,21 @@
 // 実行のたびに DB から作り直すので、プロセスが落ちたあとの回し直しも同じ形になる。
 import type { Clock, MarketDataPort } from "../src/contracts";
 import { verifyChain } from "../src/events/chain";
+import { LLM_DAILY_COST_LIMIT } from "../src/events/llm-cost";
 import { replay } from "../src/events/replay";
 import type { LogEvent } from "../src/events/types";
 import { holidayTable as bundledHolidays, holidaysFor, type HolidayTable } from "../src/holidays";
 import { IngestedMarketData } from "../src/ingest/market-data";
 import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay } from "../src/ledger/ledger";
 import { INITIAL_CASH } from "../src/ledger/types";
+import { anthropicBatchPort } from "../src/llm/anthropic-port";
+import { type BatchPortOptions, YEN_PER_USD } from "../src/llm/batch-port";
+import { GEMINI_PROVIDER } from "../src/llm/gemini-batch";
+import { geminiBatchPort } from "../src/llm/gemini-port";
+import { openaiBatchPort } from "../src/llm/openai-port";
 import { type RunnerAgent, type RunnerDeps, type StageResult, runDay } from "../src/runner/day";
+import { LLM_INVESTORS, type LlmInvestor } from "../src/runner/llm-agents";
+import type { LlmDeps } from "../src/runner/llm-stage";
 import { ruleAgents } from "../src/runner/rule-agents";
 import { discloseDue } from "../src/runner/world/disclosure";
 import { listCompanies } from "../src/runner/world/listing";
@@ -18,7 +26,7 @@ import { liquidityAgents, setUpParticipants } from "../src/runner/world/particip
 import { PgEventStore, readAllEvents } from "../src/store/pg-store";
 import { PgValueStore } from "../src/store/pg-values";
 import type { SqlDb, SqlRunner } from "../src/store/sql";
-import type { EventStore } from "../src/contracts";
+import type { EventStore, LlmBatchPort } from "../src/contracts";
 
 /** 架空の世界の乱数の種。変えると、上場の価格とばらばらの参加者の注文が変わるので、動かし始めたら変えない */
 export const WORLD_SEED = 20261106;
@@ -34,6 +42,8 @@ export interface PrepareContext {
   clock: Clock;
   seed: number;
   holidayTable: HolidayTable;
+  /** 登録する LLM の AI 投資家（LLM を使う設定のときだけ。#179） */
+  llmInvestors?: readonly LlmInvestor[];
 }
 
 export interface DailyOptions {
@@ -50,6 +60,38 @@ export interface DailyOptions {
   requireAppendOnlyRole?: boolean;
   /** 準備：運営者の記録（祝日・上場・参加者の登録）を、済んでいなければ書き、runner に渡す参加者を返す */
   prepare?: (ctx: PrepareContext) => Promise<RunnerAgent[]>;
+  /** LLM の AI 投資家の設定（llmDepsFromEnv）。なければ LLM を呼ばず、LLM の AI も登録しない */
+  llm?: LlmDeps;
+}
+
+/**
+ * LLM の AI 投資家の設定を、環境変数から読む（#179。GitHub Actions では、リポジトリの変数とシークレットから渡す）。
+ * - LLM_ENABLED：「true」のときだけ使う。ほかは undefined（LLM を呼ばない）
+ * - LLM_DRY_RUN：「false」のときだけ注文を出す。書き忘れたら試運転（投稿だけ）
+ * - API キー（ANTHROPIC_API_KEY・OPENAI_API_KEY・GEMINI_API_KEY）は、各社の口が最初に使うときに読む。ここでは読まない
+ * 1日の上限は記録の上限（LLM_DAILY_COST_LIMIT、100円）、1ドルあたりの円は160（owner の決定。2026-11-07）
+ */
+export function llmDepsFromEnv(env: Readonly<Record<string, string | undefined>>, clock: Clock): LlmDeps | undefined {
+  if (env.LLM_ENABLED !== "true") return undefined;
+  const policy = { dailyCostLimit: LLM_DAILY_COST_LIMIT, dryRun: env.LLM_DRY_RUN !== "false" };
+  const factories: Record<string, (o: BatchPortOptions) => LlmBatchPort> = {
+    anthropic: (o) => anthropicBatchPort(o),
+    openai: (o) => openaiBatchPort(o),
+    [GEMINI_PROVIDER]: (o) => geminiBatchPort(o),
+  };
+  const ports = new Map<string, LlmBatchPort>();
+  return {
+    investors: LLM_INVESTORS,
+    policy,
+    yenPerUsd: YEN_PER_USD,
+    portOf(provider, c) {
+      const make = Object.hasOwn(factories, provider) ? factories[provider]! : undefined;
+      if (!make) throw new RangeError(`unknown provider ${provider}`);
+      if (c) return make({ policy, clock: c, yenPerUsd: YEN_PER_USD });
+      if (!ports.has(provider)) ports.set(provider, make({ policy, clock, yenPerUsd: YEN_PER_USD }));
+      return ports.get(provider)!;
+    },
+  };
 }
 
 const read = async (store: EventStore) => {
@@ -74,7 +116,7 @@ export function firstOpenDay(now: number, table: HolidayTable): string {
  * 本番の準備（何度呼んでも二重に書かない）：祝日の一覧の採用 → 架空の企業の上場と取引対象 → AI投資家と売買役の登録と最初の配分。
  * 返す参加者は、runner に渡すAI投資家（規則）と売買役
  */
-export async function productionSetup({ store, clock, seed, holidayTable }: PrepareContext): Promise<RunnerAgent[]> {
+export async function productionSetup({ store, clock, seed, holidayTable, llmInvestors = [] }: PrepareContext): Promise<RunnerAgent[]> {
   const events = await read(store);
   if (!events.some((e) => e.type === "holidays.adopted")) {
     await must("holidays.adopted", store.append({ type: "holidays.adopted", actor: "operator:owner", refs: [], payload: { holidaysSha256: holidayTable.contentSha256 } }));
@@ -86,7 +128,8 @@ export async function productionSetup({ store, clock, seed, holidayTable }: Prep
   await setUpParticipants(store, startDate);
   const investors = await ruleAgents();
   const registered = new Set((await read(store)).filter((e) => e.type === "agent.registered").map((e) => (e.payload as { agentId: string }).agentId));
-  for (const a of investors) {
+  // LLM の AI 投資家も、規則の AI と同じ形で登録する（判断は runner の LLM の段が行うので、返す参加者には入れない）
+  for (const a of [...investors, ...llmInvestors]) {
     if (registered.has(a.id)) continue;
     await must(`agent.registered ${a.id}`, store.append({ type: "agent.registered", actor: "operator:owner", refs: [], payload: { agentId: a.id, displayName: a.id, startDate, initialCash: INITIAL_CASH } }));
   }
@@ -115,7 +158,7 @@ async function runLocked(date: string, o: DailyOptions): Promise<StageResult[]> 
   const holidayTables = new Map([[holidayTable.contentSha256, holidayTable]]);
   const values = await PgValueStore.open(o.db);
   const store = await PgEventStore.open(o.db, { values, holidayTables, clock: o.clock, requireAppendOnlyRole: o.requireAppendOnlyRole });
-  const agents = await (o.prepare ?? productionSetup)({ store, clock: o.clock, seed: o.seed ?? WORLD_SEED, holidayTable });
+  const agents = await (o.prepare ?? productionSetup)({ store, clock: o.clock, seed: o.seed ?? WORLD_SEED, holidayTable, llmInvestors: o.llm?.investors });
   const deps: RunnerDeps = {
     store,
     market: o.market ?? new IngestedMarketData(o.clock),
@@ -126,6 +169,7 @@ async function runLocked(date: string, o: DailyOptions): Promise<StageResult[]> 
     waitUntil: o.waitUntil ?? (async () => {}),
     // 決算の発表は runDay が、判断の前と1日の最後に書く
     seed: o.seed ?? WORLD_SEED,
+    ...(o.llm ? { llm: o.llm } : {}),
   };
   const results = await runDay(date, deps);
   // 休日の実行（runDay が何もしない）でも、時期が来た決算を書く（前の営業日の引けのあとの実行がなかったとき）。
@@ -135,6 +179,9 @@ async function runLocked(date: string, o: DailyOptions): Promise<StageResult[]> 
 }
 
 /** 判断の段が締めに間に合わなかった（全員の判断がその日はなくなる）。実行を失敗として終わらせる印 */
+/** LLM の段が例外で止まった（その段の detail が "error: " で始まる）。実行を失敗として終わらせる印 */
+export const llmFailed = (results: readonly StageResult[]) => results.some((r) => r.stage.startsWith("llm.") && (r.detail ?? "").startsWith("error: "));
+
 export const missedCutoff = (results: readonly StageResult[]) => results.some((r) => r.stage === "decide" && r.status === "skipped" && (r.detail ?? "").startsWith("after the cutoff"));
 
 export interface VerifyReport {

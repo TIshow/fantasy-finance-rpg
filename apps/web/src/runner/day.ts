@@ -14,6 +14,7 @@ import { cutoffOf, isBusinessDay, nextBusinessDay, previousBusinessDay } from ".
 import type { Account, Deciyen, Order } from "../ledger/types";
 import type { ValuesPort } from "../store/pg-values";
 import { type SplitInput, adjustCloses } from "./adjust";
+import { type DayAccess, type LlmDeps, llmSubmit } from "./llm-stage";
 import { discloseDue } from "./world/disclosure";
 
 /** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引き、凍結した写しを渡す */
@@ -90,6 +91,11 @@ export interface RunnerDeps {
    * 1日の最後に、時期が来た四半期の決算（company.disclosed）を書く。渡さなければ発表しない（呼ぶ側が discloseDue を呼ぶ）
    */
   seed?: number;
+  /**
+   * LLM の AI 投資家（#179）。渡せば、引けのあとにその次の営業日の分を各社のバッチに依頼する（llmSubmit）。
+   * 渡さなければ LLM を呼ばない
+   */
+  llm?: LlmDeps;
 }
 
 const HOUR = 3_600_000;
@@ -120,7 +126,20 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
   await deps.waitUntil(s.closeAt);
   out.push(...(await day.catchUp(date)));
   await disclose();
+  if (deps.llm) out.push(await llmStage("llm.submit", () => llmSubmit(day.access(), deps.llm!, date)));
   return out;
+}
+
+/**
+ * LLM の段の例外は、その段の結果（detail が "error: " で始まる）にして、ほかの段を止めない（毎日の実行は、この結果で失敗の終了コードにする）。
+ * 文は例外の文だけ（API キーは口の外に出ない）
+ */
+async function llmStage(stage: string, f: () => Promise<StageResult>): Promise<StageResult> {
+  try {
+    return await f();
+  } catch (e) {
+    return { stage, status: "skipped", detail: `error: ${e instanceof Error ? e.message : String(e)}` };
+  }
 }
 
 /** AIが返した判断の形を確かめ、記録する形にする（post と note を省いたものは、null と空の文字列）。形が違えば例外 */
@@ -182,6 +201,21 @@ class Day {
 
   private append(type: Parameters<EventStore["append"]>[0]["type"], actor: Parameters<EventStore["append"]>[0]["actor"], payload: Payload, refs: number[] = []) {
     return this.deps.store.append({ type, actor, refs, payload }).then((r) => this.sync(r, type));
+  }
+
+  /** LLM の段（llm-stage.ts）に渡す口。追記は断られても例外にせず、書けたら写しにも当てる */
+  access(): DayAccess {
+    return Object.freeze({
+      events: () => this.log.events,
+      holidays: () => this.log.holidays(),
+      account: (id: string) => this.ledger.account(id),
+      clock: this.deps.clock,
+      values: this.deps.values,
+      append: async (type: Parameters<DayAccess["append"]>[0], payload: Payload, refs: number[]) => {
+        const r = await this.deps.store.append({ type, actor: "system", refs, payload });
+        return r.ok ? { ok: true as const, event: await this.sync(r, type) } : r;
+      },
+    });
   }
 
   /** 時期が来た決算の発表を書き、写しにも当てる（discloseDue が保管に追記した分を、ここで検査して取り込む） */
