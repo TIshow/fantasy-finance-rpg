@@ -40,6 +40,33 @@ export const POST_STANCES = ["bull", "bear", "neutral"] as const;
 export type PostIntent = (typeof POST_INTENTS)[number];
 export type PostStance = (typeof POST_STANCES)[number];
 
+/**
+ * agent.run の、省略できる試運転の印（#179）。試運転の日の実行だけが dryRun: true を書く。false などほかの値は断り、
+ * 試運転でない実行は項目を書かない。印のある注文の判断（purpose: "order"）からは、注文票を確定できない（拒否の記録が残る）
+ */
+export interface AgentRunDryRun {
+  dryRun?: true;
+}
+
+/** correction.issued の対象の種類（#179）。post は投稿（targetSeq は post.published）、input は入力データ */
+export const CORRECTION_KINDS = ["post", "input"] as const;
+export type CorrectionKind = (typeof CORRECTION_KINDS)[number];
+/** correction.issued の理由の最大の文字数（JavaScript の文字列の長さ） */
+export const CORRECTION_REASON_MAX = 500;
+
+/**
+ * correction.issued の中身（#179。EVENT_LOG §3.4）。訂正する対象は targetSeq の1件だけで、前の seq であること。
+ * refs に入れた、targetSeq のほかの seq は引用として扱う。ここにない項目は断る
+ */
+export interface CorrectionIssuedPayload {
+  targetSeq: number;
+  kind: CorrectionKind;
+  /** 空でない、CORRECTION_REASON_MAX 文字までの理由 */
+  reason: string;
+  /** 新しい本文（または正しい値）のハッシュ。SHA-256 の16進（小文字64文字）。あれば書く */
+  newBodyHash?: string;
+}
+
 /** agent:<id> | system | operator:<役割>。認証した身元からサーバーが入れる */
 export type Actor = `agent:${string}` | "system" | `operator:${string}`;
 

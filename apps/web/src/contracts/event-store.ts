@@ -76,5 +76,7 @@ export interface EventStore extends EventReader {
  * これは型の上の便宜であって、保証ではない：実体の EventStore はそのまま代入できる（commitSheet が実体に残る）。
  * 保証は runner（#29）の仕事：dryRun のとき、commitSheet を持たない凍結したオブジェクトを返す工場関数で
  * OrderlessEventStore を作り、runner にはそれだけを渡す。
+ * もう1つの守り：試運転の日の agent.run は dryRun: true を持ち、それを元にした注文票は、実体の commitSheet でも
+ * 確定せず order_sheet.rejected（invalid_sheet）になる。日の途中で試運転を切っても、本物の注文にならない（#179）。
  */
 export type OrderlessEventStore = Omit<EventStore, "commitSheet">;

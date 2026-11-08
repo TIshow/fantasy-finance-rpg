@@ -10,7 +10,7 @@ import { registrationProblem, type Account, type Order, type ParticipantKind, ty
 import { CanonicalizeError } from "./canonical";
 import { sealEvent } from "./chain";
 import { jstDayOf, LLM_DAILY_COST_LIMIT, llmCostUsed, llmTokenCost, type LlmPrice, type LlmTokens } from "./llm-cost";
-import { POST_INTENTS, POST_STANCES, type Actor, type EventType, type LogEvent } from "./types";
+import { CORRECTION_KINDS, CORRECTION_REASON_MAX, POST_INTENTS, POST_STANCES, type Actor, type EventType, type LogEvent } from "./types";
 
 type Writer = "agent" | "system" | "operator";
 
@@ -129,6 +129,8 @@ const CUSTOM_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const isCount = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 0;
 /** 依頼を決めた時刻（submittedAt）から記録するまでに許す遅れ（1時間） */
 export const LLM_RECORD_WINDOW_MS = 3_600_000;
+/** correction.issued の項目（#179。EVENT_LOG §3.4） */
+const CORRECTION_FIELDS = ["targetSeq", "kind", "reason", "newBodyHash"];
 
 export interface AppendContext {
   /** これまでに採用した祝日の一覧を、版（contentSha256）で引けるように渡す。どの版を使うかはログの holidays.adopted が決める */
@@ -653,6 +655,16 @@ export class EventLog {
         if (all.length !== seqs.length) return `announcedSeqs must include every announcement with exDate ${String(p.exDate)}`;
         return null;
       }
+      case "correction.issued": {
+        // 訂正する対象は targetSeq の1件だけ。refs のほかの seq は引用として扱う（#179 の lead の決定）
+        if (Object.keys(p).some((k) => !CORRECTION_FIELDS.includes(k))) return "unknown field in a correction";
+        if (!Number.isSafeInteger(p.targetSeq)) return "targetSeq must be the seq of an earlier event";
+        if (!(CORRECTION_KINDS as readonly unknown[]).includes(p.kind)) return `kind must be one of ${CORRECTION_KINDS.join(", ")}`;
+        if (typeof p.reason !== "string" || p.reason === "" || p.reason.length > CORRECTION_REASON_MAX) return `reason is required (up to ${String(CORRECTION_REASON_MAX)} characters)`;
+        if (p.newBodyHash !== undefined && (typeof p.newBodyHash !== "string" || !SHA256_HEX.test(p.newBodyHash))) return "newBodyHash must be a SHA-256 hex digest";
+        if (p.kind === "post" && this.events[(p.targetSeq as number) - 1]?.type !== "post.published") return "targetSeq of a post correction must be a post.published";
+        return null;
+      }
       case "agent.suspended":
       case "agent.resumed": {
         if (p.scope !== "posts" && p.scope !== "orders" && p.scope !== "both") return "scope must be posts, orders or both";
@@ -759,11 +771,12 @@ export class EventLog {
     return [agentId, "*"].some((id) => this.suspended.get(id)?.has(scope) ?? false);
   }
 
-  /** 元になった agent.run が、同じAIの、その目的の、成功したものか */
+  /** 元になった agent.run が、同じAIの、その目的の、成功したものか。注文票は、試運転（dryRun）の判断からは確定しない（#179） */
   private runProblem(d: Draft, agentId: string, purpose: "post" | "order"): string | null {
     const run = this.events[(d.payload.runSeq as number) - 1];
     const rp = run?.payload as Record<string, unknown> | undefined;
     if (run?.type !== "agent.run" || rp?.agentId !== agentId || rp.purpose !== purpose || rp.ok !== true) return `runSeq must be a successful ${purpose} run of the same agent`;
+    if (purpose === "order" && rp.dryRun === true) return "runSeq must not be a dry run";
     if (Array.isArray(d.payload.inputSeqs) && Array.isArray(rp.inputSeqs)) {
       const runInputs = rp.inputSeqs as unknown[];
       if (!(d.payload.inputSeqs as unknown[]).every((s) => runInputs.includes(s))) return "inputSeqs must be a subset of the run's inputs";
@@ -897,9 +910,12 @@ function keysOf(type: EventType, p: Record<string, unknown>): string[] | string 
 
 /**
  * agent.run の、LLM の費用とトークン数の任意の項目（#179）。規則で動くAIは書かない。
- * maxCost：費用の見積もり（予約）。cost：実際の費用（分からなければ maxCost）。どちらも0.1円単位。sentBodyHash：提供元に実際に送った本文のハッシュ
+ * maxCost：費用の見積もり（予約）。cost：実際の費用（分からなければ maxCost）。どちらも0.1円単位。sentBodyHash：提供元に実際に送った本文のハッシュ。
+ * dryRun：試運転の日の実行の印（true だけ）。印のある注文の判断からは、注文票を確定しない（runProblem）
  */
 function llmRunProblem(p: Record<string, unknown>): string | null {
+  // 試運転の印は、書くなら true だけ（試運転でないことは、書かないことだけで表す）
+  if (p.dryRun !== undefined && p.dryRun !== true) return "dryRun must be true or left out";
   if (p.maxCost !== undefined && (!Number.isSafeInteger(p.maxCost) || (p.maxCost as number) < 1)) return "maxCost must be a positive integer";
   for (const f of ["cost", "inputTokens", "outputTokens"]) if (p[f] !== undefined && !isCount(p[f])) return `${f} must be a non-negative integer`;
   if (p.sentBodyHash !== undefined && (typeof p.sentBodyHash !== "string" || !SHA256_HEX.test(p.sentBodyHash))) return "sentBodyHash must be a SHA-256 hex digest";
