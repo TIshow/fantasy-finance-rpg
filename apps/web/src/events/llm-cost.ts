@@ -138,6 +138,7 @@ export interface LlmReservationFields {
   provider: string;
   modelId: string;
   customId: string;
+  sentBodyHash: string;
   maxCost: Deciyen;
   tradingDate: string;
   submittedAt: number;
@@ -158,6 +159,7 @@ export function llmReservationOf(submitted: Rec): LlmReservationFields {
     provider: p.provider as string,
     modelId: p.modelId as string,
     customId: p.customId as string,
+    sentBodyHash: p.sentBodyHash as string,
     maxCost: p.maxCost as number,
     tradingDate: p.tradingDate as string,
     submittedAt: p.submittedAt as number,

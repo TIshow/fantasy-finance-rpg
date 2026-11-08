@@ -50,7 +50,7 @@ const submitted = (at: number, extra: Record<string, unknown> = {}): Draft => ({
     modelId: "claude-sonnet-5-5",
     promptVersion: "v1",
     sentBodyHash: "b".repeat(64),
-    customId: "alpha-2026-11-10",
+    customId: `alpha-20261110-${"b".repeat(16)}`,
     maxCost: 150,
     tradingDate: "2026-11-10",
     submittedAt: at,
@@ -59,6 +59,7 @@ const submitted = (at: number, extra: Record<string, unknown> = {}): Draft => ({
     outputCentsPer10MTok: 5000,
     maxInputTokens: 50_000,
     maxOutputTokens: 8_000,
+    bodyMaxOutputTokens: 8_000,
     ...extra,
   },
 });
@@ -69,13 +70,14 @@ const sentDraft = (at: number, batchSeq: number, extra: Record<string, unknown> 
   recordedAt: at,
   actor: "system",
   refs: [batchSeq],
-  payload: { batchSeq, agentId: "alpha", batchId: "msgbatch_01", ...extra },
+  payload: { batchSeq, agentId: "alpha", provider: "anthropic", batchId: "msgbatch_01", ...extra },
 });
 
 /** ①と③を書く（送ったところまで）。③は①の1分後 */
 async function submitAndSend(log: EventLog, at: number, extra: Record<string, unknown> = {}) {
   const s = await ok(log, submitted(at, extra));
-  await ok(log, sentDraft(at + 60_000, s.seq, "agentId" in extra ? { agentId: extra.agentId } : {}));
+  const pick = Object.fromEntries(Object.entries(extra).filter(([k]) => k === "agentId" || k === "provider"));
+  await ok(log, sentDraft(at + 60_000, s.seq, { batchId: `batch_${s.seq}`, ...pick }));
   return s;
 }
 
@@ -122,7 +124,7 @@ describe("llm.batch.submitted", () => {
     const log = await setup();
     const e = await ok(log, submitted(jst("2026-11-09", 16, 35)));
     expect(e.keys).toEqual(["llmbatch:alpha:2026-11-10"]);
-    expect(await reason(log, submitted(jst("2026-11-09", 16, 40), { sentBodyHash: "c".repeat(64) }))).toMatch(/duplicate key llmbatch:alpha:2026-11-10/);
+    expect(await reason(log, submitted(jst("2026-11-09", 16, 40), { sentBodyHash: "c".repeat(64), customId: `alpha-20261110-${"c".repeat(16)}` }))).toMatch(/duplicate key llmbatch:alpha:2026-11-10/);
     // 別の AI なら書ける
     await ok(log, submitted(jst("2026-11-09", 16, 40), { agentId: "beta", provider: "openai" }));
   });
@@ -177,7 +179,7 @@ describe("llm.batch.submitted", () => {
     // a を実費 44 で閉じる：44 ＋ 400 ＋ 144 ＝ 588
     await ok(log, closed(jst("2026-11-09", 16, 41), a.seq));
     // b は送れなかった（提供元が断った）ので、費用0で閉じる：44 ＋ 0 ＋ 956 ＝ 1000
-    await ok(log, closed(jst("2026-11-09", 16, 42), b.seq, { agentId: "beta", result: "failed", cost: 0, inputTokens: 0, outputTokens: 0 }));
+    await ok(log, closed(jst("2026-11-09", 16, 42), b.seq, { agentId: "beta", result: "failed", cost: 0, inputTokens: 0, outputTokens: 0, notCreatedError: "provider_error" }));
     await ok(log, submitted(jst("2026-11-09", 16, 43), { agentId: "gamma", maxCost: 956 }));
     await expect(replay(log.events, { get: () => undefined }, CTX)).resolves.toBeDefined();
   });
@@ -194,6 +196,15 @@ describe("llm.batch.submitted", () => {
     [{ batchId: null }, "unknown field in a batch submission"],
     [{ customId: "a:b" }, "customId must match ^[A-Za-z0-9_-]{1,64}$"],
     [{ customId: "x".repeat(65) }, "customId must match ^[A-Za-z0-9_-]{1,64}$"],
+    // 名前の末尾は "-" と本文のハッシュの先頭16文字（別の本文のバッチと取り違えないように）
+    [{ customId: "alpha-2026-11-10" }, "customId must end with - and the first 16 characters of sentBodyHash"],
+    [{ customId: `alpha${"b".repeat(16)}` }, "customId must end with - and the first 16 characters of sentBodyHash"],
+    [{ sentBodyHash: "c".repeat(64) }, "customId must end with - and the first 16 characters of sentBodyHash"],
+    // 本文に書いた出力の上限は、予約の見積もりの上限（maxOutputTokens）以下
+    [{ bodyMaxOutputTokens: 8_001 }, "bodyMaxOutputTokens must be a positive integer up to maxOutputTokens"],
+    [{ bodyMaxOutputTokens: 0 }, "bodyMaxOutputTokens must be a positive integer up to maxOutputTokens"],
+    [{ bodyMaxOutputTokens: undefined }, "bodyMaxOutputTokens must be a positive integer up to maxOutputTokens"],
+    [{ bodyMaxOutputTokens: "8000" }, "bodyMaxOutputTokens must be a positive integer up to maxOutputTokens"],
     [{ maxCost: 0 }, "maxCost must be a positive integer"],
     [{ maxCost: -1 }, "maxCost must be a positive integer"],
     [{ maxCost: "150" }, "maxCost must be a positive integer"],
@@ -204,6 +215,7 @@ describe("llm.batch.submitted", () => {
     [{ outputCentsPer10MTok: "5000" }, "prices and max token counts must be non-negative integers"],
     [{ maxInputTokens: 1.5 }, "prices and max token counts must be non-negative integers"],
     [{ maxOutputTokens: null }, "prices and max token counts must be non-negative integers"],
+    [{ maxOutputTokens: 4_000, bodyMaxOutputTokens: 4_001 }, "bodyMaxOutputTokens must be a positive integer up to maxOutputTokens"],
     // 予約は上限のトークン数から出した費用（144）以上
     [{ maxCost: 143 }, "maxCost must be at least 144 (the cost of the max tokens)"],
     [{ maxInputTokens: Number.MAX_SAFE_INTEGER, inputCentsPer10MTok: 10 ** 9 }, "maxCost must be at least null (the cost of the max tokens)"],
@@ -232,7 +244,7 @@ describe("llm.batch.closed", () => {
     const log2 = await setup();
     const sa = await submitAndSend(log2, jst("2026-11-09", 16, 35));
     const sb = await submitAndSend(log2, jst("2026-11-09", 16, 36), { agentId: "beta" });
-    await ok(log2, closed(jst("2026-11-10", 6, 50), sb.seq, { agentId: "beta", result: "expired", cost: 0, inputTokens: 0, outputTokens: 0 }));
+    await ok(log2, closed(jst("2026-11-10", 6, 50), sb.seq, { agentId: "beta", result: "expired", costUnknown: true, cost: 150, inputTokens: 0, outputTokens: 0 }));
     await ok(log2, closed(jst("2026-11-10", 6, 51), sa.seq));
     await expect(replay(log2.events, { get: () => undefined }, CTX)).resolves.toBeDefined();
     await expect(replay(log.events, { get: () => undefined }, CTX)).resolves.toBeDefined();
@@ -264,6 +276,14 @@ describe("llm.batch.closed", () => {
     [{ cost: 43 }, "cost must be 44 (from the tokens and the price)"],
     [{ cost: 45 }, "cost must be 44 (from the tokens and the price)"],
     [{ result: "expired", cost: 1, inputTokens: 0, outputTokens: 0 }, "cost must be 0 (from the tokens and the price)"],
+    // 送ったバッチは、答えを受け取っていなければ費用0で閉じられない（取り消しはすぐに効かず、処理済みの分は課金される）
+    [{ result: "expired", cost: 0, inputTokens: 0, outputTokens: 0 }, "a sent batch that was not collected cannot cost 0"],
+    [{ result: "failed", cost: 0, inputTokens: 0, outputTokens: 0 }, "a sent batch that was not collected cannot cost 0"],
+    // 答えを受け取ったなら、出力のトークン数は1以上
+    [{ result: "collected", cost: 32, inputTokens: 20_000, outputTokens: 0 }, "a collected batch must have output tokens"],
+    [{ result: "collected", cost: 0, inputTokens: 0, outputTokens: 0 }, "a collected batch must have output tokens"],
+    // 送れなかった理由は、送っていない依頼を費用0で閉じるときだけ
+    [{ notCreatedError: "timeout" }, "notCreatedError is required exactly when a batch that was not sent closes with cost 0"],
     // キャッシュへの書き込みは入力の2倍：1万トークンで 3.2円 を足す
     [{ cacheCreationInputTokens: 10_000 }, "cost must be 76 (from the tokens and the price)"],
     // 料金は予約の料金ちょうど。高くても安くても、0 でも断る（使った額を少なく見せられないように）。書かないのは費用が分からないときだけ
@@ -288,8 +308,11 @@ describe("llm.batch.closed", () => {
     const log = await setup();
     const s1 = await submitAndSend(log, jst("2026-11-09", 16, 35));
     const s2 = await submitAndSend(log, jst("2026-11-09", 16, 36), { agentId: "beta" });
+    const s4 = await submitAndSend(log, jst("2026-11-09", 16, 37), { agentId: "gamma" });
     // 入力10万・出力1万は 240。予約（150）を超えても書ける（上限の検査が挙げる）
     await ok(log, closed(jst("2026-11-10", 6, 50), s2.seq, { agentId: "beta", cost: 240, inputTokens: 100_000, outputTokens: 10_000 }));
+    // 打ち切りでも、処理済みの分のトークン数が分かれば、その費用で閉じられる
+    await ok(log, closed(jst("2026-11-10", 8, 30), s4.seq, { agentId: "gamma", result: "expired", cost: 32, inputTokens: 20_000, outputTokens: 0 }));
     await ok(log, closed(jst("2026-11-10", 8, 30), s1.seq, { result: "expired", costUnknown: true, cost: 150, inputTokens: 0, outputTokens: 0 }));
     // キャッシュの欄は予約の料金で数える：(2万×1000 ＋ 1万×2×1000 ＋ 1,500×5000) セント/1,000万 × 160円 ＝ 7.6円
     const log2 = await setup();
@@ -303,12 +326,16 @@ describe("llm.batch.closed", () => {
       const log = await setup();
       return { log, s: await ok(log, submitted(jst("2026-11-09", 16, 35))) };
     };
-    const zero = { result: "failed", cost: 0, inputTokens: 0, outputTokens: 0 };
+    const zero = { result: "failed", cost: 0, inputTokens: 0, outputTokens: 0, notCreatedError: "rate_limited" };
     const BAD_UNSENT: [Record<string, unknown>, string][] = [
       [{}, "a batch that was not sent can only close as failed"],
       [{ result: "expired", cost: 0, inputTokens: 0, outputTokens: 0 }, "a batch that was not sent can only close as failed"],
       [{ result: "collected", costUnknown: true, cost: 150 }, "a batch that was not sent can only close as failed"],
       [{ result: "failed" }, "a batch that was not sent must cost 0 or the reserved maxCost"],
+      // 費用0で閉じるなら、送れなかった理由（send の notCreated の errorCode）が要る。予約した費用で閉じるなら書かない
+      [{ ...zero, notCreatedError: undefined }, "notCreatedError is required exactly when a batch that was not sent closes with cost 0"],
+      [{ ...zero, notCreatedError: "budget_exceeded" }, "notCreatedError must be timeout, rate_limited or provider_error"],
+      [{ result: "failed", costUnknown: true, cost: 150, inputTokens: 0, outputTokens: 0, notCreatedError: "timeout" }, "notCreatedError is required exactly when a batch that was not sent closes with cost 0"],
       [{ ...zero, inputTokens: 10 }, "a batch that was not sent must cost 0 or the reserved maxCost"],
       [{ ...zero, cacheReadInputTokens: 1 }, "a batch that was not sent must cost 0 or the reserved maxCost"],
       [{ ...zero, cost: 1 }, "a batch that was not sent must cost 0 or the reserved maxCost"],
@@ -326,17 +353,17 @@ describe("llm.batch.closed", () => {
     await expect(replay(b.log.events, { get: () => undefined }, CTX)).resolves.toBeDefined();
   });
 
-  it("送った（③のある）依頼は、費用0の failed では閉じられない。予約した費用の failed や、打ち切り（expired）の費用0は書ける", async () => {
+  it("送った（③のある）依頼は、答えを受け取っていなければ費用0で閉じられない。予約した費用（costUnknown）なら書ける。照合でも同じ", async () => {
     const at = jst("2026-11-10", 8, 30);
+    const why = "a sent batch that was not collected cannot cost 0";
     const log = await setup();
     const s = await submitAndSend(log, jst("2026-11-09", 16, 35));
-    expect(await reason(log, closed(at, s.seq, { result: "failed", cost: 0, inputTokens: 0, outputTokens: 0 }))).toBe("a sent batch cannot close as failed with cost 0");
-    await ok(log, closed(at, s.seq, { result: "failed", costUnknown: true, cost: 150, inputTokens: 0, outputTokens: 0 }));
-    const log2 = await setup();
-    const s2 = await submitAndSend(log2, jst("2026-11-09", 16, 35));
-    await ok(log2, closed(at, s2.seq, { result: "expired", cost: 0, inputTokens: 0, outputTokens: 0 }));
-    const c = log2.events.at(-1)!;
-    expect(await admitForged(log2.events, c.seq, { ...(c.payload as object), result: "failed" })).toBe(`seq ${c.seq} (llm.batch.closed): a sent batch cannot close as failed with cost 0`);
+    expect(await reason(log, closed(at, s.seq, { result: "failed", cost: 0, inputTokens: 0, outputTokens: 0 }))).toBe(why);
+    expect(await reason(log, closed(at, s.seq, { result: "expired", cost: 0, inputTokens: 0, outputTokens: 0 }))).toBe(why);
+    // 送った依頼に、送れなかった理由は書けない
+    expect(await reason(log, closed(at, s.seq, { result: "failed", cost: 0, inputTokens: 0, outputTokens: 0, notCreatedError: "timeout" }))).toBe("notCreatedError is required exactly when a batch that was not sent closes with cost 0");
+    const c = await ok(log, closed(at, s.seq, { result: "expired", costUnknown: true, cost: 150, inputTokens: 0, outputTokens: 0 }));
+    expect(await admitForged(log.events, c.seq, { batchSeq: s.seq, agentId: "alpha", result: "expired", cost: 0, inputTokens: 0, outputTokens: 0, inputCentsPer10MTok: 1000, outputCentsPer10MTok: 5000 })).toBe(`seq ${c.seq} (llm.batch.closed): ${why}`);
   });
 
   it("照合でも、差し替えた中身を同じ理由で断る", async () => {
@@ -380,11 +407,14 @@ describe("llm.batch.sent", () => {
     const log = await setup();
     const s = await ok(log, submitted(jst("2026-11-09", 16, 35)));
     const e = await ok(log, sentDraft(jst("2026-11-09", 16, 36), s.seq));
-    expect(e.keys).toEqual([`llmsent:${s.seq}`]);
+    expect(e.keys).toEqual([`llmsent:${s.seq}`, "llmbatchid:anthropic:msgbatch_01"]);
     expect(await reason(log, sentDraft(jst("2026-11-09", 16, 37), s.seq, { batchId: "msgbatch_02" }))).toMatch(new RegExp(`duplicate key llmsent:${s.seq}$`));
     // ②と③のあいだで止まったあと、翌朝の実行が書き直してもよい（閉じる前なら）
     const s2 = await ok(log, submitted(jst("2026-11-09", 16, 38), { agentId: "beta" }));
     await ok(log, sentDraft(jst("2026-11-10", 6, 50), s2.seq, { agentId: "beta", batchId: "batches/abc-123" }));
+    // 同じ提供元のバッチのIDは、別の依頼の③には書けない（一意キー llmbatchid:<提供元>:<ID>）
+    const s3 = await ok(log, submitted(jst("2026-11-10", 6, 51), { agentId: "gamma" }));
+    expect(await reason(log, sentDraft(jst("2026-11-10", 6, 52), s3.seq, { agentId: "gamma", batchId: "batches/abc-123" }))).toMatch(/duplicate key llmbatchid:anthropic:batches\/abc-123$/);
     await expect(replay(log.events, { get: () => undefined }, CTX)).resolves.toBeDefined();
   });
 
@@ -393,6 +423,11 @@ describe("llm.batch.sent", () => {
     const s = await ok(log, submitted(jst("2026-11-09", 16, 35)));
     await ok(log, closed(jst("2026-11-09", 16, 36), s.seq, { result: "failed", costUnknown: true, cost: 150, inputTokens: 0, outputTokens: 0 }));
     expect(await reason(log, sentDraft(jst("2026-11-09", 16, 37), s.seq))).toBe("the batch is already closed");
+    // 送れなかったと確かで費用0で閉じた依頼にも書けない
+    const log2 = await setup();
+    const s2 = await ok(log2, submitted(jst("2026-11-09", 16, 35)));
+    await ok(log2, closed(jst("2026-11-09", 16, 36), s2.seq, { result: "failed", cost: 0, inputTokens: 0, outputTokens: 0, notCreatedError: "provider_error" }));
+    expect(await reason(log2, sentDraft(jst("2026-11-09", 16, 37), s2.seq))).toBe("the batch is already closed");
   });
 
   it("依頼でない記録・別の AI の依頼・refs にない seq は指せない。書けるのは system だけ", async () => {
@@ -405,6 +440,8 @@ describe("llm.batch.sent", () => {
     expect(await reason(log, { ...sentDraft(at, s.seq), refs: [] })).toBe(`payload refers to ${s.seq} outside refs`);
     expect(await reason(log, { ...sentDraft(at, s.seq), actor: "operator:owner" })).toBe("llm.batch.sent must be written by system");
     expect(await reason(log, sentDraft(at, s.seq, { batchSeq: "5" }))).toBe("invalid batchSeq");
+    expect(await reason(log, sentDraft(at, s.seq, { provider: "openai" }))).toBe("provider must equal the batch submission");
+    expect(await reason(log, sentDraft(at, s.seq, { provider: undefined }))).toBe("provider must equal the batch submission");
   });
 
   it("形の合わない中身は、追記でも照合でも同じ理由で断る", async () => {

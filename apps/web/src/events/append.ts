@@ -111,10 +111,14 @@ const SYMBOL = /^[0-9A-Z]{3,8}$/;
  * 提供元のバッチのIDを足す）→ llm.batch.closed（①を指す）。①は提供元のバッチのIDを持たない
  */
 const LLM_PRICE_FIELDS = ["inputCentsPer10MTok", "outputCentsPer10MTok"];
-const LLM_SUBMITTED_FIELDS = ["agentId", "provider", "modelId", "promptVersion", "sentBodyHash", "customId", "maxCost", "tradingDate", "submittedAt", "yenPerUsd", ...LLM_PRICE_FIELDS, "maxInputTokens", "maxOutputTokens"];
+const LLM_SUBMITTED_FIELDS = ["agentId", "provider", "modelId", "promptVersion", "sentBodyHash", "customId", "maxCost", "tradingDate", "submittedAt", "yenPerUsd", ...LLM_PRICE_FIELDS, "maxInputTokens", "maxOutputTokens", "bodyMaxOutputTokens"];
 const LLM_TOKEN_FIELDS = ["inputTokens", "outputTokens", "cacheCreationInputTokens", "cacheReadInputTokens"];
-const LLM_SENT_FIELDS = ["batchSeq", "agentId", "batchId"];
-const LLM_CLOSED_FIELDS = ["batchSeq", "agentId", "result", "cost", "costUnknown", ...LLM_TOKEN_FIELDS, ...LLM_PRICE_FIELDS];
+const LLM_SENT_FIELDS = ["batchSeq", "agentId", "provider", "batchId"];
+const LLM_CLOSED_FIELDS = ["batchSeq", "agentId", "result", "cost", "costUnknown", "notCreatedError", ...LLM_TOKEN_FIELDS, ...LLM_PRICE_FIELDS];
+/** 送れなかったと確かなときの、送る処理の失敗の種類（LlmSendResult の notCreated の errorCode） */
+const LLM_SEND_ERRORS: readonly unknown[] = ["timeout", "rate_limited", "provider_error"];
+/** customId の末尾に付ける、送る本文のハッシュの先頭の文字数（同じAI・同じ取引日でも、本文が違えば名前が変わる） */
+const LLM_CUSTOM_ID_HASH_CHARS = 16;
 const LLM_RESULTS: readonly unknown[] = ["collected", "expired", "failed"];
 /** SHA-256 の16進（小文字） */
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -512,6 +516,8 @@ export class EventLog {
         if (!isShortText(p.provider) || !isShortText(p.modelId) || !isShortText(p.promptVersion)) return "provider, modelId and promptVersion are required (up to 100 characters)";
         if (typeof p.sentBodyHash !== "string" || !SHA256_HEX.test(p.sentBodyHash)) return "sentBodyHash must be a SHA-256 hex digest";
         if (typeof p.customId !== "string" || !CUSTOM_ID.test(p.customId)) return "customId must match ^[A-Za-z0-9_-]{1,64}$";
+        // 提供元の一覧で探すときに、別の本文のバッチと取り違えないよう、名前の末尾は本文のハッシュの先頭
+        if (!p.customId.endsWith(`-${p.sentBodyHash.slice(0, LLM_CUSTOM_ID_HASH_CHARS)}`)) return `customId must end with - and the first ${String(LLM_CUSTOM_ID_HASH_CHARS)} characters of sentBodyHash`;
         if (!Number.isSafeInteger(p.maxCost) || (p.maxCost as number) < 1) return "maxCost must be a positive integer";
         // 依頼を決めた時刻。取引日と費用の暦日はこれで決める
         const at = p.submittedAt;
@@ -521,13 +527,16 @@ export class EventLog {
         if (![...LLM_PRICE_FIELDS, "maxInputTokens", "maxOutputTokens"].every((f) => isCount(p[f]))) return "prices and max token counts must be non-negative integers";
         const bound = llmTokenCost({ inputTokens: p.maxInputTokens as number, outputTokens: p.maxOutputTokens as number }, p as unknown as LlmPrice);
         if (bound === null || (p.maxCost as number) < bound) return `maxCost must be at least ${String(bound)} (the cost of the max tokens)`;
+        // 本文に書いた出力の上限（max_tokens など）。予約の見積もりの上限を超えると、実際の請求が予約を超えうる
+        if (!Number.isSafeInteger(p.bodyMaxOutputTokens) || (p.bodyMaxOutputTokens as number) < 1 || (p.bodyMaxOutputTokens as number) > (p.maxOutputTokens as number)) return "bodyMaxOutputTokens must be a positive integer up to maxOutputTokens";
         try {
           if (p.tradingDate !== tradingDateFor(at, H)) return "tradingDate must be the next trading date";
         } catch {
           return "submittedAt is outside the adopted holiday table";
         }
         // 1日の上限（全提供元の合計）。その日の使用済み（閉じたものは実費、閉じていないものは予約）＋この予約が上限以内のときだけ書ける。
-        // 送る前に書くので、上限を超える依頼は送られない
+        // 送る前に書くので、上限を超える依頼は送られない。照合（replay）も同じ定数で確かめるので、上限を下げると、
+        // それまでの上限で書いた記録が照合を通らなくなりうる（変えるときは、記録した時刻で上限を選ぶ形にする）
         const used = llmCostUsed(this.events, jstDayOf(at)) + (p.maxCost as number);
         return used <= LLM_DAILY_COST_LIMIT ? null : `daily LLM cost limit exceeded (${String(used)} > ${String(LLM_DAILY_COST_LIMIT)})`;
       }
@@ -535,7 +544,10 @@ export class EventLog {
         // ③ 送ったあと、提供元が返したバッチのIDを①に足す。1つの①に1回だけ（一意キー）。閉じた①には足せない
         if (Object.keys(p).some((k) => !LLM_SENT_FIELDS.includes(k))) return "unknown field in a batch sending";
         const sub = this.events[(p.batchSeq as number) - 1];
-        if (sub?.type !== "llm.batch.submitted" || (sub.payload as Record<string, unknown>).agentId !== agentId) return "batchSeq must be llm.batch.submitted of the same agent";
+        const subP = sub?.payload as Record<string, unknown> | undefined;
+        if (sub?.type !== "llm.batch.submitted" || subP?.agentId !== agentId) return "batchSeq must be llm.batch.submitted of the same agent";
+        // 提供元は①と同じ。同じ提供元のバッチのIDは、1つの①にしか書けない（一意キー llmbatchid:<提供元>:<ID>）
+        if (p.provider !== subP.provider) return "provider must equal the batch submission";
         if (typeof p.batchId !== "string" || !BATCH_ID.test(p.batchId)) return "batchId must be a provider batch id";
         return this.keys.has(`llmclosed:${String(p.batchSeq)}`) ? "the batch is already closed" : null;
       }
@@ -550,11 +562,17 @@ export class EventLog {
         if (!isCount(p.cost) || !isCount(p.inputTokens) || !isCount(p.outputTokens) || !cache.every((f) => p[f] === undefined || isCount(p[f]))) return "cost and token counts must be non-negative integers";
         if (p.costUnknown !== undefined && (p.costUnknown !== true || p.cost !== sp.maxCost)) return "an unknown cost must be the reserved maxCost";
         // 送ったか（③があるか）で閉じ方が決まる。③がなければ答えも打ち切りもないので failed だけ。費用は、送っていないと確かなら0
-        // （トークン数も0）、分からなければ予約した費用（costUnknown）。③があれば課金されうるので、費用0の failed では閉じない
+        // （トークン数も0。送れなかった理由 notCreatedError が要る）、分からなければ予約した費用（costUnknown）。
+        // ③があれば課金されうるので、答えを受け取っていない閉じ方（expired・failed）は費用0にできない（分からなければ costUnknown）。
+        // 答えを受け取ったなら、出力のトークン数は1以上
         const sent = this.keys.has(`llmsent:${String(p.batchSeq)}`);
+        const zeroNotSent = !sent && p.costUnknown !== true;
         if (!sent && p.result !== "failed") return "a batch that was not sent can only close as failed";
-        if (!sent && p.costUnknown !== true && (p.cost !== 0 || !LLM_TOKEN_FIELDS.every((f) => p[f] === undefined || p[f] === 0))) return "a batch that was not sent must cost 0 or the reserved maxCost";
-        if (sent && p.result === "failed" && p.cost === 0) return "a sent batch cannot close as failed with cost 0";
+        if (zeroNotSent && (p.cost !== 0 || !LLM_TOKEN_FIELDS.every((f) => p[f] === undefined || p[f] === 0))) return "a batch that was not sent must cost 0 or the reserved maxCost";
+        if (zeroNotSent !== (p.notCreatedError !== undefined)) return "notCreatedError is required exactly when a batch that was not sent closes with cost 0";
+        if (zeroNotSent && !LLM_SEND_ERRORS.includes(p.notCreatedError)) return "notCreatedError must be timeout, rate_limited or provider_error";
+        if (sent && p.result !== "collected" && p.cost === 0) return "a sent batch that was not collected cannot cost 0";
+        if (p.result === "collected" && p.outputTokens === 0) return "a collected batch must have output tokens";
         if (p.costUnknown === true) return LLM_PRICE_FIELDS.every((f) => p[f] === undefined) ? null : "an unknown cost has no price";
         // 料金は予約の料金ちょうど（安い料金や 0 を書いて、その日の使った額を少なく見せられないように）。
         // 提供元が実際にはもっと安く請求しても、予約の料金で数える（多めに数えるので安全側）
@@ -852,7 +870,7 @@ function keysOf(type: EventType, p: Record<string, unknown>): string[] | string 
     case "llm.batch.sent":
       // 1つの依頼に、送った記録は1回だけ
       if (!Number.isSafeInteger(p.batchSeq)) return "invalid batchSeq";
-      return k(["agentId"], () => [`llmsent:${String(p.batchSeq)}`]);
+      return k(["agentId"], () => [`llmsent:${String(p.batchSeq)}`, `llmbatchid:${String(p.provider)}:${String(p.batchId)}`]);
     case "llm.batch.closed":
       // 1つの依頼は1回だけ閉じる
       if (!Number.isSafeInteger(p.batchSeq)) return "invalid batchSeq";

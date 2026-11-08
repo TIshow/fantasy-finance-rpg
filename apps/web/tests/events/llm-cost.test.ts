@@ -115,7 +115,7 @@ describe("openLlmBatches・llmSentOf・llmReservationOf・llmTicketOf", () => {
     const sent = llmSentOf(events, 2);
     expect(sent?.seq).toBe(3);
     const ticket: LlmBatchTicket | null = llmTicketOf(open[0]!, sent);
-    expect(ticket).toEqual({ batchSeq: 2, agentId: "beta", provider: "anthropic", modelId: "m", batchId: "batch_2", customId: "c2", maxCost: 200, tradingDate: "2026-11-10", submittedAt: at(16, 36) });
+    expect(ticket).toEqual({ batchSeq: 2, agentId: "beta", provider: "anthropic", modelId: "m", batchId: "batch_2", customId: "c2", sentBodyHash: "b".repeat(64), maxCost: 200, tradingDate: "2026-11-10", submittedAt: at(16, 36) });
   });
 
   it("送った記録がまだない依頼（②と③のあいだで止まった）は、控えを作れず（null）、予約の控えから探す", () => {
@@ -123,7 +123,7 @@ describe("openLlmBatches・llmSentOf・llmReservationOf・llmTicketOf", () => {
     expect(llmSentOf(events, 1)).toBeNull();
     expect(llmTicketOf(events[0]!, null)).toBeNull();
     const r: LlmBatchReservation = llmReservationOf(events[0]!);
-    expect(r).toEqual({ batchSeq: 1, agentId: "alpha", provider: "anthropic", modelId: "m", customId: "c1", maxCost: 150, tradingDate: "2026-11-10", submittedAt: at(16, 35) });
+    expect(r).toEqual({ batchSeq: 1, agentId: "alpha", provider: "anthropic", modelId: "m", customId: "c1", sentBodyHash: "b".repeat(64), maxCost: 150, tradingDate: "2026-11-10", submittedAt: at(16, 35) });
     // 閉じていない依頼のうち、送った記録のないもの
     expect(openLlmBatches(events).filter((e) => llmSentOf(events, e.seq) === null).map((e) => e.seq)).toEqual([1]);
   });
