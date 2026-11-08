@@ -124,6 +124,30 @@ describe("送る（send）", () => {
     await expect(port(driver).send({ ...p, customId: `x-${p.sentBodyHash.slice(0, 16)}` }, 5)).rejects.toThrow(RangeError);
     expect(calls.send).toHaveLength(0);
   });
+
+  it("手で組んだ値（依頼と違う本文・大きすぎる本文・違う出力の上限）は、ハッシュと customId が合っていても送らない", async () => {
+    const { driver, calls } = fakeDriver();
+    const forged = async (body: string, over: object = {}) => {
+      const hash = await sha256Hex(new TextEncoder().encode(body));
+      const p = await port(driver).prepare(req());
+      return { ...p, body, sentBodyHash: hash, customId: `ai-1-20261110-${hash.slice(0, 16)}`, ...over };
+    };
+    await expect(port(driver).send(await forged(JSON.stringify({ id: "ai-1-20261110", messages: [{ role: "user", content: "あ".repeat(7000) }] })), 5)).rejects.toThrow(RangeError);
+    const p = await port(driver).prepare(req());
+    await expect(port(driver).send({ ...p, bodyMaxOutputTokens: 1 }, 5)).rejects.toThrow(RangeError);
+    // 依頼の maxInputTokens を、本文のバイト数より小さく書き換えたもの
+    await expect(port(driver).send({ ...p, request: { ...p.request, maxInputTokens: 10 } }, 5)).rejects.toThrow(RangeError);
+    expect(calls.send).toHaveLength(0);
+  });
+
+  it("同じ予約（batchSeq）で2回は送らない（同じ口の中）", async () => {
+    const { driver, calls } = fakeDriver();
+    const bp = port(driver);
+    const p = await bp.prepare(req());
+    expect((await bp.send(p, 5)).ok).toBe(true);
+    await expect(bp.send(p, 5)).rejects.toThrow(RangeError);
+    expect(calls.send).toHaveLength(1);
+  });
 });
 
 describe("探す（find）", () => {
@@ -150,6 +174,8 @@ describe("受け取りと打ち切り", () => {
     expect(cost).toBe(44); // (20,000×1ドル＋1,500×5ドル)/100万 × 160円 ＝ 4.4円
     expect(calls.itemIds).toEqual(["ai-1-20261110"]);
     expect(await port(fakeDriver({ outcome: async () => ({ ...succeeded, truncated: true }) }).driver).collect(ticket())).toMatchObject({ result: "collected", truncated: true });
+    // 費用を予約で見込めない答え：答えとトークン数はそのまま、費用は予約した費用で料金なし
+    expect(await port(fakeDriver({ outcome: async () => ({ ...succeeded, costUnknown: true }) }).driver).collect(ticket())).toEqual({ status: "closed", result: "collected", output: "{}", respondedModel: "m1-2026", usage: { inputTokens: 20_000, outputTokens: 1500, cost: 160 }, costUnknown: true, finishedAt: AT + 1000 });
   });
 
   it("答えのないもの・トークン数が0のものは、予約した費用（costUnknown）。読めないときは pending", async () => {
