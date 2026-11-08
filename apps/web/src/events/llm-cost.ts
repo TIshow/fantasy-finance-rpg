@@ -1,7 +1,9 @@
 // LLM の費用の上限を、記録だけから確かめる（#179）。
 // その日の使用済み ＝ 閉じたバッチ（llm.batch.closed）の実際の費用 ＋ 閉じていないバッチ（llm.batch.submitted だけ）の予約。
+// llm.batch.submitted は提供元に送る前に書く予約なので、送ったか（llm.batch.sent があるか）は数え方に関わらない。
 // 全提供元の合計。暦日は、依頼の記録（llm.batch.submitted）の submittedAt（依頼を決めた時刻）の日本時間の日付（記録した日・閉じた日ではない）。
-// 照合（replay）を通ったログに使う。中身の形は追記の処理（append.ts）が確かめている。
+// 追記の処理（append.ts）は、llm.batch.submitted を書くときに llmCostUsed で上限を確かめる。
+// 照合（replay）を通ったログに使う。中身の形は追記の処理が確かめている。
 import type { Deciyen } from "../ledger/types";
 import type { LogEvent } from "./types";
 
@@ -63,17 +65,24 @@ interface Batch {
   seq: number;
   day: string;
   maxCost: Deciyen;
-  closed: { seq: number; cost: Deciyen } | null;
+  /** 予約の見積もりに使った入力のトークン数の上限と、本文に書いた出力の上限（①の maxInputTokens・bodyMaxOutputTokens） */
+  maxInputTokens: unknown;
+  bodyMaxOutputTokens: unknown;
+  closed: { seq: number; cost: Deciyen; result: unknown; inputTokens: number; outputTokens: number } | null;
 }
 
 function batchesOf(events: readonly Rec[]): Batch[] {
   const bySeq = new Map<number, Batch>();
   for (const e of events) {
     const p = e.payload as Payload;
-    if (e.type === "llm.batch.submitted") bySeq.set(e.seq, { seq: e.seq, day: jstDayOf(p.submittedAt as number), maxCost: p.maxCost as number, closed: null });
+    if (e.type === "llm.batch.submitted") {
+      bySeq.set(e.seq, { seq: e.seq, day: jstDayOf(p.submittedAt as number), maxCost: p.maxCost as number, maxInputTokens: p.maxInputTokens, bodyMaxOutputTokens: p.bodyMaxOutputTokens, closed: null });
+    }
     if (e.type === "llm.batch.closed") {
       const b = bySeq.get(p.batchSeq as number);
-      if (b && !b.closed) b.closed = { seq: e.seq, cost: p.cost as number };
+      // 入力のトークン数は、キャッシュへの書き込み・読み出しの分を含めて数える
+      const input = ["inputTokens", "cacheCreationInputTokens", "cacheReadInputTokens"].reduce((sum, f) => sum + ((p[f] as number | undefined) ?? 0), 0);
+      if (b && !b.closed) b.closed = { seq: e.seq, cost: p.cost as number, result: p.result, inputTokens: input, outputTokens: p.outputTokens as number };
     }
   }
   return [...bySeq.values()];
@@ -82,7 +91,7 @@ function batchesOf(events: readonly Rec[]): Batch[] {
 const usedBy = (batches: readonly Batch[], day: string, before: number): Deciyen =>
   batches.filter((b) => b.day === day && b.seq < before).reduce((sum, b) => sum + (b.closed && b.closed.seq < before ? b.closed.cost : b.maxCost), 0);
 
-/** day（日本時間）の使用済み。LlmBatchPort.spent のうち、記録にある分 */
+/** day（日本時間）の使用済み */
 export function llmCostUsed(events: readonly Rec[], day: string): Deciyen {
   return usedBy(batchesOf(events), day, Number.POSITIVE_INFINITY);
 }
@@ -91,15 +100,19 @@ export interface LlmCostProblem {
   day: string;
   /**
    * reservation：依頼の記録の時点で、それまでの使用済み＋その予約が上限を超えていた（seq はその依頼）。
+   * 追記の処理が同じ判定で断るので、追記を通ったログには出ない（記録を別の方法で確かめるために残す）。
    * total：その日の使用済みが、いまの記録で上限を超えている（実費が予約を超えたときなど。seq はその日の最後の依頼）
+   * input_tokens・output_tokens：答えを受け取った（collected）閉じた記録のトークン数が、予約の上限（①の maxInputTokens・
+   * bodyMaxOutputTokens）を超えている。閉じる記録は断らずに残し、ここで挙げる（seq は閉じた記録、used はトークン数、limit はその上限）
    */
-  kind: "reservation" | "total";
+  kind: "reservation" | "total" | "input_tokens" | "output_tokens";
   seq: number;
-  used: Deciyen;
-  limit: Deciyen;
+  /** reservation・total では費用（0.1円単位）、input_tokens・output_tokens ではトークン数 */
+  used: number;
+  limit: number;
 }
 
-/** 上限が守られたか。守られていれば空。依頼の時点の判定と、その日の合計の両方を見る */
+/** 上限が守られたか。守られていれば空。依頼の時点の判定と、その日の合計と、受け取った答えのトークン数を見る */
 export function llmCostProblems(events: readonly Rec[], limit: Deciyen = LLM_DAILY_COST_LIMIT): LlmCostProblem[] {
   const batches = batchesOf(events);
   const out: LlmCostProblem[] = [];
@@ -113,6 +126,12 @@ export function llmCostProblems(events: readonly Rec[], limit: Deciyen = LLM_DAI
     const used = usedBy(batches, day, Number.POSITIVE_INFINITY);
     if (used > limit) out.push({ day, kind: "total", seq, used, limit });
   }
+  for (const b of batches) {
+    const c = b.closed;
+    if (c?.result !== "collected") continue;
+    if (typeof b.maxInputTokens === "number" && c.inputTokens > b.maxInputTokens) out.push({ day: b.day, kind: "input_tokens", seq: c.seq, used: c.inputTokens, limit: b.maxInputTokens });
+    if (typeof b.bodyMaxOutputTokens === "number" && c.outputTokens > b.bodyMaxOutputTokens) out.push({ day: b.day, kind: "output_tokens", seq: c.seq, used: c.outputTokens, limit: b.bodyMaxOutputTokens });
+  }
   return out;
 }
 
@@ -122,31 +141,58 @@ export function openLlmBatches(events: readonly Rec[]): Rec[] {
   return events.filter((e) => e.type === "llm.batch.submitted" && open.includes(e.seq));
 }
 
-/** 受け取りの控え。契約の LlmBatchTicket（src/contracts/llm.ts）と同じ形（src/events は契約を import できないので、ここにも書く） */
-export interface LlmTicketFields {
+/** 依頼（llm.batch.submitted の seq）を指す送った記録（llm.batch.sent）。まだなければ null（②と③のあいだで止まった、または送れなかった） */
+export function llmSentOf(events: readonly Rec[], batchSeq: number): Rec | null {
+  return events.find((e) => e.type === "llm.batch.sent" && (e.payload as Payload).batchSeq === batchSeq) ?? null;
+}
+
+/** 予約の控え。契約の LlmBatchReservation（src/contracts/llm.ts）と同じ形（src/events は契約を import できないので、ここにも書く） */
+export interface LlmReservationFields {
+  /** 依頼の記録（llm.batch.submitted）の seq。送った記録と閉じる記録の batchSeq に入れる */
+  batchSeq: number;
   agentId: string;
   provider: string;
   modelId: string;
-  batchId: string;
   customId: string;
+  sentBodyHash: string;
+  /** 依頼の記録（①）を書いた時刻 */
+  reservedAt: number;
   maxCost: Deciyen;
   tradingDate: string;
   submittedAt: number;
 }
 
-/** llm.batch.submitted の記録から、受け取りに使う控えを作り直す。batchId が null（作られたか分からない）なら null */
-export function llmTicketOf(e: Rec): LlmTicketFields | null {
-  if (e.type !== "llm.batch.submitted") throw new RangeError("not an llm.batch.submitted event");
-  const p = e.payload as Payload;
-  if (p.batchId === null) return null;
+/** 受け取りの控え。契約の LlmBatchTicket と同じ形 */
+export interface LlmTicketFields extends LlmReservationFields {
+  batchId: string;
+}
+
+/** 依頼の記録（llm.batch.submitted）から、予約の控えを作り直す（②と③のあいだで止まったあとに、提供元で探すのに使う） */
+export function llmReservationOf(submitted: Rec): LlmReservationFields {
+  if (submitted.type !== "llm.batch.submitted") throw new RangeError("not an llm.batch.submitted event");
+  const p = submitted.payload as Payload;
   return {
+    batchSeq: submitted.seq,
     agentId: p.agentId as string,
     provider: p.provider as string,
     modelId: p.modelId as string,
-    batchId: p.batchId as string,
     customId: p.customId as string,
+    sentBodyHash: p.sentBodyHash as string,
+    reservedAt: submitted.recordedAt,
     maxCost: p.maxCost as number,
     tradingDate: p.tradingDate as string,
     submittedAt: p.submittedAt as number,
   };
+}
+
+/**
+ * 依頼の記録（llm.batch.submitted）と、それを指す送った記録（llm.batch.sent）から、受け取りに使う控えを作り直す。
+ * sent が null（まだ送った記録がない）なら null。種類が違う、または sent が submitted を指していなければ RangeError
+ */
+export function llmTicketOf(submitted: Rec, sent: Rec | null): LlmTicketFields | null {
+  const reservation = llmReservationOf(submitted);
+  if (sent === null) return null;
+  const q = sent.payload as Payload;
+  if (sent.type !== "llm.batch.sent" || q.batchSeq !== submitted.seq) throw new RangeError("not an llm.batch.sent event of the submission");
+  return { ...reservation, batchId: q.batchId as string };
 }

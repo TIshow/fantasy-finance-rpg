@@ -386,7 +386,12 @@ export class AnthropicBatchClient {
    * バッチの情報に customId は入らないので、突き合わせは作成の時刻と件数でしかできない（同じ時刻・同じ件数が並ぶと決められない）。
    */
   async create(items: readonly BatchRequestItem[]): Promise<BatchCreateResult> {
-    const body = anthropicBatchBody(items);
+    return this.createBody(anthropicBatchBody(items));
+  }
+
+  /** anthropicBatchBody で作った本文を、加工せずに送ってバッチを作る（契約：記録のハッシュと送った本文を一致させる） */
+  async createBody(body: string): Promise<BatchCreateResult> {
+    if (typeof body !== "string" || body === "") throw new RangeError("body must be a non-empty string");
     const sent: SentBody = { body, sha256: await sha256Hex(new TextEncoder().encode(body)) };
     const r = await this.#json("POST", "/v1/messages/batches", body, parseStatus);
     if (!r.ok && uncertainOnCreate(r)) return { ...r, billingUnknown: true, sent };
