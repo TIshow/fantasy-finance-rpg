@@ -117,6 +117,26 @@ function requestLine(item: BatchRequestItem): string {
   return JSON.stringify({ custom_id: item.customId, method: "POST", url: OPENAI_BATCH_ENDPOINT, body });
 }
 
+/**
+ * 上げるファイルの中身（1行1件の JSON。行は \n でつなぐ）。upload はこれと同じ文字列を送る（ハッシュを先に出すために公開する）。
+ * 決まりに合わなければ RangeError
+ */
+export function openaiBatchFileBody(items: readonly BatchRequestItem[]): string {
+  if (!Array.isArray(items) || items.length === 0 || items.length > OPENAI_BATCH_MAX_REQUESTS) throw new RangeError(`requests must be 1 to ${OPENAI_BATCH_MAX_REQUESTS}`);
+  const ids = new Set<string>();
+  for (const it of items) {
+    if (!isObj(it) || !isStr(it.customId) || !CUSTOM_ID.test(it.customId) || ids.has(it.customId)) throw new RangeError("customId must be unique and match ^[A-Za-z0-9_-]{1,64}$");
+    ids.add(it.customId);
+  }
+  // 形の確かめ（requestLine）を先に済ませてから、モデルを数える
+  const lines = items.map(requestLine);
+  // 1つのファイルには1つのモデルの依頼しか入れられない
+  if (new Set(items.map((it) => it.params.model)).size !== 1) throw new RangeError("all requests in a batch must use the same model");
+  const body = lines.join("\n");
+  if (new TextEncoder().encode(body).length > OPENAI_BATCH_MAX_BYTES) throw new RangeError("batch input is too large");
+  return body;
+}
+
 /** 上げたファイルの情報 */
 export interface UploadedFile {
   id: string;
@@ -145,6 +165,8 @@ export interface BatchStatus {
   /** 終わった時刻（completed・failed・expired・cancelled のどれか） */
   endedAt: number | null;
   validationErrors: number;
+  /** 作成で付けた名前（metadata の custom_id）。なければ null */
+  customId: string | null;
 }
 export type BatchCreateResult = OpenAIBatchCall<BatchStatus> & { billingUnknown?: true };
 
@@ -290,6 +312,7 @@ function parseStatus(json: unknown): BatchStatus {
     expiresAt: optTime(j.expires_at),
     endedAt: ends.length === 0 ? null : Math.max(...ends),
     validationErrors: isObj(errors) && Array.isArray(errors.data) ? errors.data.length : 0,
+    customId: isObj(j.metadata) && isStr(j.metadata.custom_id) ? j.metadata.custom_id : null,
   };
 }
 
@@ -316,7 +339,8 @@ function knownError(error: unknown): { errorType?: OpenAIErrorType; errorCode?: 
  * input_tokens はキャッシュから読んだ分と書き込んだ分を含む（含まない数が返ったら形が合わないとして断る）。
  * - 入力：input_tokens 全部を入力の単価で数える（読み出し（0.05倍）も入力の単価で数える）
  * - 書き込み：cache_write_tokens を cost.ts の書き込みの欄（入力の2倍）にも入れる。入力の欄と合わせて3倍になり、
- *   12時間の書き込み（2.5倍）より高い。cost.ts の読み出しの欄は使わない
+ *   12時間の書き込み（2.5倍）より高い。cost.ts の読み出しの欄は使わない。
+ *   予約はこの3倍を見込む（openai-port.ts の inputCostFactor）ので、費用は maxCost を超えない
  * - 出力：output_tokens（推論のトークンを含む）
  */
 function toTokenUsage(u: Record<string, unknown>): { usage: TokenUsage; reasoningTokens: number } {
@@ -529,19 +553,13 @@ export class OpenAIBatchClient {
    * 送った本文とそのハッシュを、結果と一緒に返す。ファイルの上げは課金されないので、billingUnknown は付けない。
    */
   async upload(items: readonly BatchRequestItem[]): Promise<UploadResult> {
-    if (items.length === 0 || items.length > OPENAI_BATCH_MAX_REQUESTS) throw new RangeError(`requests must be 1 to ${OPENAI_BATCH_MAX_REQUESTS}`);
-    const ids = new Set<string>();
-    for (const it of items) {
-      if (!isObj(it) || !isStr(it.customId) || !CUSTOM_ID.test(it.customId) || ids.has(it.customId)) throw new RangeError("customId must be unique and match ^[A-Za-z0-9_-]{1,64}$");
-      ids.add(it.customId);
-    }
-    // 形の確かめ（requestLine）を先に済ませてから、モデルを数える
-    const lines = items.map(requestLine);
-    // 1つのファイルには1つのモデルの依頼しか入れられない
-    if (new Set(items.map((it) => it.params.model)).size !== 1) throw new RangeError("all requests in a batch must use the same model");
-    const body = lines.join("\n");
+    return this.uploadBody(openaiBatchFileBody(items));
+  }
+
+  /** openaiBatchFileBody で作った中身を、加工せずにファイルとして上げる（契約：記録のハッシュと送った本文を一致させる） */
+  async uploadBody(body: string): Promise<UploadResult> {
+    if (typeof body !== "string" || body === "") throw new RangeError("body must be a non-empty string");
     const bytes = new TextEncoder().encode(body);
-    if (bytes.length > OPENAI_BATCH_MAX_BYTES) throw new RangeError("batch input is too large");
     const sent: SentBody = { body, sha256: await sha256Hex(bytes) };
     const form = new FormData();
     form.append("purpose", "batch");
@@ -557,12 +575,14 @@ export class OpenAIBatchClient {
    * 応答の inputFileId と endpoint が送ったものと違えば、形が合わない（malformed）として billingUnknown を付ける
    * （何かが作られたが、頼んだものか分からない）。
    */
-  async create(inputFileId: string): Promise<BatchCreateResult> {
+  async create(inputFileId: string, customId?: string): Promise<BatchCreateResult> {
     checkId(inputFileId);
-    const body = JSON.stringify({ input_file_id: inputFileId, endpoint: OPENAI_BATCH_ENDPOINT, completion_window: OPENAI_COMPLETION_WINDOW });
+    if (customId !== undefined && !CUSTOM_ID.test(customId)) throw new RangeError("customId must match ^[A-Za-z0-9_-]{1,64}$");
+    const metadata = customId === undefined ? {} : { metadata: { custom_id: customId } };
+    const body = JSON.stringify({ input_file_id: inputFileId, endpoint: OPENAI_BATCH_ENDPOINT, completion_window: OPENAI_COMPLETION_WINDOW, ...metadata });
     const r = await this.#json("POST", "/v1/batches", body, (json) => {
       const s = parseStatus(json);
-      return need(s.inputFileId === inputFileId && s.endpoint === OPENAI_BATCH_ENDPOINT, s);
+      return need(s.inputFileId === inputFileId && s.endpoint === OPENAI_BATCH_ENDPOINT && s.customId === (customId ?? null), s);
     });
     if (!r.ok && uncertainOnCreate(r)) return { ...r, billingUnknown: true };
     return r;
@@ -608,6 +628,12 @@ export class OpenAIBatchClient {
       });
       return out;
     }, this.#resultsTimeoutMs);
+  }
+
+  /** ファイルの中身をそのまま返す（find が、上げた本文のハッシュを確かめるのに使う） */
+  async fileContent(fileId: string): Promise<OpenAIBatchCall<string>> {
+    checkId(fileId);
+    return this.#call("GET", `/v1/files/${fileId}/content`, undefined, (text) => text, this.#resultsTimeoutMs);
   }
 
   #json<T>(method: string, path: string, body: string | undefined, parse: (json: unknown) => T): Promise<OpenAIBatchCall<T>> {

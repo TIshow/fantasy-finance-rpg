@@ -39,12 +39,4 @@ export function openaiBatchPrice(modelId: string, usage: Pick<TokenUsage, "input
   return usage.inputTokens > OPENAI_LONG_CONTEXT_INPUT_TOKENS ? tiers.long : tiers.short;
 }
 
-/**
- * 費用の上限の予約（maxCost の見積もり）に使う料金。長い文脈の料金を返す。ここにないモデルは undefined。
- * 送る前には入力のトークン数が決まらない（数えるのは提供元で、272,000 を超えると依頼全体が長い文脈の料金になる）ので、
- * 予約は高いほうの料金で見積もる。実際の費用は、結果のトークン数から openaiBatchPrice で選んだ料金で出す。
- */
-export function openaiBatchReservePrice(modelId: string): Readonly<BatchPrice> | undefined {
-  if (!Object.hasOwn(OPENAI_BATCH_PRICES, modelId)) return undefined;
-  return OPENAI_BATCH_PRICES[modelId]!.long;
-}
+// 予約の料金は openai-port.ts の openaiReservePrice（入力は 20,000 トークンまでなので、いつも短い文脈の料金）
