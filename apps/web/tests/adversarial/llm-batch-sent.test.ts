@@ -247,24 +247,33 @@ describe("③のある①の閉じ方", () => {
     await ok(log, close(jst(DAY, 17), a, 2, { inputTokens: 0, outputTokens: 1, cacheReadInputTokens: 1 }));
   });
 
-  // 【中・宛先 lead と core・記録からは見分けられない】費用0は断るようになったが、ごく小さな費用は断らない。
-  // ③のある①を、入力1・出力1トークンの collected（この料金で費用2）や、出力1トークンの expired（費用1）で閉じると、予約がほぼ全部数えから消え、
-  // 同じ日に新しい予約を書ける。例：600 の予約を送り、費用1の expired で閉じると、別の AI の 999 の予約が通る（実際の請求は最大 1,599）。
-  // トークン数が本当かは、提供元の請求でしか確かめられない。直し方の方針の例：
-  // - ①に本文の入力のトークン数の下限（本文の長さから出す）を記録し、collected の入力がそれより少なければ断る
-  // - expired・failed は、実費が予約より小さいとき costUnknown にさせる
-  // どこまで記録で縛るかは lead の判断。直るまで it.fails
-  it.fails("【中・穴】③のある①を、入力1・出力1トークン（費用2）の collected で閉じて、予約をほぼ消すことはできない（今はできる）", async () => {
+  // 前の【中・穴】（ごく小さな費用で閉じて予約の枠をあける）は、lead の決定3で、許す動きと決まった：提供元が実際の費用を返したら、
+  // その費用（0.1円単位に切り上げ、0より大きければ最低0.1円）で記録する。分からないときだけ予約した費用で数える。
+  // トークン数が本当かは、提供元の請求でしか確かめられない（記録からは見分けられない）
+  it("③のある①を、入力1・出力1トークン（費用2）の collected で閉じられ、実際の費用だけが数えに残る（lead の決定3）", async () => {
     const log = await setup();
     const a = await okSent(log, sub(jst(DAY, 16, 35), "alpha", TD, 600));
-    expect(await reason(log, close(jst(DAY, 17), a, 2, { inputTokens: 1, outputTokens: 1 }))).not.toBe("ok");
+    await ok(log, close(jst(DAY, 17), a, 2, { inputTokens: 1, outputTokens: 1 }));
+    expect(llmCostUsed(log.events, DAY)).toBe(2);
+    // トークン数から出した費用と合わない費用は断る（切り上げの外へは書けない）
+    const b = await okSent(log, sub(jst(DAY, 17, 1), "beta", TD, 300));
+    expect(await reason(log, close(jst(DAY, 17, 2), b, 1, { inputTokens: 1, outputTokens: 1 }))).not.toBe("ok");
   });
 
-  it.fails("【中・穴】費用1で閉じて枠をあけ、同じ日に予約を重ねることはできない（今は 600 を送ったあと 999 の予約が通る）", async () => {
+  it("費用1で閉じたあとは、その分だけ枠があき、同じ日に 999 の予約が通る（lead の決定3。1,000 ちょうどまで）", async () => {
     const log = await setup();
     const a = await okSent(log, sub(jst(DAY, 16, 35), "alpha", TD, 600));
-    await log.append(close(jst(DAY, 17), a, 1, { result: "expired", inputTokens: 0, outputTokens: 1 }));
-    expect(await reason(log, sub(jst(DAY, 17, 1), "beta", TD, 999))).not.toBe("ok");
+    await ok(log, close(jst(DAY, 17), a, 1, { result: "expired", inputTokens: 0, outputTokens: 1 }));
+    expect(await reason(log, sub(jst(DAY, 17, 1), "beta", TD, 1000))).toBe("daily LLM cost limit exceeded (1001 > 1000)");
+    await ok(log, sub(jst(DAY, 17, 1), "beta", TD, 999));
+    expect(llmCostUsed(log.events, DAY)).toBe(1000);
+  });
+
+  it("0.1円に満たない実際の費用は、切り上げて 0.1円（1）で記録する。0 や切り捨ては断る", async () => {
+    const log = await setup();
+    const a = await okSent(log, sub(jst(DAY, 16, 35), "alpha", TD, 600, CHEAP));
+    for (const cost of [0, 2]) expect(await reason(log, close(jst(DAY, 17), a, cost, { inputTokens: 1, outputTokens: 1, ...CHEAP })), String(cost)).not.toBe("ok");
+    await ok(log, close(jst(DAY, 17), a, 1, { inputTokens: 1, outputTokens: 1, ...CHEAP }));
   });
 });
 

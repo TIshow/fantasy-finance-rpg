@@ -8,7 +8,7 @@
 // - 締め：8:30 のあとに受け取った答えで注文しない。試運転（LLM_DRY_RUN が false 以外）では注文しない
 // 偽の提供元（tests/runner/llm-fakes.ts）と架空の市場の世界（tests/runner/llm-world.ts）を使う。本物の API は呼ばない。欠陥の再現は it.fails。
 import { describe, expect, it } from "vitest";
-import { llmCostProblems, llmCostUsed } from "../../src/events/llm-cost";
+import { type LlmPrice, llmCostProblems, llmCostUsed, llmTokenCost } from "../../src/events/llm-cost";
 import { replay } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
 import { cutoffOf } from "../../src/ledger/ledger";
@@ -75,15 +75,17 @@ describe("費用の上限", () => {
     expect(all.filter((e) => e.type === "agent.run" && p(e).errorCode === "budget_exceeded").map((e) => p(e).agentId)).toEqual(["ai-gpt"]);
   });
 
-  it("1ドルの円を上げて3体の予約の合計が80円を超える設定なら、どのAIも依頼せず、段は error:（毎日の実行が失敗の終了コードにする）", async () => {
+  it("1ドルの円を上げて3体の予約の合計が80円を超える設定なら、どのAIも依頼せず、AIごとに budget_exceeded の失敗を残し、段は error:（lead の決定4）", async () => {
     const w = await llmWorld();
     // 32.4円 × 400/160 = 81円
     w.deps.llm = { ...w.deps.llm!, yenPerUsd: 400 };
     const r = await w.run(D0);
-    expect(stageOf(r, "llm.submit")).toMatchObject({ status: "skipped", detail: expect.stringMatching(/^error: /) });
+    expect(stageOf(r, "llm.submit")).toMatchObject({ status: "written", detail: expect.stringMatching(/^error: /) });
     expect(llmFailed(r)).toBe(true);
     expect(await w.of("llm.batch.submitted")).toEqual([]);
     expect(Object.values(w.llm.providers).map((f) => f.sent.length)).toEqual([0, 0, 0]);
+    const runs = (await w.of("agent.run")).filter(isLlm);
+    expect(runs.map((e) => [p(e).agentId, p(e).ok, p(e).errorCode, p(e).cost])).toEqual(LLM_IDS.map((id) => [id, false, "budget_exceeded", 0]));
   });
 
   it("1体の口が例外でも、ほかの2体は依頼し、段は error: になる（例外の文は1行・200文字まで）", async () => {
@@ -197,7 +199,8 @@ describe("費用の上限", () => {
     await replay(all, w.values, { holidayTables: w.holidayTables });
   });
 
-  it.fails("【判断待ち・前の orchestrator コメントの1】締めで打ち切るとき、提供元がごく小さな使用量を返しても、予約した費用で数える（今は報告どおりの小さな費用で閉じ、予約の枠がほぼ空く）", async () => {
+  // 前の【判断待ち】は lead の決定3で決まった：提供元が実際の費用を返したら、0.1円単位に切り上げて記録する（0より大きければ最低0.1円）
+  it("締めで打ち切るとき、提供元がごく小さな使用量を返したら、その費用を0.1円単位に切り上げて記録する（予約した費用ではない。lead の決定3）", async () => {
     const w = await evening();
     // 締めの前には終わっていない。打ち切りのときには「入力1トークン・出力1トークンで終わった」と返す
     w.llm.providers.anthropic!.outcome = () => (w.clock.now() >= cutoffOf(D1) ? answer(good, { usage: { inputTokens: 1, outputTokens: 1, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 } }) : "pending");
@@ -207,7 +210,11 @@ describe("費用の上限", () => {
     const sub = all.find((e) => e.type === "llm.batch.submitted" && p(e).agentId === "ai-claude")!;
     const c = all.find((e) => e.type === "llm.batch.closed" && p(e).batchSeq === sub.seq)!;
     expect(p(c).result).toBe("expired");
-    expect(p(c).cost).toBe(p(sub).maxCost);
+    const actual = llmTokenCost({ inputTokens: 1, outputTokens: 1 }, p(sub) as unknown as LlmPrice);
+    // 1トークンずつの費用は 0.1円に満たないので、切り上げて最低の 0.1円（1）
+    expect([p(c).cost, actual, p(c).costUnknown]).toEqual([1, 1, undefined]);
+    expect(p(c).cost as number).toBeLessThan(p(sub).maxCost as number);
+    expect(llmCostProblems(all)).toEqual([]);
   });
 });
 
@@ -429,7 +436,8 @@ describe("試運転", () => {
     expect(all.filter((e) => e.type === "post.published" && p(e).agentId === "ai-claude")).toHaveLength(2);
   });
 
-  it.fails("【中】試運転の日に作った判断は、その日の締めの前に試運転を切っても（LLM_DRY_RUN を false にしても）、その日の注文票にならない（今は 07:20 の実行で注文票になる）", async () => {
+  // 前の【中】は直った（依頼の記録の試運転の印。lead の決定1）
+  it("試運転の日に作った判断は、その日の締めの前に試運転を切っても（LLM_DRY_RUN を false にしても）、その日の注文票にならない（直った）", async () => {
     const w = await evening(true);
     allAnswer(w, good);
     await w.runAt(D1, 6, 50);
