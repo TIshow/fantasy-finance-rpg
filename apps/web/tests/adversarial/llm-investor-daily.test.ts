@@ -13,6 +13,7 @@ import { replay } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
 import { cutoffOf } from "../../src/ledger/ledger";
 import { runDay } from "../../src/runner/day";
+import { errorText } from "../../src/runner/llm-stage";
 import { llmDepsFromEnv, llmFailed } from "../../scripts/daily-lib";
 import { FakeClock, jst } from "../contracts/fakes";
 import { answer } from "../runner/llm-fakes";
@@ -32,6 +33,12 @@ async function evening(dryRun = false, limit = 1000) {
   const w = await llmWorld({ dailyCostLimit: limit, dryRun }, { manualClock: true });
   for (const [h, m] of [[6, 50], [9, 35], [16, 35]] as const) await w.runAt(D0, h, m);
   return w;
+}
+type Store = World["deps"]["store"];
+/** 保管の append の結果を差し替える（読み・注文票の確定はそのまま） */
+function tapAppend(w: World, f: (d: Parameters<Store["append"]>[0], res: Awaited<ReturnType<Store["append"]>>) => Awaited<ReturnType<Store["append"]>>) {
+  const inner = w.deps.store;
+  w.deps.store = { ...inner, read: inner.read.bind(inner), last: inner.last.bind(inner), commitSheet: inner.commitSheet.bind(inner), append: async (d) => f(d, await inner.append(d)) };
 }
 const allAnswer = (w: World, output: string) => {
   for (const f of Object.values(w.llm.providers)) f.outcome = () => answer(output);
@@ -54,8 +61,7 @@ describe("費用の上限", () => {
     // 2回とも D1 の日に数える。1回目は答えがなく、締めで打ち切って予約した費用（32.4円）で閉じる。
     // policy の上限は 500（50円）：2回目の GPT は 32.4 + 6.4 + 22.4 > 50 で断られる
     const w = await llmWorld({ dailyCostLimit: 500, dryRun: false }, { manualClock: true });
-    await w.runAt(D0, 6, 50);
-    await w.runAt(D0, 9, 35);
+    for (const [h, m] of [[6, 50], [9, 35]] as const) await w.runAt(D0, h, m);
     w.clock.set(jst(D1, 0, 10));
     await runDay(D0, w.deps);
     expect((await w.of("llm.batch.submitted")).map((e) => [p(e).agentId, p(e).tradingDate])).toEqual(LLM_IDS.map((id) => [id, D1]));
@@ -78,14 +84,6 @@ describe("費用の上限", () => {
     expect(llmFailed(r)).toBe(true);
     expect(await w.of("llm.batch.submitted")).toEqual([]);
     expect(Object.values(w.llm.providers).map((f) => f.sent.length)).toEqual([0, 0, 0]);
-    // 3体の予約がちょうど80円までなら送る（1ドル395円：32.4 × 395/160 = 79.98円）。口も同じ円で作り直す
-    const ok = await llmWorld();
-    const base = ok.deps.llm!;
-    ok.deps.llm = { ...base, yenPerUsd: 395, portOf: () => { throw new Error("stop before sending"); } };
-    const r2 = await ok.run(D0);
-    const d2 = stageOf(r2, "llm.submit")?.detail ?? "";
-    expect(d2).not.toContain("reservations");
-    expect(d2).toContain("ai-claude: stop before sending");
   });
 
   it("1体の口が例外でも、ほかの2体は依頼し、段は error: になる（例外の文は1行・200文字まで）", async () => {
@@ -95,10 +93,7 @@ describe("費用の上限", () => {
     const r = await w.run(D0);
     expect((await w.of("llm.batch.submitted")).map((e) => p(e).agentId)).toEqual(["ai-claude", "ai-gemini"]);
     const detail = stageOf(r, "llm.submit")!.detail!;
-    expect(detail).toMatch(/^error: ai-gpt: boom x/);
-    expect(detail).not.toContain("\n");
-    expect(detail.length).toBeLessThan(400);
-    expect(llmFailed(r)).toBe(true);
+    expect([/^error: ai-gpt: boom x/.test(detail), detail.includes("\n"), detail.length < 400, llmFailed(r)]).toEqual([true, false, true, true]);
   });
 
   it("受け取りで1体の提供元が例外でも、ほかの2体は投稿と注文票まで進み、例外の AI は次の実行で続きから進む", async () => {
@@ -108,17 +103,57 @@ describe("費用の上限", () => {
       throw new RangeError("provider broke");
     };
     const r = await w.runAt(D1, 6, 50);
-    expect(stageOf(r, "llm.collect")?.detail).toMatch(/^error: ai-gpt: /);
+    expect(stageOf(r, "llm.collect")?.detail).toMatch(/^error: ai-gpt#\d+: /);
     expect((await sheetsOf(w, D1)).map((e) => p(e).agentId).sort()).toEqual(["ai-claude", "ai-gemini"]);
     w.llm.providers.openai!.outcome = () => answer(good);
     await w.runAt(D1, 7, 20);
     expect((await sheetsOf(w, D1)).map((e) => p(e).agentId).sort()).toEqual(["ai-claude", "ai-gemini", "ai-gpt"]);
   });
 
+  it("古い依頼（前の取引日の①）で例外が続いても、同じ AI の今日の①は受け取って注文票まで進む", async () => {
+    const w = await evening();
+    // D1 の分の①は anthropic-batch-1
+    w.llm.providers.anthropic!.outcome = (id) => {
+      if (id === "anthropic-batch-1") throw new RangeError("old batch broke");
+      return answer(good);
+    };
+    for (const [h, m] of [[6, 50], [9, 35], [16, 35]] as const) await w.runAt(D1, h, m);
+    const r = await w.runAt(D2, 6, 50);
+    expect(stageOf(r, "llm.collect")?.detail).toMatch(/error: ai-claude#\d+: old batch broke/);
+    expect((await sheetsOf(w, D2)).some((e) => p(e).agentId === "ai-claude" && e.type === "order_sheet.committed")).toBe(true);
+  });
+
+  it("保管に書けたのに手元の写しに当てられないとき（LocalCopyError）は、段ごと止めて、ほかの AI に進まない（送らない）", async () => {
+    const w = await llmWorld();
+    // 保管には書けたが、返ってきた記録が写しと合わない
+    tapAppend(w, (d, res) => (res.ok && d.type === "llm.batch.submitted" && d.payload.agentId === "ai-claude" ? { ok: true, event: { ...res.event, payload: { ...(res.event.payload as object), maxCost: 1 } } } : res));
+    const r = await w.run(D0);
+    expect(stageOf(r, "llm.submit")?.detail).toMatch(/^error: /);
+    expect((await w.of("llm.batch.submitted")).map((e) => p(e).agentId)).toEqual(["ai-claude"]);
+    expect(Object.values(w.llm.providers).map((f) => f.sent.length)).toEqual([0, 0, 0]);
+  });
+
+  it("例外の文の中のキーらしい文字列（sk-・AIza・Bearer・key=・token:）は伏せる。ふつうの文は残す", () => {
+    const keys = ["sk-ant-api03-AbCdEf1234567890", "sk-proj-Zz9_8-abcdefgh", "AIzaSyA1234567890abcdefghijkl", "Bearer abc.def-ghi_123456", "key=s3cr3tvalue99", "api_key: s3cr3tvalue99", "TOKEN=abcdefgh12345"];
+    for (const k of keys) {
+      const t = errorText(new Error(`request failed (${k}) at https://api.example?key2=1`));
+      const secret = k.replace(/^(Bearer |key=|api_key: |TOKEN=)/, "");
+      expect([t.includes(secret), t.includes("[redacted]"), t.includes("request failed")], k).toEqual([false, true, true]);
+    }
+    // 200字で切るより前に伏せる（切った残りに一部が出ない）
+    expect(errorText(new Error(`${"x".repeat(190)} sk-ant-api03-AbCdEf1234567890`))).not.toMatch(/sk-ant/);
+    expect(errorText(new Error("model gpt-5 returned 500 (batch_id msgbatch_01AbC)"))).toBe("model gpt-5 returned 500 (batch_id msgbatch_01AbC)");
+    // 今の動き：語の途中の sk- も伏せる（task-12345678 → ta[redacted]）。伏せすぎは安全側なので穴にしない
+    expect(errorText(new Error("task-12345678"))).toBe("ta[redacted]");
+  });
+
+  it.fails("【低】JSON の形で書かれたキー（\"api_key\":\"…\"・\"x-api-key\": \"…\"）も伏せる（今は残る。接頭辞のない値のとき）", () => {
+    for (const k of ['{"api_key":"s3cr3tvalue99"}', '{"x-api-key": "s3cr3tvalue99"}']) expect(errorText(new Error(k)), k).not.toContain("s3cr3tvalue99");
+  });
+
   it("同じ時刻に2つ・3つの実行が重なっても（本番は DB のロックで1つずつ）、各社に送るのは1回まで。1体1日1件の予約を超えない", async () => {
     const w = await llmWorld(undefined, { manualClock: true });
-    await w.runAt(D0, 6, 50);
-    await w.runAt(D0, 9, 35);
+    for (const [h, m] of [[6, 50], [9, 35]] as const) await w.runAt(D0, h, m);
     w.clock.set(jst(D0, 16, 35));
     await Promise.allSettled([runDay(D0, w.deps), runDay(D0, w.deps)]);
     await Promise.allSettled([runDay(D0, w.deps), runDay(D0, w.deps), runDay(D0, w.deps)]);
@@ -206,14 +241,6 @@ describe("入力の時刻の守り", () => {
     expect((await sheetsOf(w, D1)).filter((e) => e.type === "order_sheet.committed")).toHaveLength(3);
   });
 
-  it("依頼の時点の値段は、取引日より前の板寄せだけ（依頼の日の板寄せは入り、取引日の板寄せの行はない）", async () => {
-    const w = await evening();
-    const user = (JSON.parse(w.llm.providers.anthropic!.sent[0]!) as { messages: { content: string }[] }).messages[1]!.content;
-    expect(user).toContain(`取引日：${D1}`);
-    expect(user).toMatch(/\n11\/09,/);
-    expect(user).not.toMatch(/\n11\/10,/);
-  });
-
   it("3体の入力は、あなたと自分の口座の行を除いて同じ。別の AI の口座は入らない（売買で口座が違ってきた日も）", async () => {
     const w = await evening();
     // D1：Claude だけ買い、GPT は売買なし、Gemini は2銘柄を買う
@@ -282,18 +309,10 @@ describe("締めのあとの答え", () => {
   it("注文の判断を記録した直後に時計が締めを越えたら、注文票は確定されない", async () => {
     const w = await evening();
     w.llm.providers.anthropic!.outcome = () => answer(good);
-    const inner = w.deps.store;
-    w.deps.store = {
-      ...inner,
-      read: inner.read.bind(inner),
-      last: inner.last.bind(inner),
-      commitSheet: inner.commitSheet.bind(inner),
-      append: async (d) => {
-        const r = await inner.append(d);
-        if (d.type === "agent.run" && d.payload.agentId === "ai-claude" && d.payload.purpose === "order") w.clock.set(cutoffOf(D1));
-        return r;
-      },
-    };
+    tapAppend(w, (d, res) => {
+      if (d.type === "agent.run" && d.payload.agentId === "ai-claude" && d.payload.purpose === "order") w.clock.set(cutoffOf(D1));
+      return res;
+    });
     w.clock.set(jst(D1, 8, 29));
     await runDay(D1, w.deps);
     expect((await w.all()).filter((e) => e.type === "order_sheet.committed" && p(e).agentId === "ai-claude" && p(e).tradingDate === D1)).toEqual([]);

@@ -119,8 +119,9 @@ describe("空白や見えない文字だけの本文（post_blank）", () => {
     expect(postText("." + U(0x3000).repeat(399))).toBe("ok");
   });
 
-  it.fails("【低】見えない結合文字（U+034F 結合書記素接合子・U+FE0F 異体字セレクタ・U+E0100 異体字セレクタ補助・U+17B4 クメールの母音）だけの本文も断る（今は通る）", () => {
-    for (const t of [U(0x34f), U(0xfe0f), U(0xe0100), U(0x17b4), U(0x34f, 0xfe0f, 0x17b5)]) expect(postText(t), t.codePointAt(0)!.toString(16)).toBe("post_blank");
+  it("前回の低の指摘：見えない結合文字（U+034F・U+FE0F・U+E0100・U+17B4）だけの本文も断る（直った）。結合文字の付いた見える字は通る", () => {
+    for (const t of [U(0x34f), U(0xfe0f), U(0xe0100), U(0x17b4), U(0x34f, 0xfe0f, 0x17b5), " " + U(0x20e3, 0x301)]) expect(postText(t), t.codePointAt(0)!.toString(16)).toBe("post_blank");
+    for (const t of [U(0x915, 0x93c), U(0x2764, 0xfe0f), U(0x31, 0xfe0f, 0x20e3)]) expect(postText(t)).toBe("ok");
   });
 });
 

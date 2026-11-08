@@ -16,9 +16,9 @@ const PREV = "2026-11-20";
 const jst = (date: string, hh: number, mm = 0) => Date.parse(`${date}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00+09:00`);
 const S = jst(PREV, 16, 35); // 依頼の時刻
 
-type Row = [type: string, at: number, payload: Record<string, unknown>];
+type Row = [type: string, at: number, payload: Record<string, unknown>, refs?: number[]];
 /** 記録の並び（中身の形だけ。investorInputOf は type・seq・recordedAt・payload しか見ない） */
-const logOf = (rows: Row[]): LogEvent[] => rows.map(([type, recordedAt, payload], i) => ({ seq: i + 1, type, recordedAt, payload, actor: "system", refs: [] }) as unknown as LogEvent);
+const logOf = (rows: Row[]): LogEvent[] => rows.map(([type, recordedAt, payload, refs = []], i) => ({ seq: i + 1, type, recordedAt, payload, actor: "system", refs }) as unknown as LogEvent);
 const ACCOUNT: Account = { cash: 100_000_000, holdings: {} };
 const bodies = new Map<string, string>([
   ["h1", "金曜の引けのあとの投稿"],
@@ -100,6 +100,53 @@ describe("渡した記録の中の境目", () => {
   it("訂正の新しい本文が消されていれば、その投稿は入らない（元の本文に戻らない）", () => {
     const rows: Row[] = [...ROWS.slice(0, 18), ["correction.issued", jst(PREV, 16, 9), { kind: "post", targetSeq: 16, newBodyHash: "erased" }]];
     expect(investorInputOf(logOf(rows), ctx()).posts.map((x) => x.seq)).toEqual([10, 14]);
+  });
+});
+
+describe("読めない形の訂正（安全側に外す）", () => {
+  const fix = (payload: Record<string, unknown>, refs: number[] = []) => logOf([...ROWS.slice(0, 19), ["correction.issued", jst(PREV, 16, 30), payload, refs]]);
+  const shown = (log: LogEvent[]) => {
+    const input = investorInputOf(log, ctx());
+    const t = investorUserText(input);
+    return { posts: input.posts.map((x) => x.seq), withheld: t.omitted.withheld, text: t.text, seqs: t.inputSeqs };
+  };
+
+  it("refs・targetSeq・refSeq のどれで指しても、形の読めない訂正（種類なし・種類が違う・本文のハッシュなし・数でない）が指す投稿は外れ、数が文と omitted.withheld に出て、訂正の seq は入力の一覧に入る", () => {
+    const cases: [Record<string, unknown>, number[]][] = [
+      [{ reason: "誤り" }, [10]],
+      [{ kind: "Post", targetSeq: 10, newBodyHash: "h8" }, [10]],
+      [{ kind: "post", refSeq: 10 }, [10]],
+      [{ kind: "post", targetSeq: 10, newBodyHash: 123 }, [10]],
+      [{ kind: "data", targetSeq: 10, newBodyHash: "h8" }, [10]],
+      [{ kind: "post", targetSeq: 3, newBodyHash: "h8" }, [3, 10]],
+    ];
+    for (const [payload, refs] of cases) {
+      const r = shown(fix(payload, refs));
+      expect(r.posts, JSON.stringify(payload)).toEqual([14, 16]);
+      expect(r.withheld).toBe(1);
+      expect(r.text).toContain("訂正の形が読めないため外した投稿：1件");
+      expect(r.text).not.toContain("金曜の引けのあとの投稿");
+      expect(r.seqs).toContain(20);
+      expect(r.seqs).not.toContain(10);
+    }
+  });
+
+  it("入力データの訂正（投稿を指さない）では投稿は外れない。読めない訂正が依頼の時刻より後なら、まだ外さない", () => {
+    expect(shown(fix({ kind: "data", targetSeq: 6, newValueHash: "v" }, [6])).withheld).toBe(0);
+    const later = logOf([...ROWS.slice(0, 19), ["correction.issued", S + 1, { reason: "誤り" }, [10]]]);
+    expect(shown(later).posts).toEqual([10, 14, 16]);
+  });
+
+  it("読める訂正のあとに読めない訂正が来れば外す（読める訂正の本文も出さない）", () => {
+    const log = logOf([...ROWS.slice(0, 19), ["correction.issued", jst(PREV, 16, 31), { kind: "post" }, [16]]]);
+    const r = shown(log);
+    expect([r.posts, r.withheld]).toEqual([[10, 14], 1]);
+    expect(r.text).not.toContain("2回目の訂正");
+  });
+
+  it.fails("【低】読める訂正（投稿 A の訂正）が refs で別の投稿 B も指していれば、B も外す（今は B が訂正の印なしで出る）", () => {
+    const r = shown(fix({ kind: "post", targetSeq: 14, newBodyHash: "h8" }, [14, 10]));
+    expect(r.posts).not.toContain(10);
   });
 });
 
