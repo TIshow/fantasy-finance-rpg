@@ -14,7 +14,7 @@ import { cutoffOf, isBusinessDay, nextBusinessDay, previousBusinessDay } from ".
 import type { Account, Deciyen, Order } from "../ledger/types";
 import type { ValuesPort } from "../store/pg-values";
 import { type SplitInput, adjustCloses } from "./adjust";
-import { type DayAccess, type LlmDeps, llmSubmit } from "./llm-stage";
+import { type DayAccess, type LlmDeps, errorText, llmSubmit } from "./llm-stage";
 import { discloseDue } from "./world/disclosure";
 
 /** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引き、凍結した写しを渡す */
@@ -132,13 +132,13 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
 
 /**
  * LLM の段の例外は、その段の結果（detail が "error: " で始まる）にして、ほかの段を止めない（毎日の実行は、この結果で失敗の終了コードにする）。
- * 文は例外の文だけ（API キーは口の外に出ない）
+ * 文は例外の文だけ（API キーは口の外に出ない）。改行・制御文字を空白にし、200文字で切る（errorText）
  */
 async function llmStage(stage: string, f: () => Promise<StageResult>): Promise<StageResult> {
   try {
     return await f();
   } catch (e) {
-    return { stage, status: "skipped", detail: `error: ${e instanceof Error ? e.message : String(e)}` };
+    return { stage, status: "skipped", detail: `error: ${errorText(e)}` };
   }
 }
 

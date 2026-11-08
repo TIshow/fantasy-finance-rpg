@@ -94,62 +94,80 @@ export async function llmSubmit(day: DayAccess, llm: LlmDeps, date: string): Pro
   });
   const todo = active.filter((a) => !submissionOf(events, a.id, T) && !(isSuspended(events, a.id, "posts") && isSuspended(events, a.id, "orders")));
   if (todo.length === 0) return { stage, status: "done" };
-  // 3体の予約の合計が目標（80円）を超える設定なら、どのAIも依頼しない
+  // 3体の予約の合計が目標（80円）を超える設定なら、どのAIも依頼せず、段を失敗にする（設定の誤りなので、毎日の実行の終了コードで知らせる）
   try {
     checkDailyBatchReservations(active.map((a) => a.model), now, { yenPerUsd: llm.yenPerUsd });
-  } catch {
-    return { stage, status: "skipped", detail: "the daily reservations exceed the target" };
+  } catch (e) {
+    return { stage, status: "skipped", detail: `error: ${errorText(e)}` };
   }
   const prompt = await investorPrompt();
+  // 入力に使う記録は、この段の始めの記録で3体とも同じにする（あとで書く①・③は入力に入らない）。3体の市場の文が同じことも確かめる
+  const base = events;
+  let market: string | undefined;
   const notes: string[] = [];
+  const errors: string[] = [];
   const waiting: string[] = [];
   let wrote = false;
   for (const a of todo) {
-    const evs = day.events();
-    const registered = find(evs, "agent.registered", (p) => p.agentId === a.id)!;
-    // 口座は前の日の引け後の処理のあとのもの（開始日が取引日なら、登録の口座）
-    if ((pl(registered).startDate as string) < T && !find(evs, "corporate_actions.applied", (p) => p.agentId === a.id && p.asOf === date && p.closedSeq === undefined)) {
-      waiting.push(a.id);
-      continue;
-    }
-    const at = day.clock.now();
-    const input = investorInputOf(evs, { agentId: a.id, tradingDate: T, account: day.account(a.id), body: (h) => bodyText(day.values, h) });
-    const { text, inputSeqs, omitted } = investorUserText(input);
-    const request = investorRequest(a, { prompt, tradingDate: T, submittedAt: at, inputSeqs, userText: text, yenPerUsd: llm.yenPerUsd });
-    const port = llm.portOf(a.model.provider);
-    const prepared = await port.prepare(request);
-    const run = (errorCode: string, cost: Payload) => day.append("agent.run", llmRunPayload(a, { prompt, inputSeqs, requestHash: prepared.sentBodyHash, startedAt: at, finishedAt: day.clock.now(), ok: false, errorCode, cost }), inputSeqs);
-    // 上限：記録から数えたその日の使用済み＋この予約が、記録の上限と policy の上限の小さいほうを超えるなら、送らずに失敗を残す
-    const limit = Math.min(LLM_DAILY_COST_LIMIT, llm.policy.dailyCostLimit);
-    if (llmCostUsed(evs, jstDayOf(at)) + request.maxCost > limit) {
-      await must(run("budget_exceeded", { maxCost: request.maxCost, cost: 0 }), "agent.run");
-      notes.push(`${a.id}:budget_exceeded`);
+    try {
+      const registered = find(base, "agent.registered", (p) => p.agentId === a.id)!;
+      // 口座は前の日の引け後の処理のあとのもの（開始日が取引日なら、登録の口座）
+      if ((pl(registered).startDate as string) < T && !find(base, "corporate_actions.applied", (p) => p.agentId === a.id && p.asOf === date && p.closedSeq === undefined)) {
+        waiting.push(a.id);
+        continue;
+      }
+      const evs = day.events();
+      // 上限を超えて送らなかった日は、同じ失敗を何度も書かない（その日の依頼の時刻よりあとに書いた budget_exceeded があれば飛ばす）
+      if (evs.some((e) => e.type === "agent.run" && pl(e).agentId === a.id && pl(e).errorCode === "budget_exceeded" && (pl(e).startedAt as number) >= llmSubmitAt(date))) {
+        notes.push(`${a.id}:budget_exceeded`);
+        continue;
+      }
+      const at = day.clock.now();
+      const input = investorInputOf(base, { agentId: a.id, tradingDate: T, prev: date, submittedAt: at, account: day.account(a.id), body: (h) => bodyText(day.values, h) });
+      const { text, marketText, inputSeqs, omitted } = investorUserText(input);
+      if (market !== undefined && marketText !== market) throw new Error("the market text differs between investors");
+      market = marketText;
+      const request = investorRequest(a, { prompt, tradingDate: T, submittedAt: at, inputSeqs, userText: text, yenPerUsd: llm.yenPerUsd });
+      const port = llm.portOf(a.model.provider);
+      const prepared = await port.prepare(request);
+      const run = (errorCode: string, cost: Payload) => day.append("agent.run", llmRunPayload(a, { prompt, inputSeqs, requestHash: prepared.sentBodyHash, startedAt: at, finishedAt: day.clock.now(), ok: false, errorCode, cost }), inputSeqs);
+      // 上限：記録から数えたその日の使用済み＋この予約が、記録の上限と policy の上限の小さいほうを超えるなら、送らずに失敗を残す
+      const limit = Math.min(LLM_DAILY_COST_LIMIT, llm.policy.dailyCostLimit);
+      if (llmCostUsed(evs, jstDayOf(at)) + request.maxCost > limit) {
+        await must(run("budget_exceeded", { maxCost: request.maxCost, cost: 0 }), "agent.run");
+        notes.push(`${a.id}:budget_exceeded`);
+        wrote = true;
+        continue;
+      }
+      const sub = await day.append("llm.batch.submitted", submittedPayload(prepared, llm.yenPerUsd), []);
+      if (!sub.ok) {
+        notes.push(`${a.id}:not reserved (${sub.reason})`);
+        continue;
+      }
       wrote = true;
-      continue;
-    }
-    const sub = await day.append("llm.batch.submitted", submittedPayload(prepared, llm.yenPerUsd), []);
-    if (!sub.ok) {
-      notes.push(`${a.id}:not reserved (${sub.reason})`);
-      continue;
-    }
-    wrote = true;
-    if (omitted.posts > 0 || omitted.auctionDays > 0) notes.push(`${a.id}:omitted ${omitted.posts} posts, ${omitted.auctionDays} days`);
-    const sent = await port.send(prepared, sub.event.seq);
-    const batchSeq = sub.event.seq;
-    if (sent.ok) {
-      await must(day.append("llm.batch.sent", { batchSeq, agentId: a.id, provider: a.model.provider, batchId: sent.batchId }, [batchSeq]), "llm.batch.sent");
-    } else if ("notCreated" in sent) {
-      // 作られていないと確か：費用0で閉じ、その日の判断がないことを失敗の run で見えるようにする
-      const price = { inputCentsPer10MTok: request.reservePrice.inputCentsPer10MTok, outputCentsPer10MTok: request.reservePrice.outputCentsPer10MTok };
-      await must(day.append("llm.batch.closed", { batchSeq, agentId: a.id, result: "failed", cost: 0, inputTokens: 0, outputTokens: 0, notCreatedError: sent.errorCode, ...price }, [batchSeq]), "llm.batch.closed");
-      await must(run(sent.errorCode, { maxCost: request.maxCost, cost: 0 }), "agent.run");
-      notes.push(`${a.id}:not sent (${sent.errorCode})`);
-    } else {
-      notes.push(`${a.id}:send unknown (${sent.errorCode}); the next run looks for it`);
+      if (omitted.posts > 0 || omitted.auctionDays > 0) notes.push(`${a.id}:omitted ${omitted.posts} posts, ${omitted.auctionDays} days`);
+      const sent = await port.send(prepared, sub.event.seq);
+      const batchSeq = sub.event.seq;
+      if (sent.ok) {
+        await must(day.append("llm.batch.sent", { batchSeq, agentId: a.id, provider: a.model.provider, batchId: sent.batchId }, [batchSeq]), "llm.batch.sent");
+      } else if ("notCreated" in sent) {
+        // 作られていないと確か：費用0で閉じ、その日の判断がないことを失敗の run で見えるようにする
+        const price = { inputCentsPer10MTok: request.reservePrice.inputCentsPer10MTok, outputCentsPer10MTok: request.reservePrice.outputCentsPer10MTok };
+        await must(day.append("llm.batch.closed", { batchSeq, agentId: a.id, result: "failed", cost: 0, inputTokens: 0, outputTokens: 0, notCreatedError: sent.errorCode, ...price }, [batchSeq]), "llm.batch.closed");
+        await must(run(sent.errorCode, { maxCost: request.maxCost, cost: 0 }), "agent.run");
+        notes.push(`${a.id}:not sent (${sent.errorCode})`);
+      } else {
+        notes.push(`${a.id}:send unknown (${sent.errorCode}); the next run looks for it`);
+      }
+    } catch (e) {
+      // 1体の例外で、ほかのAIを止めない。段の結果は失敗（detail が "error: " で始まる）にする
+      errors.push(`${a.id}: ${errorText(e)}`);
     }
   }
-  const detail = [...notes, ...(waiting.length > 0 ? [`post-close of ${date} not done: ${waiting.join(",")}`] : [])].join("; ") || undefined;
-  return { stage, status: waiting.length > 0 && !wrote ? "waiting" : wrote ? "written" : "done", ...(detail ? { detail } : {}) };
+  const rest = [...notes, ...(waiting.length > 0 ? [`post-close of ${date} not done: ${waiting.join(",")}`] : [])].join("; ");
+  const detail = errors.length > 0 ? `error: ${errors.join("; ")}${rest ? `; ${rest}` : ""}` : rest || undefined;
+  const status = wrote ? "written" : errors.length > 0 ? "skipped" : waiting.length > 0 ? "waiting" : "done";
+  return { stage, status, ...(detail ? { detail } : {}) };
 }
 
 /** ①の中身（契約の流れの2。料金とトークン数の上限は依頼から、ハッシュ・customId・本文の出力の上限は本文を作った結果から） */
@@ -178,6 +196,12 @@ export function submittedPayload(p: LlmPreparedBatch, yenPerUsd: number): Payloa
 export function bodyText(values: ValuesPort, hash: string): string | null {
   const b = values.body(hash);
   return b && typeof b.value === "string" ? b.value : null;
+}
+
+/** 例外の文を、結果と標準出力に書ける形にする（改行・制御文字を空白に、200文字まで） */
+export function errorText(e: unknown): string {
+  const t = (e instanceof Error ? e.message : String(e)).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
+  return [...t].length > 200 ? `${[...t].slice(0, 200).join("")}…` : t;
 }
 
 export async function must(r: Promise<Appended>, what: string): Promise<LogEvent> {
