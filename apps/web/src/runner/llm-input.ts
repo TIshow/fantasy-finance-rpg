@@ -1,13 +1,14 @@
 // LLM の AI 投資家に渡す入力の値を、記録から集める（#179）。
-// 使うのは、依頼の予約（llm.batch.submitted）を書く前の記録だけ（events に渡すのは、その前までの記録）。依頼は前の営業日の
-// 引けのあとに作るので、値段は取引日より前の板寄せ、決算は締めより前に記録した発表、掲示板はそれまでの投稿だけになる。
+// 使うのは、依頼の予約（llm.batch.submitted）を書く前の記録だけ（events に渡すのは、その前までの記録。念のため、予約の時刻より
+// あとに記録したものも外す）。依頼は前の営業日（prev）の引けのあとに作るので、値段は取引日より前の板寄せ、決算は締めより前に
+// 記録した発表、掲示板はそれまでの投稿だけになる。
 // 翌朝の受け取りでは、同じ記録（予約より前）から同じ値を作り直し、送った本文のハッシュと比べる（作り直しても同じであることを確かめる）。
 import type { LogEvent } from "../events/types";
 import { cutoffOf } from "../ledger/ledger";
 import type { Account, Deciyen } from "../ledger/types";
 import { GENERAL_BOARD, type InvestorInput, type InvestorPost, type InvestorSymbol } from "../llm/investor-prompt";
 
-/** 値段の推移の日数（新しい方から）・決算の四半期の数・投稿の数の上限。入力の文が長すぎれば、さらに削る（investorUserText） */
+/** 値段の推移の日数（新しい方から）・決算の四半期の数・投稿の数の上限。入力の文が長すぎれば、さらに削る（investorMarketText） */
 export const LLM_INPUT_DAYS = 20;
 export const LLM_INPUT_QUARTERS = 4;
 export const LLM_INPUT_POSTS = 40;
@@ -18,6 +19,10 @@ const pl = (e: LogEvent) => e.payload as Payload;
 export interface InvestorInputContext {
   agentId: string;
   tradingDate: string;
+  /** 取引日の前の営業日（この日の引け後の処理のあとに依頼を作る） */
+  prev: string;
+  /** 予約の時刻（UNIXミリ秒）。これよりあとに記録したものは使わない */
+  submittedAt: number;
   /** いまの口座（台帳の写し）。予約より前の、最後の引け後の処理のあとの口座 */
   account: Account;
   /** 本文のハッシュから本文を引く（消した本文・ないものは null） */
@@ -26,19 +31,32 @@ export interface InvestorInputContext {
 
 /**
  * 予約より前の記録 events から、入力の値を集める。口座の根拠は、そのAIの最後の引け後の処理（まだなければ登録）。
- * 登録がなければ RangeError
+ * 次のときは RangeError（依頼を作らない）：登録がない、prev の板寄せの結果がそろっていない、開始日が取引日より前なのに
+ * prev の引け後の処理がない、根拠のあとにそのAIの約定がある（口座の根拠が古い）
  */
-export function investorInputOf(events: readonly LogEvent[], c: InvestorInputContext): InvestorInput {
+export function investorInputOf(all: readonly LogEvent[], c: InvestorInputContext): InvestorInput {
+  const events = all.filter((e) => e.recordedAt <= c.submittedAt);
   const registered = events.find((e) => e.type === "agent.registered" && pl(e).agentId === c.agentId);
   if (!registered) throw new RangeError(`agent ${c.agentId} is not registered`);
-  const basis = events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === c.agentId).at(-1) ?? registered;
+  const mine = (type: LogEvent["type"]) => events.filter((e) => e.type === type && pl(e).agentId === c.agentId);
+  const basis = mine("corporate_actions.applied").at(-1) ?? registered;
+  if ((pl(registered).startDate as string) < c.tradingDate && (basis === registered || pl(basis).asOf !== c.prev)) throw new RangeError(`the post-close of ${c.prev} is not done for ${c.agentId}`);
+  if (mine("fills.executed").some((e) => e.seq > basis.seq)) throw new RangeError(`fills after the account basis for ${c.agentId}`);
+  // 口座の元：登録・最初の配分・根拠と、根拠のあとの台帳の調整（いまの口座に入っている）
+  const allotted = mine("shares.allotted");
+  const adjusted = mine("ledger.adjusted").filter((e) => e.seq > basis.seq);
+  const accountSeqs = [registered.seq, ...allotted.map((e) => e.seq), basis.seq, ...adjusted.map((e) => e.seq)];
+
   const universe = new Set((events.filter((e) => e.type === "universe.set").at(-1)?.payload as { symbols?: string[] } | undefined)?.symbols ?? []);
+  const prevClosed = events.some((e) => e.type === "market.closed" && pl(e).date === c.prev);
   const symbols: InvestorSymbol[] = events
     .filter((e) => e.type === "company.listed" && universe.has(pl(e).symbol as string))
     .sort((x, y) => ((pl(x).symbol as string) < (pl(y).symbol as string) ? -1 : 1))
     .map((listing) => {
       const symbol = pl(listing).symbol as string;
       const before = events.filter((e) => e.type === "auction.cleared" && pl(e).symbol === symbol && (pl(e).date as string) < c.tradingDate);
+      // prev に板寄せがあるはずの銘柄（prev の締めより前に上場し、prev が臨時休場でない）は、その結果がそろうまで作らない
+      if (!prevClosed && listing.recordedAt < cutoffOf(c.prev) && !before.some((e) => pl(e).date === c.prev)) throw new RangeError(`the auction of ${symbol} on ${c.prev} is not recorded`);
       const ref = before.filter((e) => pl(e).price !== null).at(-1) ?? listing;
       const disclosures = events.filter((e) => e.type === "company.disclosed" && pl(e).symbol === symbol && e.recordedAt < cutoffOf(c.tradingDate)).slice(-LLM_INPUT_QUARTERS);
       return {
@@ -55,14 +73,20 @@ export function investorInputOf(events: readonly LogEvent[], c: InvestorInputCon
         }),
       };
     });
-  // 掲示板：上場した取引対象の銘柄と「全体」の投稿。取り下げたもの・本文が引けないものは入れない
+  // 掲示板：上場した取引対象の銘柄と「全体」の投稿。取り下げたもの・本文が引けないものは入れない。
+  // 訂正（correction.issued。種類が投稿）があれば、seq が最大の訂正の本文を使い、訂正済みと示す（EVENT_LOG §3.4・§6.1）。
+  // 訂正の中身の形は記録の決まりがまだないので、対象は targetSeq（なければ refSeq）、新しい本文は newBodyHash（なければ bodyHash）で読む
   const boards = new Set([...symbols.map((s) => s.symbol), GENERAL_BOARD]);
   const withdrawn = new Set(events.filter((e) => e.type === "content.withdrawn").map((e) => pl(e).targetSeq));
+  const corrections = new Map<unknown, LogEvent>();
+  for (const e of events) if (e.type === "correction.issued" && pl(e).kind === "post") corrections.set(pl(e).targetSeq ?? pl(e).refSeq, e);
   const posts: InvestorPost[] = [];
   for (const e of events) {
     if (e.type !== "post.published" || withdrawn.has(e.seq) || !boards.has(pl(e).board as string)) continue;
-    const text = c.body(pl(e).bodyHash as string);
-    if (text !== null) posts.push({ seq: e.seq, agentId: pl(e).agentId as string, board: pl(e).board as string, at: e.recordedAt, text });
+    const fix = corrections.get(e.seq);
+    const text = c.body((fix ? (pl(fix).newBodyHash ?? pl(fix).bodyHash) : pl(e).bodyHash) as string);
+    if (text === null) continue;
+    posts.push({ seq: e.seq, agentId: pl(e).agentId as string, board: pl(e).board as string, at: e.recordedAt, text, ...(fix ? { correctionSeq: fix.seq } : {}) });
   }
-  return { agentId: c.agentId, tradingDate: c.tradingDate, account: c.account, accountSeq: basis.seq, symbols, posts: posts.slice(-LLM_INPUT_POSTS) };
+  return { agentId: c.agentId, tradingDate: c.tradingDate, account: c.account, accountSeq: basis.seq, accountSeqs, symbols, posts: posts.slice(-LLM_INPUT_POSTS) };
 }
