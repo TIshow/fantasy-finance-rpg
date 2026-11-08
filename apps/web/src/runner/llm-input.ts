@@ -74,7 +74,7 @@ export function investorInputOf(all: readonly LogEvent[], c: InvestorInputContex
       };
     });
   // 掲示板：上場した取引対象の銘柄と「全体」の投稿。取り下げたもの・本文が引けないものは入れない。
-  // 訂正（correction.issued）があれば、seq が最大の訂正の本文を使い、訂正済みと示す（EVENT_LOG §3.4・§6.1）。
+  // 訂正（correction.issued）があれば、seq が最大の訂正の本文を使い、訂正済みと示す（EVENT_LOG §3.4・§6.1）。seq が最大の訂正が読めなければ外す。
   // 訂正の中身の形（#179 の lead の決定。記録の検査は core の append.ts）：訂正する対象は targetSeq の1件だけで、読めるのは
   // 「種類が post・対象 targetSeq が投稿・新しい本文が newBodyHash」の形だけ。refs のほかの投稿は引用で、外さず、ふつうに出す。
   // 投稿を指している（targetSeq が投稿か、読める targetSeq がなければ refs のどれかが投稿の seq）のに形が読めない訂正があれば、安全側に倒して
@@ -83,20 +83,26 @@ export function investorInputOf(all: readonly LogEvent[], c: InvestorInputContex
   const withdrawn = new Set(events.filter((e) => e.type === "content.withdrawn").map((e) => pl(e).targetSeq));
   const postSeqs = new Set(events.filter((e) => e.type === "post.published").map((e) => e.seq));
   const isPost = (seq: unknown) => typeof seq === "number" && postSeqs.has(seq);
+  // 投稿ごとに、seq が最大の訂正だけが効く（EVENT_LOG §3.4）。記録の順に見て、読める訂正と読めない訂正のどちらかに置き換える
   const corrections = new Map<number, LogEvent>();
   const unreadable = new Map<number, LogEvent>();
-  for (const e of events) {
+  for (const e of [...events].sort((x, y) => x.seq - y.seq)) {
     if (e.type !== "correction.issued") continue;
     const q = pl(e);
     const target = q.targetSeq;
     if (q.kind === "post" && typeof target === "number" && isPost(target) && typeof q.newBodyHash === "string") {
       corrections.set(target, e);
+      unreadable.delete(target);
       continue;
     }
     // 投稿を指しているのに読めない訂正：targetSeq が投稿ならその投稿だけ。入力データの訂正（kind が input）なら、refs の投稿は引用なので外さない。
     // それ以外（targetSeq が数でない・投稿でない）は、refs のうち投稿のものを外す
     const pointed = typeof target === "number" && (isPost(target) || q.kind === "input") ? [target] : e.refs;
-    for (const seq of pointed) if (isPost(seq)) unreadable.set(seq, e);
+    for (const seq of pointed) {
+      if (!isPost(seq)) continue;
+      unreadable.set(seq, e);
+      corrections.delete(seq);
+    }
   }
   // 新しい方から40件（外す投稿も1件と数える）を選んでから、外すものと入れるものに分ける
   const shown: (InvestorPost | { postSeq: number; correctionSeq: number })[] = [];

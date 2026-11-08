@@ -66,6 +66,47 @@ describe("試運転の印は、依頼を記録したときに決まる", () => {
     expect(await sheets(w)).toEqual([]);
   });
 
+  it("出力が上限で切れた（invalid_output）判断の記録にも、①の印が付く", async () => {
+    const w = await evening(true);
+    w.llm.providers.openai!.outcome = () => answer(good, { truncated: true });
+    setDry(w, false);
+    await w.runAt(D1, 6, 50);
+    expect((await runsOf(w, "ai-gpt")).map((e) => [p(e).ok, p(e).errorCode, p(e).dryRun])).toEqual([[false, "invalid_output", true]]);
+    expect(await sheets(w)).toEqual([]);
+  });
+
+  it("入力を作り直せなかった（provider_error）判断の記録にも、①の印が付く", async () => {
+    const w = await evening(true);
+    const base = w.deps.llm!;
+    // 翌朝の作り直し（依頼の時刻の時計で作る口）だけ、送った本文と違うハッシュを返す
+    w.deps.llm = {
+      ...base,
+      policy: { dailyCostLimit: 1000, dryRun: false },
+      portOf: (provider, clock) => {
+        const port = base.portOf(provider, clock);
+        if (!clock) return port;
+        return { ...port, prepare: async (r) => ({ ...(await port.prepare(r)), sentBodyHash: "0".repeat(64) }) } as typeof port;
+      },
+    };
+    await w.runAt(D1, 6, 50);
+    for (const id of LLM_IDS) expect((await runsOf(w, id)).map((e) => [p(e).ok, p(e).errorCode, p(e).dryRun]), id).toEqual([[false, "provider_error", true]]);
+    expect(await sheets(w)).toEqual([]);
+  });
+
+  it("答えなしで閉じた依頼（提供元の失敗・送った結果が分からず見つからない）の失敗の記録にも、①の印が付く", async () => {
+    const w = await llmWorld({ dailyCostLimit: 1000, dryRun: true }, { manualClock: true });
+    // Gemini は送った結果が分からず、探しても見つからない
+    w.llm.providers.google!.send = () => ({ ok: false, errorCode: "timeout", billingUnknown: true });
+    for (const [h, m] of [[6, 50], [9, 35], [16, 35]] as const) await w.runAt(D0, h, m);
+    // Claude は提供元が答えなしで閉じる（費用が分からない失敗）
+    w.llm.providers.anthropic!.outcome = () => ({ kind: "costUnknown", result: "failed", errorCode: "provider_error" });
+    setDry(w, false);
+    await w.runAt(D1, 6, 50);
+    for (const id of ["ai-claude", "ai-gemini"]) expect((await runsOf(w, id)).map((e) => [p(e).ok, p(e).errorCode, p(e).dryRun]), id).toEqual([[false, "provider_error", true]]);
+    const closed = (await w.of("llm.batch.closed")).filter((e) => ["ai-claude", "ai-gemini"].includes(p(e).agentId as string));
+    expect(closed.map((e) => [p(e).agentId, p(e).costUnknown])).toEqual([["ai-claude", true], ["ai-gemini", true]]);
+  });
+
   it("逆：本物として依頼したあと試運転に入れたら、判断は印なしで書き、試運転の間は注文票を書かない。締めの前に切れば書く", async () => {
     const w = await evening(false);
     expect((await w.of("llm.batch.submitted")).map((e) => p(e).dryRun)).toEqual([undefined, undefined, undefined]);

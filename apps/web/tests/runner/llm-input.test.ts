@@ -139,6 +139,22 @@ describe("investorInputOf", () => {
     }
   });
 
+  it("投稿ごとに seq が最大の訂正だけが効く：読める→読めないなら外し、読めない→読めるなら訂正の本文を印つきで出す", () => {
+    const at = Date.parse("2026-11-09T07:00:00Z");
+    const good = () => ev("correction.issued", { targetSeq: 10, kind: "post", reason: "誤り", newBodyHash: "h5" }, at, [10]);
+    const bad = () => ev("correction.issued", { targetSeq: 10, kind: "post", reason: "誤り" }, at, [10]);
+    const g1 = good();
+    const b1 = bad();
+    const thenBad = investorInputOf([...events, g1, b1], ctx);
+    expect(thenBad.posts.map((x) => x.seq)).toEqual([12]);
+    expect(thenBad.withheld).toEqual([{ postSeq: 10, correctionSeq: b1.seq }]);
+    const b2 = bad();
+    const g2 = good();
+    const thenGood = investorInputOf([...events, b2, g2], ctx);
+    expect(thenGood.withheld).toBeUndefined();
+    expect(thenGood.posts.find((x) => x.seq === 10)).toMatchObject({ text: "訂正した本文", correctionSeq: g2.seq });
+  });
+
   it("訂正の対象は targetSeq の1件だけ。refs のほかの投稿は引用で、外さず、訂正の印なしでふつうに出す", () => {
     const at = Date.parse("2026-11-09T07:00:00Z");
     const fix = ev("correction.issued", { targetSeq: 12, kind: "post", reason: "誤り", newBodyHash: "h5" }, at, [12, 10]);
