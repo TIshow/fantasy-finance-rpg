@@ -21,6 +21,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
   const models = new Map<string, AgentModel>();
   const variants = new Map<string, Set<string>>();
   const runs: RunModel[] = [];
+  let universe: string[] = []; // 取引対象の記号（universe.set の最後のもの）
   const evidence: Evidence[] = [];
   const last = new Map<string, Deciyen>();
   const days = new Map<string, AgentDay[]>();
@@ -44,6 +45,9 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
     const p = e.payload as P;
     const base = (agentId: string) => ({ seq: e.seq, at: e.recordedAt, agentId, agentName: agentId === "*" ? "全体" : nameOf(agentId) });
     switch (e.type) {
+      case "universe.set":
+        universe = Array.isArray(p.symbols) ? p.symbols.filter((s: unknown): s is string => typeof s === "string") : [];
+        break;
       case "agent.registered":
         names.set(p.agentId, p.displayName);
         initial.set(p.agentId, p.initialCash ?? INITIAL_CASH);
@@ -134,5 +138,5 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
     initialCash: initial.get(agentId) ?? INITIAL_CASH,
     days: (days.get(agentId) ?? []).sort((a, b) => lessThan(a.date, b.date)),
   }));
-  return { timeline, evidence, market: buildMarket(events), participants: [...kinds].map(([agentId, kind]) => ({ agentId, kind })).sort((a, b) => lessThan(a.agentId, b.agentId)), threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)), models: [...models.values()].sort((a, b) => lessThan(a.agentId, b.agentId)), runs };
+  return { timeline, evidence, market: buildMarket(events), participants: [...kinds].map(([agentId, kind]) => ({ agentId, kind })).sort((a, b) => lessThan(a.agentId, b.agentId)), threads: [...threadMap.values()].sort((a, b) => lessThan(a.symbol, b.symbol)), agents: agents.sort((a, b) => lessThan(a.agentId, b.agentId)), models: [...models.values()].sort((a, b) => lessThan(a.agentId, b.agentId)), runs, universe };
 }

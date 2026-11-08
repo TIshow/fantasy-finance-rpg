@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { SymbolPageView } from "../../../components/SymbolPageView";
-import { isSymbolBoard } from "../../../view/board";
+import { boardSymbols } from "../../../view/board";
 import { getView } from "../../data";
 
 // 1時間ごとに作り直す（ISR）。見る人のたびにデータベースを読まない
@@ -11,7 +11,7 @@ export const dynamicParams = false;
 
 export async function generateStaticParams() {
   const v = await getView();
-  return [...new Set([...v.threads.map((t) => t.symbol), ...v.market.companies.map((c) => c.listing.symbol)])].filter(isSymbolBoard).sort().map((symbol) => ({ symbol }));
+  return [...boardSymbols(v)].sort().map((symbol) => ({ symbol }));
 }
 
 export default async function SymbolPage({ params }: { params: Promise<{ symbol: string }> }) {

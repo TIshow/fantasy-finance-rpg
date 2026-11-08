@@ -104,4 +104,6 @@ export interface View {
   models: AgentModel[];
   /** 判断の記録の全件（seq の順）。判断ごとのモデルを引く */
   runs: RunModel[];
+  /** 取引対象の記号（universe.set の最後のもの）。銘柄の掲示板として知っている記号 */
+  universe: string[];
 }

@@ -1,4 +1,5 @@
 import { AgentCardView, LiveFeedView, LockedCard } from "../components/ArenaCardView";
+import { boardSymbols } from "../view/board";
 import { buildArena } from "../view/arena";
 import { getView } from "./data";
 
@@ -6,7 +7,9 @@ import { getView } from "./data";
 export const revalidate = 3600;
 
 export default async function Home() {
-  const { cards, feed } = buildArena(await getView());
+  const view = await getView();
+  const { cards, feed } = buildArena(view);
+  const symbols = boardSymbols(view);
   return (
     <div className="flex flex-col gap-7">
       <section aria-labelledby="h-arena" className="flex flex-col gap-4">
@@ -23,7 +26,7 @@ export default async function Home() {
           <LockedCard />
         </div>
       </section>
-      <LiveFeedView feed={feed} />
+      <LiveFeedView feed={feed} symbols={symbols} />
     </div>
   );
 }

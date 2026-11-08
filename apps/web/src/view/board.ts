@@ -67,13 +67,27 @@ export const filterPosts = (posts: readonly BoardPost[], filter: PostFilter) => 
 
 /** 銘柄に結びつかない、全体の掲示板の名前。LLMのAIはここにも投稿する。銘柄のページ（/symbols/…）はない */
 export const ALL_BOARD = "全体";
-/** 銘柄の掲示板か（false なら全体の掲示板。銘柄のページへのリンクにしない） */
+/** 銘柄の一覧を渡されていないときだけ使う簡単な見分け（「全体」とそっくり同じ文字は銘柄ではない） */
 export const isSymbolBoard = (board: string) => board !== ALL_BOARD;
 
+/**
+ * 銘柄のページを作る記号の一覧。上場した銘柄、取引対象（universe.set）の記号と、注文票・約定・評価に出た銘柄だけ。
+ * 投稿の掲示板の名前だけでは決めない（「全体」の別の書き方・小文字・存在しない記号で、架空の銘柄のページができるのを防ぐ）
+ */
+export function boardSymbols(view: View): Set<string> {
+  const out = new Set<string>([...view.market.companies.map((c) => c.listing.symbol), ...view.universe]);
+  for (const t of view.timeline) {
+    if (t.kind === "fill") out.add(t.symbol);
+    else if (t.kind === "order_sheet") for (const o of t.orders) out.add(o.symbol);
+    else if (t.kind === "valuation") for (const p of t.positions) out.add(p.symbol);
+  }
+  out.delete(ALL_BOARD);
+  return out;
+}
+
 export function buildBoard(view: View, symbol: string): Board | null {
-  if (!isSymbolBoard(symbol)) return null; // 全体の掲示板は銘柄のページを持たない
-  // 投稿・約定のある銘柄、または上場した銘柄（まだ投稿がなくても、銘柄のページは作る）
-  if (!view.threads.some((t) => t.symbol === symbol) && !view.market.companies.some((c) => c.listing.symbol === symbol)) return null;
+  // 知っている銘柄だけ（まだ投稿がなくても、上場した銘柄のページは作る）
+  if (!boardSymbols(view).has(symbol)) return null;
   const evidence = new Map(view.evidence.map((e) => [e.seq, e]));
   const posts = view.timeline.filter((t): t is TimelineItem & { kind: "post" } => t.kind === "post" && t.symbol === symbol);
   const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.symbol === symbol && t.qty > 0);
