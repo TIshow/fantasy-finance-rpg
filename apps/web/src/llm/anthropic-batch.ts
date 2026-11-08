@@ -1,10 +1,11 @@
 // Anthropic の Message Batches API（まとめて依頼し、あとで受け取る口。料金は標準の半額）を fetch で呼ぶ部分（#179）。
-// 作成・一覧・状態・結果・取り消しだけ。費用の上限の予約と LlmPort は、契約が決まってから上に置く（#179 の platform コメント）。
+// 作成・一覧・状態・結果・取り消しだけ。費用の上限の予約と契約 LlmBatchPort の実装は anthropic-port.ts。
 // - API キーは環境変数から読むだけ（anthropicApiKeyFromEnv）。返す値・エラー文・ログに書かない
 // - 提供元のエラー文と例外の文（リクエストIDなどを含みうる）は返す値に入れない。HTTP の状態コードと、決まった印だけを返す
 // - 依存は足さない（Node の fetch を使う）
-import type { LlmErrorCode, LlmMessage, LlmModel } from "../contracts";
+import type { LlmMessage, LlmModel } from "../contracts";
 import { sha256Hex } from "../events/hash";
+import type { BatchCall, BatchFailure, SentBody } from "./batch-types";
 import type { TokenUsage } from "./cost";
 
 /**
@@ -15,27 +16,18 @@ export const ANTHROPIC_VERSION = "2026-10-21";
 export const ANTHROPIC_BASE_URL = "https://api.anthropic.com";
 export const ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY";
 
-/** 環境変数から API キーを読む。なければ Error（キーの値は文に入れない） */
+/** 見出しに入れられる文字（表示できる ASCII で空白なし）だけの API キー */
+const API_KEY = /^[\x21-\x7e]{1,1024}$/;
+
+/** 環境変数から API キーを読む。ない・見出しに使えない文字があるときは Error（キーの値は文に入れない） */
 export function anthropicApiKeyFromEnv(env: Readonly<Record<string, string | undefined>> = process.env): string {
   const key = env[ANTHROPIC_API_KEY_ENV];
   if (!key) throw new Error(`${ANTHROPIC_API_KEY_ENV} is not set`);
+  if (!API_KEY.test(key)) throw new Error(`${ANTHROPIC_API_KEY_ENV} has characters not allowed in a header`);
   return key;
 }
 
-export type BatchErrorCode = Extract<LlmErrorCode, "timeout" | "rate_limited" | "provider_error">;
-/**
- * 失敗の理由（秘密を含まない決まった印）。
- * http：応答が 2xx でない。timeout：待ち時間切れ（本文を読む途中を含む）。network：通信の失敗（fetch の TypeError）。
- * malformed：応答の形が合わない。unexpected：それ以外の例外（文は捨てる）
- */
-export type BatchFailureReason = "http" | "timeout" | "network" | "malformed" | "unexpected";
-/**
- * 失敗。提供元のエラー文は持たない。status は HTTP の状態コード（応答がなかったときはない）。
- * billingUnknown：作成（create）で、バッチが作られた（＝課金されうる）かどうか分からない失敗の印。
- * この印の付いた失敗は自動で再試行しない（2回作ると2回課金されうる）。list で作成の時刻と件数から突き合わせる。
- */
-export type BatchFailure = { ok: false; errorCode: BatchErrorCode; reason: BatchFailureReason; status?: number; billingUnknown?: true };
-export type BatchCall<T> = { ok: true; value: T } | BatchFailure;
+export type { BatchCall, BatchErrorCode, BatchFailure, BatchFailureReason, SentBody } from "./batch-types";
 
 /** Messages API に送る中身。settings と messages から作り、ほかは足さない（ツールなし。EVENT_LOG §3.2） */
 export interface AnthropicParams {
@@ -70,11 +62,6 @@ export interface BatchStatus {
   expiresAt: number;
 }
 
-/** 作成で実際に送った本文の文字列と、その SHA-256（16進）。API キーは見出しにだけあり、ここには入らない */
-export interface SentBody {
-  body: string;
-  sha256: string;
-}
 /** 作成の結果。成功でも失敗でも、送った本文を一緒に返す（監査と、課金が分からない失敗の突き合わせに使う） */
 export type BatchCreateResult = BatchCall<BatchStatus> & { sent: SentBody };
 
@@ -164,6 +151,8 @@ export interface AnthropicBatchClientOptions {
   baseUrl?: string;
   /** 1回の HTTP の呼び出し（本文を読み終えるまで）の待ち時間の上限（ミリ秒）。超えたら timeout */
   timeoutMs?: number;
+  /** 結果の取り出しの待ち時間の上限（ミリ秒）。件数が多いと本文が大きくなるので、ほかより長い既定（120秒）にする */
+  resultsTimeoutMs?: number;
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -178,7 +167,7 @@ const need = <T>(ok: boolean, v: T): T => {
 const time = (v: unknown): number => need(isStr(v) && Number.isFinite(Date.parse(v)), Date.parse(v as string));
 
 function parseStatus(json: unknown): BatchStatus {
-  need(isObj(json) && json.type === "message_batch" && isStr(json.id) && isObj(json.request_counts), null);
+  need(isObj(json) && json.type === "message_batch" && isStr(json.id) && BATCH_ID.test(json.id) && isObj(json.request_counts), null);
   const j = json as Record<string, unknown>;
   const ps = j.processing_status;
   need(ps === "in_progress" || ps === "canceling" || ps === "ended", null);
@@ -260,11 +249,11 @@ function parseLine(line: string, lineNo: number): BatchItemResult {
 }
 
 export interface ReconciledResults {
-  /** 依頼した customId ごとの結果（重なったものは入れない） */
+  /** 依頼した customId ごとの結果（ちょうど1回だけ出て、形が合っていたもの） */
   matched: Map<string, Exclude<BatchItemResult, { type: "malformed" }>>;
-  /** 依頼したのに結果がない customId（malformed の行のものを含む） */
+  /** 依頼したのに結果がない customId と、形が合わない行にだけ出た customId */
   missing: string[];
-  /** 結果に2回以上出た customId。どれを信じるか決められないので matched に入れない */
+  /** 結果に2回以上出た customId（形が合わない行も数える）。どれを信じるか決められないので matched に入れない */
   duplicated: string[];
   /** 依頼にない customId の結果の数 */
   unexpected: number;
@@ -278,27 +267,26 @@ export interface ReconciledResults {
  */
 export function reconcileResults(requested: readonly string[], items: readonly BatchItemResult[]): ReconciledResults {
   const wanted = new Set(requested);
-  const seen = new Map<string, Exclude<BatchItemResult, { type: "malformed" }>[]>();
+  const seen = new Map<string, BatchItemResult[]>();
   let unexpected = 0;
   let malformed = 0;
   for (const it of items) {
-    if (it.type === "malformed") {
-      malformed += 1;
-      continue;
-    }
+    if (it.type === "malformed") malformed += 1;
+    if (it.customId === undefined) continue;
     if (!wanted.has(it.customId)) {
-      unexpected += 1;
+      if (it.type !== "malformed") unexpected += 1;
       continue;
     }
     seen.set(it.customId, [...(seen.get(it.customId) ?? []), it]);
   }
-  const matched = new Map<string, Exclude<BatchItemResult, { type: "malformed" }>>();
+  const matched: ReconciledResults["matched"] = new Map();
   const duplicated: string[] = [];
   const missing: string[] = [];
   for (const id of wanted) {
     const got = seen.get(id) ?? [];
-    if (got.length === 1) matched.set(id, got[0]!);
-    else if (got.length > 1) duplicated.push(id);
+    const only = got[0];
+    if (got.length > 1) duplicated.push(id);
+    else if (only !== undefined && only.type !== "malformed") matched.set(id, only);
     else missing.push(id);
   }
   return { matched, missing, duplicated, unexpected, malformed };
@@ -324,6 +312,7 @@ const checkBatchId = (id: string) => {
   if (!BATCH_ID.test(id)) throw new RangeError("invalid batch id");
 };
 
+/** 接続先。https: だけ。?・#（空でも）・利用者名・パスワードは断る。解析した origin とパスから作り直す */
 function checkBaseUrl(raw: string): string {
   let url: URL;
   try {
@@ -331,10 +320,44 @@ function checkBaseUrl(raw: string): string {
   } catch {
     throw new RangeError("baseUrl must be an https URL");
   }
-  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") {
+  if (url.protocol !== "https:" || url.username !== "" || url.password !== "" || raw.includes("?") || raw.includes("#")) {
     throw new RangeError("baseUrl must be an https URL without credentials, query or fragment");
   }
-  return raw.replace(/\/+$/, "");
+  return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+}
+
+const isRole = (v: unknown): v is "user" | "assistant" => v === "user" || v === "assistant";
+
+/**
+ * 作成で送る本文を作る。1件ごとの中身を、決まった欄・決まった順に組み立て直す（型をすり抜けた余分な欄（tools など）を送らない）。
+ * 欄の値も確かめ、外れたら RangeError。create はこれと同じ文字列を送る（ハッシュを先に出すために公開する）
+ */
+export function anthropicBatchBody(items: readonly BatchRequestItem[]): string {
+  if (!Array.isArray(items) || items.length === 0) throw new RangeError("no requests");
+  const ids = new Set<string>();
+  const requests = items.map((it) => {
+    if (!isObj(it) || !isStr(it.customId) || !CUSTOM_ID.test(it.customId) || ids.has(it.customId)) throw new RangeError("customId must be unique and match ^[A-Za-z0-9_-]{1,64}$");
+    ids.add(it.customId);
+    const p = it.params as unknown;
+    if (!isObj(p) || !isStr(p.model) || p.model === "") throw new RangeError("params.model must be a non-empty string");
+    if (!Number.isSafeInteger(p.max_tokens) || (p.max_tokens as number) < 1) throw new RangeError("params.max_tokens is invalid");
+    if (p.temperature !== undefined && !(typeof p.temperature === "number" && p.temperature >= 0 && p.temperature <= 1)) throw new RangeError("params.temperature is invalid");
+    if (p.system !== undefined && !isStr(p.system)) throw new RangeError("params.system must be a string");
+    if (!Array.isArray(p.messages) || p.messages.length === 0) throw new RangeError("params.messages must not be empty");
+    const messages = (p.messages as unknown[]).map((m) => {
+      if (!isObj(m) || !isRole(m.role) || !isStr(m.content)) throw new RangeError("params.messages has an invalid message");
+      return { role: m.role, content: m.content };
+    });
+    const params = {
+      model: p.model,
+      max_tokens: p.max_tokens,
+      ...(p.temperature === undefined ? {} : { temperature: p.temperature }),
+      ...(p.system === undefined ? {} : { system: p.system }),
+      messages,
+    };
+    return { custom_id: it.customId, params };
+  });
+  return JSON.stringify({ requests });
 }
 
 /** Message Batches API の呼び出し。どれも reject せず BatchCall を返す（引数の誤りだけ RangeError で reject） */
@@ -343,14 +366,18 @@ export class AnthropicBatchClient {
   readonly #fetch: typeof fetch;
   readonly #baseUrl: string;
   readonly #timeoutMs: number;
+  readonly #resultsTimeoutMs: number;
 
   constructor(options: AnthropicBatchClientOptions) {
     if (!options.apiKey) throw new RangeError("apiKey is empty");
+    // 見出しに使えない文字があると、fetch の例外（文にキーが入りうる）が通信断に見えるので、先に値を含まない文で断る
+    if (!API_KEY.test(options.apiKey)) throw new RangeError("apiKey has characters not allowed in a header");
     this.#apiKey = options.apiKey;
     // 既定の fetch は包んで呼ぶ（this を失った呼び出しにしない）
     this.#fetch = options.fetch ?? ((input, init) => fetch(input, init));
     this.#baseUrl = checkBaseUrl(options.baseUrl ?? ANTHROPIC_BASE_URL);
     this.#timeoutMs = options.timeoutMs ?? 30_000;
+    this.#resultsTimeoutMs = options.resultsTimeoutMs ?? 120_000;
   }
 
   /**
@@ -359,13 +386,12 @@ export class AnthropicBatchClient {
    * バッチの情報に customId は入らないので、突き合わせは作成の時刻と件数でしかできない（同じ時刻・同じ件数が並ぶと決められない）。
    */
   async create(items: readonly BatchRequestItem[]): Promise<BatchCreateResult> {
-    if (items.length === 0) throw new RangeError("no requests");
-    const ids = new Set<string>();
-    for (const it of items) {
-      if (!CUSTOM_ID.test(it.customId) || ids.has(it.customId)) throw new RangeError("customId must be unique and match ^[A-Za-z0-9_-]{1,64}$");
-      ids.add(it.customId);
-    }
-    const body = JSON.stringify({ requests: items.map((it) => ({ custom_id: it.customId, params: it.params })) });
+    return this.createBody(anthropicBatchBody(items));
+  }
+
+  /** anthropicBatchBody で作った本文を、加工せずに送ってバッチを作る（契約：記録のハッシュと送った本文を一致させる） */
+  async createBody(body: string): Promise<BatchCreateResult> {
+    if (typeof body !== "string" || body === "") throw new RangeError("body must be a non-empty string");
     const sent: SentBody = { body, sha256: await sha256Hex(new TextEncoder().encode(body)) };
     const r = await this.#json("POST", "/v1/messages/batches", body, parseStatus);
     if (!r.ok && uncertainOnCreate(r)) return { ...r, billingUnknown: true, sent };
@@ -415,16 +441,16 @@ export class AnthropicBatchClient {
         if (line.trim() !== "") out.push(parseLine(line, i + 1));
       });
       return out;
-    });
+    }, this.#resultsTimeoutMs);
   }
 
   #json<T>(method: string, path: string, body: string | undefined, parse: (json: unknown) => T): Promise<BatchCall<T>> {
     return this.#call(method, path, body, (text) => parse(JSON.parse(text)));
   }
 
-  async #call<T>(method: string, path: string, body: string | undefined, parse: (text: string) => T): Promise<BatchCall<T>> {
+  async #call<T>(method: string, path: string, body: string | undefined, parse: (text: string) => T, timeoutMs = this.#timeoutMs): Promise<BatchCall<T>> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.#timeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let status: number | undefined;
     try {
       const headers: Record<string, string> = { "x-api-key": this.#apiKey, "anthropic-version": ANTHROPIC_VERSION };

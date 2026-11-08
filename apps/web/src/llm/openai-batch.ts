@@ -13,10 +13,10 @@
 // - エラーの一覧：https://developers.openai.com/api/docs/guides/error-codes
 import type { LlmMessage, LlmModel } from "../contracts";
 import { sha256Hex } from "../events/hash";
-import type { BatchFailure, SentBody } from "./anthropic-batch";
+import type { BatchFailure, SentBody } from "./batch-types";
 import type { TokenUsage } from "./cost";
 
-export type { BatchCall, BatchFailure, SentBody } from "./anthropic-batch";
+export type { BatchCall, BatchFailure, SentBody } from "./batch-types";
 
 export const OPENAI_BASE_URL = "https://api.openai.com";
 export const OPENAI_API_KEY_ENV = "OPENAI_API_KEY";

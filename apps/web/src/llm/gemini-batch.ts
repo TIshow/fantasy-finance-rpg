@@ -13,7 +13,7 @@
 // - モデルの一覧：https://ai.google.dev/gemini-api/docs/models
 import type { LlmMessage, LlmModel } from "../contracts";
 import { sha256Hex } from "../events/hash";
-import type { BatchCall, BatchFailure, SentBody } from "./anthropic-batch";
+import type { BatchCall, BatchFailure, SentBody } from "./batch-types";
 import type { TokenUsage } from "./cost";
 import { geminiTokenUsage } from "./gemini-pricing";
 
