@@ -51,6 +51,7 @@ const HASH = /^[0-9a-f]{64}$/;
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isStr = (v: unknown): v is string => typeof v === "string";
 const isCount = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+const isPositive = (v: unknown): v is number => isCount(v) && v >= 1;
 
 /** 送った結果（提供元ごと）。契約の LlmSendResult と同じ */
 export type SendResult = LlmSendResult;
@@ -241,29 +242,31 @@ export class BatchPort implements LlmBatchPort {
   #checkTicket(t: LlmBatchTicket): void {
     if (!isObj(t) || t.provider !== this.#driver.provider || !isStr(t.modelId) || !isStr(t.batchId) || !isStr(t.customId) || !CUSTOM_ID.test(t.customId) || t.customId.length <= HASH_CHARS + 1) throw new RangeError("invalid ticket");
     if (!Number.isSafeInteger(t.maxCost) || t.maxCost < 1 || !isCount(t.submittedAt)) throw new RangeError("invalid ticket");
+    const rp = t.reservePrice;
+    if (!isObj(rp) || !isPositive(rp.inputCentsPer10MTok) || !isPositive(rp.outputCentsPer10MTok) || !isPositive(rp.yenPerUsd)) throw new RangeError("the ticket has no reserved price");
   }
 
   /**
-   * 閉じた結果。料金は予約のときと同じ（submittedAt の時点の料金表）。abandoned なら result は expired（timeout）。
+   * 閉じた結果。費用と料金は控えの予約の料金（t.reservePrice。①から写したもの）で出し、今の料金表や口の円で選び直さない。abandoned なら result は expired（timeout）。
    * 送ったバッチは、答えを受け取ったとき以外は費用0にできない。トークン数が0（入力か出力）なら、記録の検査が断るので costUnknown
    */
   #closed(o: BatchOutcome, t: LlmBatchTicket, abandoned: boolean): BatchClosed {
     const finishedAt = this.#clock.now();
-    const p = this.#driver.priceAt(t.modelId, t.submittedAt);
     const end = (result: "expired" | "failed", errorCode: BatchErrorCode) => (abandoned ? { result: "expired" as const, errorCode: "timeout" as const } : { result, errorCode });
     const unknown = (result: "expired" | "failed", errorCode: BatchErrorCode): LlmBatchClosed => ({ status: "closed", ...end(result, errorCode), usage: { inputTokens: 0, outputTokens: 0, cost: t.maxCost }, costUnknown: true, finishedAt });
     if (o.kind === "costUnknown") return unknown(o.result, o.errorCode);
     const u = o.usage;
-    // 料金表からモデルが消えた（送る前の確かめで起きないはず）・トークン数が0：費用は分からないとする
-    if (p === undefined || u.outputTokens < 1 || u.inputTokens + u.cacheCreationInputTokens + u.cacheReadInputTokens < 1) return unknown("failed", "provider_error");
-    const price = { inputCentsPer10MTok: p.inputCentsPer10MTok, outputCentsPer10MTok: p.outputCentsPer10MTok };
+    // トークン数が0：費用は分からないとする
+    if (u.outputTokens < 1 || u.inputTokens + u.cacheCreationInputTokens + u.cacheReadInputTokens < 1) return unknown("failed", "provider_error");
+    const rp = t.reservePrice;
+    const price = { inputCentsPer10MTok: rp.inputCentsPer10MTok, outputCentsPer10MTok: rp.outputCentsPer10MTok };
     const tokens = {
       inputTokens: u.inputTokens,
       outputTokens: u.outputTokens,
       ...(u.cacheCreationInputTokens > 0 ? { cacheCreationInputTokens: u.cacheCreationInputTokens } : {}),
       ...(u.cacheReadInputTokens > 0 ? { cacheReadInputTokens: u.cacheReadInputTokens } : {}),
     };
-    const cost = o.costUnknown ? t.maxCost : llmTokenCost(tokens, { yenPerUsd: this.#yen, ...price });
+    const cost = o.costUnknown ? t.maxCost : llmTokenCost(tokens, { yenPerUsd: rp.yenPerUsd, ...price });
     if (cost === null) return unknown("failed", "provider_error");
     const usage = { ...tokens, cost };
     // 費用を予約で見込めない答え（キャッシュへの書き込みなど）は、トークン数はそのまま、費用は予約した費用（料金は付けない）

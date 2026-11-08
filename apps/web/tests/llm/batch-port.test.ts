@@ -43,7 +43,7 @@ const req = (over: Partial<LlmBatchRequest> = {}): LlmBatchRequest => ({
   maxOutputTokens: 2000,
   ...over,
 });
-const reservation = (over: Partial<LlmBatchReservation> = {}): LlmBatchReservation => ({ batchSeq: 5, agentId: "ai-1", provider: "fake", modelId: "m1", customId: `ai-1-20261110-${H.slice(0, 16)}`, sentBodyHash: H, reservedAt: AT, maxCost: 160, tradingDate: "2026-11-10", submittedAt: AT, ...over });
+const reservation = (over: Partial<LlmBatchReservation> = {}): LlmBatchReservation => ({ batchSeq: 5, agentId: "ai-1", provider: "fake", modelId: "m1", customId: `ai-1-20261110-${H.slice(0, 16)}`, sentBodyHash: H, reservedAt: AT, maxCost: 160, tradingDate: "2026-11-10", submittedAt: AT, reservePrice: { ...PRICE, yenPerUsd: 160 }, ...over });
 const ticket = (over: Partial<LlmBatchTicket> = {}): LlmBatchTicket => ({ ...reservation(), batchId: "b1", ...over });
 
 describe("本文を作る（prepare）", () => {
@@ -200,5 +200,27 @@ describe("受け取りと打ち切り", () => {
     expect(calls.cancel).toBe(0);
     const zero = fakeDriver({ outcome: async () => ({ ...succeeded, usage: { ...usage, outputTokens: 0 } }) });
     expect(await port(zero.driver).abandon(ticket())).toMatchObject({ result: "expired", costUnknown: true, usage: { cost: 160 } });
+  });
+
+  it("費用と料金は控えの予約の料金で出す。今の料金表や口の円が控えと違っても、料金表からモデルが消えても選び直さない", async () => {
+    const rp = { inputCentsPer10MTok: 2000, outputCentsPer10MTok: 8000, yenPerUsd: 150 };
+    const t = ticket({ reservePrice: rp, maxCost: 1000 });
+    const cost = llmTokenCost(usage, rp);
+    expect(cost).toBe(78); // (20,000×2ドル＋1,500×8ドル)/100万 × 150円 ＝ 7.8円
+    const price = { inputCentsPer10MTok: 2000, outputCentsPer10MTok: 8000 };
+    for (const priceAt of [() => PRICE, () => undefined]) {
+      const other = (d: BatchDriver) => new BatchPort(d, { policy: { dailyCostLimit: 1000, dryRun: false }, clock, yenPerUsd: 170 });
+      expect(await other(fakeDriver({ priceAt, outcome: async () => succeeded }).driver).collect(t)).toMatchObject({ result: "collected", usage: { cost }, price });
+      expect(await other(fakeDriver({ priceAt, outcome: async () => succeeded }).driver).abandon(t)).toMatchObject({ result: "expired", usage: { cost }, price });
+    }
+  });
+
+  it("控えに予約の料金がない・1以上の整数でなければ RangeError", async () => {
+    const { driver } = fakeDriver({ outcome: async () => succeeded });
+    for (const reservePrice of [undefined, { ...PRICE, yenPerUsd: 0 }, { ...PRICE, inputCentsPer10MTok: 1.5, yenPerUsd: 160 }]) {
+      const t = { ...ticket(), reservePrice } as unknown as LlmBatchTicket;
+      await expect(port(driver).collect(t)).rejects.toThrow(RangeError);
+      await expect(port(driver).abandon(t)).rejects.toThrow(RangeError);
+    }
   });
 });
