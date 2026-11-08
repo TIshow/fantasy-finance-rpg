@@ -1,8 +1,9 @@
 // LLM の AI 投資家を、毎日の実行の段に入れる（#179）。
 // 依頼（llmSubmit）：前の営業日の引けのあと（16:35 の実行）に、3体の入力を作って各社のバッチに依頼する。
+// 受け取りと判断（llmCollect、llm-collect.ts）：翌朝（06:50・07:20 の実行）に答えを受け取り、投稿と注文票を書く。
 // 流れは契約（src/contracts/llm.ts の LlmBatchPort）のとおり：本文を作る → 上限を確かめる → ①予約を記録 → 送る → ③バッチのIDを記録。
 // 書くのは保管だけ。API キーはここに来ない（各社の口が環境変数から読む）。
-import type { Clock, LlmBatchPort, LlmPolicy, LlmPreparedBatch } from "../contracts";
+import type { Clock, LlmBatchPort, LlmPolicy, LlmPreparedBatch, SheetInput } from "../contracts";
 import { jstDayOf, LLM_DAILY_COST_LIMIT, llmCostUsed } from "../events/llm-cost";
 import type { LogEvent } from "../events/types";
 import { cutoffOf, nextBusinessDay, tradingDateFor } from "../ledger/ledger";
@@ -38,6 +39,10 @@ export interface DayAccess {
   clock: Clock;
   values: ValuesPort;
   append(type: "agent.run" | "llm.batch.submitted" | "llm.batch.sent" | "llm.batch.closed", payload: Payload, refs: number[]): Promise<Appended>;
+  /** 投稿（post.published）を書く。書き手は payload.agentId のAI */
+  post(payload: Payload, refs: number[]): Promise<Appended>;
+  /** 注文票の確定。試運転（policy.dryRun）の間は、この口を持たない（注文を出せない。契約の OrderlessEventStore と同じ考え方） */
+  commitSheet?: (agentId: string, sheet: SheetInput) => Promise<Appended>;
 }
 
 /** 依頼してよい時刻：引けの取り込み（16:30。day.ts の scheduleOf の closeAt）のあと。その日の大引けのあとの決算の発表を入力に入れるため */

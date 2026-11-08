@@ -1,9 +1,9 @@
 // 1日の流れ（#27 PR-1）。取引日 T について、前の日の残り（始値の約定・引け後）→ 判断（締めより前）→ 寄り付きの約定
 // → 引け後の処理と評価、の順に行う。書くのは保管（EventStore）だけ。約定・評価・引け後の中身は、runner が持つ台帳
 // （Ledger.compute*）で作る。どの段も、ログを見て済んでいる分は飛ばし、欠けている分だけを書くので、同じ日をもう一度
-// 回しても二重にならず、途中で落ちても回し直せば続きから進む。外部通信・DB・LLM なし。
+// 回しても二重にならず、途中で落ちても回し直せば続きから進む。外部通信・DB なし。LLM は渡された口（deps.llm）だけを使う。
 // 前提：保管に書くのは、1つの runner だけ（runDay の途中に別の書き手が追記すると、写しと合わずに例外になる）。
-import type { Clock, EventStore, MarketDataPort, PriceObservation } from "../contracts";
+import type { Clock, EventStore, MarketDataPort, PriceObservation, SheetInput } from "../contracts";
 import { EventLog } from "../events/append";
 import { canonicalize } from "../events/canonical";
 import { sha256Hex } from "../events/hash";
@@ -14,7 +14,8 @@ import { cutoffOf, isBusinessDay, nextBusinessDay, previousBusinessDay } from ".
 import type { Account, Deciyen, Order } from "../ledger/types";
 import type { ValuesPort } from "../store/pg-values";
 import { type SplitInput, adjustCloses } from "./adjust";
-import { type DayAccess, type LlmDeps, LocalCopyError, errorText, llmSubmit } from "./llm-stage";
+import { llmCollect } from "./llm-collect";
+import { type Appended, type DayAccess, type LlmDeps, LocalCopyError, errorText, llmSubmit } from "./llm-stage";
 import { discloseDue } from "./world/disclosure";
 
 /** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引き、凍結した写しを渡す */
@@ -92,8 +93,8 @@ export interface RunnerDeps {
    */
   seed?: number;
   /**
-   * LLM の AI 投資家（#179）。渡せば、引けのあとにその次の営業日の分を各社のバッチに依頼する（llmSubmit）。
-   * 渡さなければ LLM を呼ばない
+   * LLM の AI 投資家（#179）。渡せば、引けのあとにその次の営業日の分を各社のバッチに依頼し（llmSubmit）、
+   * 取引日の朝に答えを受け取って投稿と注文票を書く（llmCollect。規則の AI の判断のあと、寄り付きの前）。渡さなければ LLM を呼ばない
    */
   llm?: LlmDeps;
 }
@@ -121,6 +122,7 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
   // 前の日の板寄せをここで補ったなら、その日の引けのあとに来た発表も、判断の前に書く（判断が、締めより前の発表を見るように）
   await disclose();
   out.push(await day.decide(date, prev));
+  if (deps.llm) out.push(await llmStage("llm.collect", () => llmCollect(day.access(!deps.llm!.policy.dryRun), deps.llm!, date)));
   await deps.waitUntil(s.openAt);
   out.push(await day.open(date));
   await deps.waitUntil(s.closeAt);
@@ -203,24 +205,31 @@ class Day {
     return this.deps.store.append({ type, actor, refs, payload }).then((r) => this.sync(r, type));
   }
 
-  /** LLM の段（llm-stage.ts）に渡す口。追記は断られても例外にせず、書けたら写しにも当てる */
-  access(): DayAccess {
-    return Object.freeze({
+  /**
+   * LLM の段（llm-stage.ts）に渡す口。追記は断られても例外にせず、書けたら写しにも当てる。
+   * orders が false（試運転）なら、注文票を確定する口（commitSheet）を持たない凍結したオブジェクトを返す
+   */
+  access(orders = false): DayAccess {
+    // 保管に書けたのに写しに当てられなければ LocalCopyError（写しと保管がずれるので、LLM の段は段ごと止める）
+    const write = async (r: Appended, what: string): Promise<Appended> => {
+      if (!r.ok) return r;
+      try {
+        return { ok: true, event: await this.sync(r, what) };
+      } catch (e) {
+        throw new LocalCopyError(e instanceof Error ? e.message : String(e));
+      }
+    };
+    const base = {
       events: () => this.log.events,
       holidays: () => this.log.holidays(),
       account: (id: string) => this.ledger.account(id),
       clock: this.deps.clock,
       values: this.deps.values,
-      append: async (type: Parameters<DayAccess["append"]>[0], payload: Payload, refs: number[]) => {
-        const r = await this.deps.store.append({ type, actor: "system", refs, payload });
-        if (!r.ok) return r;
-        try {
-          return { ok: true as const, event: await this.sync(r, type) };
-        } catch (e) {
-          throw new LocalCopyError(e instanceof Error ? e.message : String(e));
-        }
-      },
-    });
+      append: async (type: Parameters<DayAccess["append"]>[0], payload: Payload, refs: number[]) => write(await this.deps.store.append({ type, actor: "system", refs, payload }), type),
+      post: async (payload: Payload, refs: number[]) => write(await this.deps.store.append({ type: "post.published", actor: `agent:${String(payload.agentId)}`, refs, payload }), "post.published"),
+    };
+    if (!orders) return Object.freeze(base);
+    return Object.freeze({ ...base, commitSheet: async (id: string, sheet: SheetInput) => write(await this.deps.store.commitSheet(id, sheet), `commitSheet ${id}`) });
   }
 
   /** 時期が来た決算の発表を書き、写しにも当てる（discloseDue が保管に追記した分を、ここで検査して取り込む） */
