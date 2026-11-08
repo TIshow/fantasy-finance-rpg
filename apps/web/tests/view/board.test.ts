@@ -77,8 +77,8 @@ describe("buildBoard（手で組んだ小さなログ）", () => {
     ]);
     // 出典でない記録（投稿・登録）の引用も残す。投稿ならこの掲示板の中でリンクできる
     expect(b.posts.find((p) => p.seq === 8)!.cites).toMatchObject([{ seq: 5, label: "記録（post.published）", postSeq: 5 }, { seq: 1, label: "記録（agent.registered）", postSeq: null }]);
-    expect(b.posts.find((p) => p.seq === 6)!.replyTo).toEqual({ seq: 5, inBoard: true });
-    expect(buildBoard(v, "X2")!.posts[0]!.replyTo).toEqual({ seq: 5, inBoard: false });
+    expect(b.posts.find((p) => p.seq === 6)!.replyTo).toEqual({ seq: 5, inBoard: true, inAll: false });
+    expect(buildBoard(v, "X2")!.posts[0]!.replyTo).toEqual({ seq: 5, inBoard: false, inAll: false });
     // ai-ma5 の売買は X1 の1件だけ（X2 は別の銘柄）。売買（seq 11）は、ai-ma5 の次の投稿（seq 7）より後なので、seq 5 にはつかず、最後の投稿（seq 7）につく
     expect(p5.trades).toEqual([]);
     expect(b.posts.find((p) => p.seq === 7)!.trades).toEqual([{ href: "/agents/ai-ma5#f11-0", text: "11/10 買 100株 @¥10" }]);

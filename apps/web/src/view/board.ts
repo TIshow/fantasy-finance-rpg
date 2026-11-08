@@ -34,8 +34,10 @@ export interface BoardPost {
   /** 返信の字下げ（0〜2） */
   depth: number;
   runSeq: number;
-  /** 返信先の記録の番号（返信でなければ null）。同じ掲示板の投稿なら inBoard（リンクできる） */
-  replyTo: { seq: number; inBoard: boolean } | null;
+  /** 試運転（注文を出さない実行）の判断から出た投稿か */
+  dryRun: boolean;
+  /** 返信先の記録の番号（返信でなければ null）。同じ掲示板の投稿なら inBoard（リンクできる）。「全体」の投稿への返信なら inAll（/board へリンクする） */
+  replyTo: { seq: number; inBoard: boolean; inAll: boolean } | null;
   /** 引用した記録（番号・名前・公開と取得の時刻）。投稿を引用していれば postSeq（掲示板内のリンク用） */
   cites: Cite[];
   /** この投稿のあとの、同じAIのこの銘柄の売買（次の同じAIの投稿まで。最大3件）。リンク先はAIページの取引履歴の行 */
@@ -99,6 +101,7 @@ function boardOf(view: View, symbol: string): Board {
   const posts = view.timeline.filter((t): t is TimelineItem & { kind: "post" } => t.kind === "post" && t.symbol === symbol);
   const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.symbol === symbol && t.qty > 0);
   const bySeq = new Map(posts.map((p) => [p.seq, p]));
+  const allSeqs = new Set(view.timeline.filter((t) => t.kind === "post" && t.symbol === ALL_BOARD).map((t) => t.seq));
   const investorIds = new Set(view.agents.map((a) => a.agentId));
   const providers = new Map(view.models.map((m) => [m.agentId, m.provider] as const));
 
@@ -108,8 +111,8 @@ function boardOf(view: View, symbol: string): Board {
     const nextOwn = posts.find((q) => q.agentId === p.agentId && q.seq > p.seq)?.seq ?? Infinity;
     return {
       seq: p.seq, agentId: p.agentId, linked, name: c.name, color: c.color, look: c.look, atText: formatJstShort(p.at),
-      text: p.text, withdrawn: p.withdrawn ? p.withdrawn.reason || "理由の記載なし" : null, intent: p.intent, stance: p.stance, depth, runSeq: p.runSeq,
-      replyTo: p.replyTo === null ? null : { seq: p.replyTo, inBoard: bySeq.has(p.replyTo) },
+      text: p.text, withdrawn: p.withdrawn ? p.withdrawn.reason || "理由の記載なし" : null, intent: p.intent, stance: p.stance, depth, runSeq: p.runSeq, dryRun: p.dryRun,
+      replyTo: p.replyTo === null ? null : { seq: p.replyTo, inBoard: bySeq.has(p.replyTo), inAll: symbol !== ALL_BOARD && allSeqs.has(p.replyTo) },
       cites: p.citeSeqs.map((s) => cite(s, evidence.get(s), (x) => bySeq.has(x))),
       trades: !linked ? [] : fills.filter((f) => f.agentId === p.agentId && f.sheetSeq > p.seq && f.seq < nextOwn).slice(0, 3).map((f) => ({ href: `/agents/${encodeURIComponent(f.agentId)}#${fillKey(f.seq, f.fillIndex)}`, text: `${formatMonthDay(f.tradingDate)} ${SIDE[f.side]} ${f.qty}株${f.price === null ? "" : ` @${formatYenMark(f.price)}`}` })),
     };

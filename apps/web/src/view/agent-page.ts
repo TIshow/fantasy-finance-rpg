@@ -43,7 +43,7 @@ export interface HistoryRow {
 export interface DecisionItem {
   key: string;
   timeText: string;
-  kind: "post" | "orders" | "rejected" | "failed";
+  kind: "post" | "orders" | "rejected" | "failed" | "dry";
   label: string;
   /** 投稿の本文、注文の要約（"買 TSTA 300株"）、拒否の理由 */
   text: string;
@@ -129,7 +129,8 @@ export const RUN_FAILURE: Record<string, string> = {
   provider_error: "LLMの提供元でエラーが起き、判断が出ませんでした",
   invalid_output: "LLMの出力が記録の形に合わず、判断として使いませんでした",
 };
-export const failureText = (code: string | null) => (code !== null && Object.hasOwn(RUN_FAILURE, code) ? RUN_FAILURE[code]! : `判断が出ませんでした（エラーコード：${code ?? "記載なし"}）`);
+/** 決まったコードだけを説明にする。知らないコード・コードなしは、記録の文字を出さず固定の文にする（提供元の文面やIDが漏れないように） */
+export const failureText = (code: string | null) => (code !== null && Object.hasOwn(RUN_FAILURE, code) ? RUN_FAILURE[code]! : "判断が出ませんでした（理由の分類なし）");
 
 /**
  * runs には、このAIの判断の記録（成功・失敗とも）を渡す。失敗した判断は「判断に失敗」の行として出し、
@@ -149,10 +150,16 @@ export function decisionsOf(mine: View["timeline"], modelOf: (runSeq: number | n
       const text = t.orders.length === 0 ? "注文なし" : t.orders.map((o) => `${SIDE[o.side]} ${o.symbol} ${o.qty}株`).join("、");
       add(t.at, { at: t.at, seq: t.seq, key: `s${t.seq}`, timeText: time, kind: "orders", label: `注文票（約定日 ${formatMonthDay(t.tradingDate)}）`, text, note: null, symbol: null, tags: [], runSeq: t.runSeq, model: modelOf(t.runSeq), dryRun: dry(t.runSeq) });
     } else if (t.kind === "rejected") {
-      add(t.at, { at: t.at, seq: t.seq, key: `r${t.seq}`, timeText: time, kind: "rejected", label: "注文票を拒否", text: REASON[t.reason] ?? t.reason, note: null, symbol: null, tags: [], runSeq: t.runSeq, model: modelOf(t.runSeq), dryRun: dry(t.runSeq) });
+      add(t.at, { at: t.at, seq: t.seq, key: `r${t.seq}`, timeText: time, kind: "rejected", label: "注文票を拒否", text: dry(t.runSeq) && t.reason === "invalid_sheet" ? "試運転の判断のため、注文にしませんでした" : (REASON[t.reason] ?? t.reason), note: null, symbol: null, tags: [], runSeq: t.runSeq, model: modelOf(t.runSeq), dryRun: dry(t.runSeq) });
     }
   }
+  const sheetRuns = new Set(mine.flatMap((t) => ((t.kind === "order_sheet" || t.kind === "rejected") && t.runSeq !== null ? [t.runSeq] : [])));
   for (const r of runs) {
+    // 成功した試運転の注文の判断は注文票にならない。その日の判断が消えないよう、行を出す（注文の中身は記録の外にあるので出さない）
+    if (r.ok && r.dryRun && r.purpose === "order" && !sheetRuns.has(r.seq)) {
+      add(r.at, { at: r.at, seq: r.seq, key: `d${r.seq}`, timeText: formatJstShort(r.at).slice(-5), kind: "dry", label: "試運転", text: "試運転：注文は出していません", note: null, symbol: null, tags: [], runSeq: r.seq, model: labelModel(r.provider, r.modelId), dryRun: true });
+      continue;
+    }
     if (r.ok) continue;
     add(r.at, { at: r.at, seq: r.seq, key: `x${r.seq}`, timeText: formatJstShort(r.at).slice(-5), kind: "failed", label: "判断に失敗", text: failureText(r.errorCode), note: null, symbol: null, tags: [], runSeq: r.seq, model: labelModel(r.provider, r.modelId), dryRun: r.dryRun });
   }

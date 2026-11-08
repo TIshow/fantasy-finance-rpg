@@ -21,6 +21,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
   const models = new Map<string, AgentModel>();
   const variants = new Map<string, Set<string>>();
   const runs: RunModel[] = [];
+  const dryRuns = new Map<number, string>(); // 試運転の判断の記録の番号 → AIのID
   let universe: string[] = []; // 取引対象の記号（universe.set の最後のもの）
   const evidence: Evidence[] = [];
   const last = new Map<string, Deciyen>();
@@ -57,7 +58,8 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
         // 形が違う記録は読み飛ばす（画面を止めない）
         if (typeof p.agentId === "string" && typeof p.model?.provider === "string" && typeof p.model?.modelId === "string") {
           // 判断ごとのモデルを引くため、成功・失敗を問わず全件を残す
-          runs.push({ seq: e.seq, agentId: p.agentId, provider: p.model.provider, modelId: p.model.modelId, at: e.recordedAt, ok: p.ok !== false, errorCode: typeof p.errorCode === "string" ? p.errorCode : null, dryRun: p.dryRun === true });
+          runs.push({ seq: e.seq, agentId: p.agentId, provider: p.model.provider, modelId: p.model.modelId, at: e.recordedAt, ok: p.ok !== false, errorCode: typeof p.errorCode === "string" ? p.errorCode : null, dryRun: p.dryRun === true, purpose: typeof p.purpose === "string" ? p.purpose : null });
+          if (p.dryRun === true) dryRuns.set(e.seq, p.agentId);
           // 「最後のモデル」は、成功した判断（ok が false でないもの）だけで決める。失敗した判断は、投稿も注文票も出していないため
           if (p.ok !== false) {
             const variant = `${p.model.provider}\u0000${p.model.modelId}`;
@@ -70,7 +72,7 @@ export function buildView(events: readonly LogEvent[], body: (hash: string) => u
       case "post.published":
         {
           const w = withdrawn.get(e.seq) ?? null;
-          timeline.push({ ...base(p.agentId), kind: "post", symbol: p.board, text: w ? null : readText(body(p.bodyHash)), intent: w ? null : intentOf(p.intent), stance: w ? null : stanceOf(p.stance), withdrawn: w, citeSeqs: p.citeSeqs ?? [], replyTo: p.replyTo ?? null, runSeq: p.runSeq });
+          timeline.push({ ...base(p.agentId), kind: "post", symbol: p.board, text: w ? null : readText(body(p.bodyHash)), intent: w ? null : intentOf(p.intent), stance: w ? null : stanceOf(p.stance), withdrawn: w, citeSeqs: p.citeSeqs ?? [], replyTo: p.replyTo ?? null, runSeq: p.runSeq, dryRun: dryRuns.get(p.runSeq) === p.agentId });
         }
         break;
       case "order_sheet.committed":

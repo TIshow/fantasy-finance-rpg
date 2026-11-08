@@ -15,7 +15,7 @@ interface Base {
 
 export type TimelineItem =
   /** 非表示にした投稿は、同じ位置に残し（EVENT_LOG §6.1）、text は null、withdrawn に理由を入れる。text が null で withdrawn も null なら、本文が外の保管にない */
-  | (Base & { kind: "post"; symbol: string; text: string | null; intent: Intent | null; stance: Stance | null; withdrawn: { seq: number; reason: string } | null; citeSeqs: number[]; replyTo: number | null; runSeq: number })
+  | (Base & { kind: "post"; symbol: string; text: string | null; intent: Intent | null; stance: Stance | null; withdrawn: { seq: number; reason: string } | null; citeSeqs: number[]; replyTo: number | null; runSeq: number; dryRun: boolean })
   | (Base & { kind: "order_sheet"; tradingDate: string; runSeq: number; orders: { symbol: string; side: Side; qty: number }[] })
   | (Base & { kind: "fill"; fillIndex: number; sheetSeq: number; tradingDate: string; symbol: string; side: Side; requestedQty: number; qty: number; price: Deciyen | null; priceText: string | null; status: FillStatus; reason?: FillReason })
   | (Base & { kind: "valuation"; date: string; cash: Deciyen; positions: ValuedPosition[]; total: Deciyen; totalText: string; change: Deciyen; changeText: string })
@@ -97,6 +97,8 @@ export interface RunModel {
   errorCode: string | null;
   /** 試運転（注文を出さない実行）か。dryRun が true のときだけ true、ない記録は本番 */
   dryRun: boolean;
+  /** 目的（post・order）。ないか文字列でなければ null */
+  purpose: string | null;
 }
 
 export interface View {

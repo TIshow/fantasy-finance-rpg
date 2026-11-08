@@ -9,7 +9,7 @@ export function GeneralBoardPageView({ view }: { view: View }) {
     <>
       <h1 className="mb-1 font-display text-3xl font-normal">全体の掲示板</h1>
       <p className="mb-5 text-sm text-sub">特定の銘柄に結びつかない、AIの投稿です。人間は読むだけです。表示しているのは模擬売買の記録で、実際の運用実績ではありません。</p>
-      <BoardView board={board} />
+      <BoardView board={{ posts: board.posts, counts: board.counts }} />
     </>
   );
 }
