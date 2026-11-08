@@ -8,6 +8,7 @@ import { llmTokenCost } from "../../src/events/llm-cost";
 import { OpenAIBatchClient, openaiBatchFileBody, toOpenAIParams } from "../../src/llm/openai-batch";
 import { openaiBatchPort, openaiReservePrice } from "../../src/llm/openai-port";
 import { BATCH_SEND_TIMEOUT_MS } from "../../src/llm/batch-port";
+import { batchReservationOf } from "../../src/llm/batch-plan";
 import { hangingFetch, settledAt } from "./send-timeout";
 
 const recorded = (name: string) => readFileSync(new URL(`./recorded/${name}`, import.meta.url), "utf8");
@@ -77,13 +78,17 @@ describe("OpenAI のバッチの口", () => {
     expect(JSON.parse(seen[1]!.body as string)).toMatchObject({ input_file_id: FILE, metadata: { custom_id: customId } });
   });
 
-  it("temperature・決まりと違う出力の上限・短い文脈と違う料金・6,666バイトを超える本文は、本文を作る前に断る", async () => {
+  it("temperature・決まりと違う出力の上限・短い文脈と違う料金・入力を3倍で数えない予約・20,000バイトを超える本文は、本文を作る前に断る", async () => {
     const { f } = fakeFetch(() => new Response("{}"));
     await expect(make(f).prepare(req({ model: { provider: "openai", modelId: "gpt-6.1-sol", settings: { max_tokens: "16000", temperature: "1" } } }))).rejects.toThrow(RangeError);
     await expect(make(f).prepare(req({ reservePrice: { inputCentsPer10MTok: 2000, outputCentsPer10MTok: 7500, yenPerUsd: 160 } }))).rejects.toThrow(RangeError);
     await expect(make(f).prepare(req({ model: { provider: "openai", modelId: "gpt-6.1-sol", settings: { max_tokens: "4000" } } }))).rejects.toThrow(RangeError);
-    // 入力の上限 20,000 ÷ 倍率3。日本語1文字は3バイトなので、2,200文字で超える
-    await expect(make(f).prepare(req({ messages: [{ role: "user", content: "あ".repeat(2200) }] }))).rejects.toThrow(/byte length/);
+    // 予約は 20,000×3×1ドル＋16,000×5ドル ＝ 0.14ドル ＝ 22.4円（224）。入力を1倍で数えた 160 では足りない
+    await expect(make(f).prepare(req({ maxCost: 223 }))).rejects.toThrow(/maxCost/);
+    expect(await make(f).prepare(req({ maxCost: 224 }))).toMatchObject({ bodyMaxOutputTokens: 16_000 });
+    // 本文の上限は3社と同じ 20,000 バイト。日本語1文字は3バイトなので、6,600文字は送れて、6,700文字で超える
+    expect(new TextEncoder().encode((await make(f).prepare(req({ messages: [{ role: "user", content: "あ".repeat(6600) }] }))).body).length).toBeGreaterThan(19_800);
+    await expect(make(f).prepare(req({ messages: [{ role: "user", content: "あ".repeat(6700) }] }))).rejects.toThrow(/byte length/);
   });
 
   it("上げの失敗・作成の 400 は作られていない（notCreated）。作成の 503・通信断・名前の違う応答は分からない（billingUnknown）", async () => {
@@ -178,12 +183,19 @@ describe("OpenAI のバッチの口", () => {
       expect(await make(done("run-b").f).collect(ticketFor())).toMatchObject({ result: "collected", truncated: true, usage: { inputTokens: 20_000, outputTokens: 4500, cacheCreationInputTokens: 8192 } });
     });
 
-    it("キャッシュの書き込みが入力のほぼすべてで、出力が上限ちょうどでも、費用は maxCost を超えない（本文は 20,000÷3 バイトまで）", async () => {
-      const bytes = new TextEncoder().encode(openaiBatchFileBody([{ customId: IID, params: toOpenAIParams(req().model, req().messages) }])).length;
-      const maxCost = llmTokenCost({ inputTokens: 20_000, outputTokens: 16_000 }, { ...PRICE, yenPerUsd: 160 })!;
-      // 記録済みの run-b の行の使用量を、入力が 20,000÷3 トークンで、1つを除いてキャッシュへの書き込みにしたもの
-      const n = Math.floor(20_000 / 3);
-      expect(bytes).toBeLessThanOrEqual(n);
+    it("入力が上限の 20,000 トークンで、1つを除いてキャッシュへの書き込みで、出力が上限ちょうどでも、記録の費用（3倍）も実際の請求（最大2.5倍）も予約を超えない", async () => {
+      const { maxCost, maxBodyBytes } = batchReservationOf({ provider: "openai", modelId: "gpt-6.1-sol" }, AT);
+      expect(maxCost).toBe(224);
+      expect(maxBodyBytes).toBe(20_000);
+      const bytes = new TextEncoder().encode(openaiBatchFileBody([{ customId: IID, params: toOpenAIParams(req().model, [{ role: "user", content: "あ".repeat(6600) }]) }])).length;
+      expect(bytes).toBeLessThanOrEqual(maxBodyBytes);
+      // 記録済みの run-b の行の使用量を、入力が 20,000 トークンで、1つを除いてキャッシュへの書き込みにしたもの
+      const n = 20_000;
+      // 実際の請求の最大：書き込みは入力の2.5倍。(1×1ドル＋19,999×2.5ドル＋16,000×5ドル)/100万 × 160円 ＝ 20.80円
+      const billedYen = ((1 * 1 + (n - 1) * 2.5 + 16_000 * 5) / 1_000_000) * 160;
+      expect(billedYen * 10).toBeLessThanOrEqual(maxCost);
+      // 入力を1倍で数えた予約（16円）では足りない
+      expect(llmTokenCost({ inputTokens: n, outputTokens: 16_000 }, { ...PRICE, yenPerUsd: 160 })!).toBeLessThan(billedYen * 10);
       const line = JSON.parse(recorded("openai-batch-output.jsonl").split("\n").find((l) => l.includes('"run-b"'))!);
       line.custom_id = IID;
       line.response.body.usage = { input_tokens: n, input_tokens_details: { cached_tokens: 0, cache_write_tokens: n - 1 }, output_tokens: 16_000, output_tokens_details: { reasoning_tokens: 16_000 }, total_tokens: n + 16_000 };
@@ -191,6 +203,7 @@ describe("OpenAI のバッチの口", () => {
       const c = await make(f).collect({ ...ticketFor(), maxCost });
       expect(c).toMatchObject({ result: "collected", usage: { inputTokens: n, outputTokens: 16_000, cacheCreationInputTokens: n - 1 } });
       if (c.status !== "closed") throw new Error("pending");
+      expect(c.usage.cost).toBeGreaterThanOrEqual(billedYen * 10); // 記録の費用は実際の請求以上（多めに数える）
       expect(c.usage.cost).toBeLessThanOrEqual(maxCost);
     });
 

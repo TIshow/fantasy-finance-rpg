@@ -15,8 +15,17 @@ export const YEN_PER_USD = 160;
 /** 使うモデル（#179） */
 export const LLM_BATCH_MODEL_IDS = Object.freeze({ anthropic: "claude-sonnet-5-5", openai: "gpt-6.1-sol", google: "gemini-3.8-flash" });
 
-/** 1回の入力の上限（トークン。#179 の lead の決定2）。1トークンは1バイト以上なので、本文がこのバイト数÷inputCostFactor 以下なら必ず収まる */
+/** 1回の入力の上限（トークン。#179 の lead の決定2）。1トークンは1バイト以上なので、本文がこのバイト数以下なら必ず収まる（3社とも同じ） */
 export const BATCH_MAX_INPUT_TOKENS = 20_000;
+
+/**
+ * 予約の下限：入力の上限 × inputCostFactor × 入力の単価 ＋ 出力の上限 × 出力の単価（0.1円単位、切り上げ）。
+ * inputCostFactor は、記録の費用の式が入力の1トークンを数えうる倍率の最大（OpenAI のキャッシュへの書き込みは3倍）。
+ * これで、どの答えの費用（llmTokenCost）も maxCost を超えない。収まらなければ null
+ */
+export function batchReserveCost(maxInputTokens: number, maxOutputTokens: number, inputCostFactor: number, price: LlmBatchPrice & { yenPerUsd: number }): number | null {
+  return llmTokenCost({ inputTokens: maxInputTokens * inputCostFactor, outputTokens: maxOutputTokens }, price);
+}
 
 /** submittedAt と、この口の時計の今とのずれの許し（5分）。外れたら RangeError */
 export const SUBMITTED_AT_SKEW_MS = 300_000;
@@ -78,7 +87,7 @@ export interface BatchDriver {
   readonly settingKeys: readonly string[];
   /** 送る出力の上限（考える分も含む。#179 の lead の決定2）。settings.max_tokens はこれと同じ、maxOutputTokens はこれ以上 */
   readonly maxOutputTokens: number;
-  /** 費用の式が入力の1トークンに掛ける倍率の最大（キャッシュへの書き込みを入力の欄と書き込みの欄の両方に入れるなら3）。既定は1 */
+  /** 費用の式が入力の1トークンに掛ける倍率の最大（キャッシュへの書き込みを入力の欄と書き込みの欄の両方に入れるなら3）。既定は1。予約の下限に掛ける（batchReserveCost） */
   readonly inputCostFactor?: number;
   /** submittedAt の時点の料金（1,000万トークンあたりのセント）。料金表にないモデルは undefined */
   priceAt(modelId: string, submittedAt: number): LlmBatchPrice | undefined;
@@ -112,7 +121,8 @@ export type BatchClosed = LlmBatchClosed & { truncated?: true };
  * 契約 LlmBatchPort の実装。決まりは契約のとおり。ほかに：
  * - reservePrice は、提供元の料金表の submittedAt の時点の料金と、この口の1ドルあたりの円に、ちょうど一致すること
  * - settings.max_tokens は driver.maxOutputTokens と同じで、maxOutputTokens はそれ以上。maxInputTokens は BATCH_MAX_INPUT_TOKENS 以下で、
- *   送る本文の UTF-8 のバイト数×driver.inputCostFactor 以上（トークン数はバイト数を超えないので、予約が上限として働く）。外れたら RangeError
+ *   送る本文の UTF-8 のバイト数以上（トークン数はバイト数を超えない）。maxCost は batchReserveCost（入力に driver.inputCostFactor を掛ける）以上で、
+ *   予約が実際の費用の上限として働く。外れたら RangeError
  * - send は、渡された本文のハッシュと customId が prepare の結果と合わなければ RangeError（送らない）
  * - 受け取り・打ち切りで読めなかったときは pending（打ち切りでは、課金が分からないとして maxCost）
  */
@@ -143,7 +153,7 @@ export class BatchPort implements LlmBatchPort {
     const itemId = batchItemIdOf(r.agentId, r.tradingDate);
     const body = this.#driver.body(r, itemId);
     const bytes = new TextEncoder().encode(body);
-    if (r.maxInputTokens < bytes.length * (this.#driver.inputCostFactor ?? 1)) throw new RangeError("maxInputTokens must be at least the byte length of the body sent times inputCostFactor");
+    if (r.maxInputTokens < bytes.length) throw new RangeError("maxInputTokens must be at least the byte length of the body sent");
     const sentBodyHash = await sha256Hex(bytes);
     return Object.freeze({ request: r, customId: batchCustomIdOf(itemId, sentBodyHash), bodyMaxOutputTokens: this.#driver.maxOutputTokens, body, sentBodyHash });
   }
@@ -155,7 +165,7 @@ export class BatchPort implements LlmBatchPort {
     const r = p.request;
     const itemId = batchItemIdOf(r.agentId, r.tradingDate);
     const bytes = new TextEncoder().encode(p.body);
-    if (this.#driver.body(r, itemId) !== p.body || r.maxInputTokens < bytes.length * (this.#driver.inputCostFactor ?? 1) || p.bodyMaxOutputTokens !== this.#driver.maxOutputTokens) throw new RangeError("the prepared body does not match the request");
+    if (this.#driver.body(r, itemId) !== p.body || r.maxInputTokens < bytes.length || p.bodyMaxOutputTokens !== this.#driver.maxOutputTokens) throw new RangeError("the prepared body does not match the request");
     const hash = await sha256Hex(bytes);
     if (p.sentBodyHash !== hash || p.customId !== batchCustomIdOf(itemId, hash)) throw new RangeError("the prepared body does not match its hash or customId");
     // 同じ予約（①）で2回送らない（この口の中で覚える）
@@ -235,8 +245,8 @@ export class BatchPort implements LlmBatchPort {
     if (!isCount(r.maxInputTokens) || !isCount(r.maxOutputTokens)) throw new RangeError("maxInputTokens and maxOutputTokens must be non-negative safe integers");
     const cap = this.#driver.maxOutputTokens;
     if (m.settings.max_tokens !== String(cap) || r.maxOutputTokens < cap || r.maxInputTokens > BATCH_MAX_INPUT_TOKENS) throw new RangeError(`settings.max_tokens must be ${cap}, maxOutputTokens at least that, and maxInputTokens at most ${BATCH_MAX_INPUT_TOKENS}`);
-    const bound = llmTokenCost({ inputTokens: r.maxInputTokens, outputTokens: r.maxOutputTokens }, rp);
-    if (bound === null || r.maxCost < bound) throw new RangeError("maxCost must be at least the cost of maxInputTokens and maxOutputTokens");
+    const bound = batchReserveCost(r.maxInputTokens, r.maxOutputTokens, this.#driver.inputCostFactor ?? 1, rp);
+    if (bound === null || r.maxCost < bound) throw new RangeError("maxCost must be at least the cost of maxInputTokens (times inputCostFactor) and maxOutputTokens");
   }
 
   #checkTicket(t: LlmBatchTicket): void {

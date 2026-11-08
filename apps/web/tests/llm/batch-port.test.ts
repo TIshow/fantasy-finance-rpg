@@ -80,7 +80,8 @@ describe("本文を作る（prepare）", () => {
     ["max_tokens が提供元の出力の上限と違う", { model: { provider: "fake", modelId: "m1", settings: { max_tokens: "1999" } } }],
     ["maxInputTokens が入力の上限（20,000）を超える", { maxInputTokens: 20_001, maxCost: 1000 }],
     ["maxInputTokens が送る本文のバイト数より小さい", { maxInputTokens: 10 }],
-    ["maxInputTokens が送る本文のバイト数×inputCostFactor より小さい", { maxInputTokens: 100, maxCost: 1000 }],
+    // 20,000×3×1ドル＋2,000×5ドル ＝ 0.07ドル ＝ 11.2円（112）。倍率1なら 48 で足りる
+    ["maxCost が入力×inputCostFactor の費用より小さい", { maxCost: 111 }],
     ["agentId に名前に使えない文字がある", { agentId: "ai 1" }],
     ["取引日の形が違う", { tradingDate: "2026/11/10" }],
     ["submittedAt が今から5分より前", { submittedAt: AT - 300_000 }],
@@ -89,6 +90,15 @@ describe("本文を作る（prepare）", () => {
   ])("断る（RangeError）：%s", async (_name, over) => {
     const { driver } = fakeDriver({ inputCostFactor: 3 });
     await expect(port(driver).prepare(req(over))).rejects.toThrow(RangeError);
+  });
+
+  it("inputCostFactor は予約の下限に掛け、本文のバイト数の上限には掛けない（倍率3でも maxInputTokens バイトまで送れる）", async () => {
+    const { driver } = fakeDriver({ inputCostFactor: 3 });
+    const content = "あ".repeat(6600); // 19,800バイト（倍率で割った 6,666 バイトを超える）
+    const p = await port(driver).prepare(req({ maxCost: 112, messages: [{ role: "user", content }] }));
+    expect(new TextEncoder().encode(p.body).length).toBeGreaterThan(19_800);
+    expect(new TextEncoder().encode(p.body).length).toBeLessThanOrEqual(20_000);
+    await expect(port(driver).prepare(req({ maxCost: 112, messages: [{ role: "user", content: "あ".repeat(6700) }] }))).rejects.toThrow(/byte length/);
   });
 
   it("policy・送る時間の上限が外れていれば作れない", () => {

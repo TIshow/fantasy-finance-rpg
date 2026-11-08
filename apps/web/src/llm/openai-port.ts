@@ -15,8 +15,8 @@ const LOOKUP_MAX_PAGES = 20;
 export const OPENAI_MAX_OUTPUT_TOKENS = 16_000;
 /**
  * 入力の1トークンに掛かる倍率の最大。キャッシュへの書き込み（請求は最大で入力の2.5倍）を、入力の欄（1倍）と書き込みの欄（2倍）の
- * 両方に入れて3倍で数える（openai-batch.ts の toTokenUsage）。予約の式（入力の上限×入力の単価）を変えずに上限として働かせるため、
- * 送る本文は BATCH_MAX_INPUT_TOKENS ÷ 3（6,666バイト）までにする
+ * 両方に入れて3倍で数える（openai-batch.ts の toTokenUsage）。予約は入力をこの倍率で数える（入力の上限×3×入力の単価＋出力の上限×出力の単価。
+ * #179 の lead の答え）。送る本文の上限は、ほかの2社と同じ BATCH_MAX_INPUT_TOKENS バイト
  */
 export const OPENAI_INPUT_COST_FACTOR = 3;
 
