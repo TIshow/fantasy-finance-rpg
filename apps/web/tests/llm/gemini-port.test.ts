@@ -64,7 +64,7 @@ const req = (over: Partial<LlmBatchRequest> = {}): LlmBatchRequest => ({
   maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
   ...over,
 });
-const ticket = (over: Partial<LlmBatchTicket> = {}): LlmBatchTicket => ({ batchSeq: 3, agentId: "gemini-ai", provider: "google", modelId: "gemini-3.8-flash", customId: `${CID}-${"c".repeat(16)}`, sentBodyHash: "c".repeat(64), reservedAt: AT, maxCost: 100, tradingDate: "2026-11-10", submittedAt: AT, batchId: ID, ...over });
+const ticket = (over: Partial<LlmBatchTicket> = {}): LlmBatchTicket => ({ batchSeq: 3, agentId: "gemini-ai", provider: "google", modelId: "gemini-3.8-flash", customId: `${CID}-${"c".repeat(16)}`, sentBodyHash: "c".repeat(64), reservedAt: AT, maxCost: 100, tradingDate: "2026-11-10", submittedAt: AT, reservePrice: { ...PRICE, yenPerUsd: 160 }, batchId: ID, ...over });
 
 describe("Gemini のバッチの口", () => {
   it("予約の料金は submittedAt で選ぶ（値上げの48時間前からは高いほう）", () => {
@@ -139,10 +139,22 @@ describe("Gemini のバッチの口", () => {
       expect(r.usage.cost).toBeLessThanOrEqual(36);
     });
 
-    it("値上げをまたいだバッチも、予約の料金（submittedAt で選んだ料金）で閉じる", async () => {
+    it("値上げをまたいだバッチも、控えの予約の料金（submittedAt で選んだ料金）で閉じる", async () => {
       const at = GEMINI_PRICE_SWITCH_AT - 50 * 3_600_000;
-      const r = await make(fakeFetch(() => new Response(finished("run-a"))).f).collect(ticket({ submittedAt: at }));
-      expect(r).toMatchObject({ result: "collected", price: geminiReservePrice("gemini-3.8-flash", at) });
+      const price = geminiReservePrice("gemini-3.8-flash", at)!;
+      const r = await make(fakeFetch(() => new Response(finished("run-a"))).f, GEMINI_PRICE_SWITCH_AT + 1000).collect(ticket({ submittedAt: at, reservePrice: { ...price, yenPerUsd: 160 } }));
+      expect(r).toMatchObject({ result: "collected", price });
+    });
+
+    it("控えの料金が、今の料金表（値上げのあと）や口の円と違っても、控えの料金どおりに閉じる。打ち切りも同じ", async () => {
+      const rp = { ...PRICE, yenPerUsd: 150 }; // 値上げの前の安い料金
+      const t = ticket({ submittedAt: GEMINI_PRICE_SWITCH_AT + 1000, reservePrice: rp });
+      expect(geminiReservePrice("gemini-3.8-flash", t.submittedAt)).not.toEqual(PRICE);
+      const cost = llmTokenCost({ inputTokens: 20_000, outputTokens: 4500 }, rp);
+      expect(cost).toBe(24); // (20,000×0.375ドル＋4,500×1.875ドル)/100万 × 150円 ＝ 2.390625円
+      const other = (f: typeof fetch) => geminiBatchPort({ policy: { dailyCostLimit: 1000, dryRun: false }, clock: { now: () => t.submittedAt + 5000 }, yenPerUsd: 170, client: new GeminiBatchClient({ apiKey: KEY, fetch: f }) });
+      expect(await other(fakeFetch(() => new Response(finished("run-a"))).f).collect(t)).toMatchObject({ result: "collected", usage: { cost }, price: PRICE });
+      expect(await other(fakeFetch(() => new Response(finished("run-a"))).f).abandon(t)).toMatchObject({ result: "expired", usage: { cost }, price: PRICE });
     });
 
     it("失敗した1件・バッチの失敗・期限切れで結果がないものは、課金が分からない（maxCost）。エラー文は返さない", async () => {
