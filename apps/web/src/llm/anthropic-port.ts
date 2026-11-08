@@ -9,6 +9,8 @@ import { anthropicBatchPrice } from "./cost";
 export const ANTHROPIC_PROVIDER = "anthropic";
 /** 記録にないバッチを探すときに読む一覧のページ数の上限（1ページ100件）。超えたら決められない（unknown） */
 const LOOKUP_MAX_PAGES = 20;
+/** 送る出力の上限（#179 の lead の決定2：投稿400字と注文10件なら十分） */
+export const ANTHROPIC_MAX_OUTPUT_TOKENS = 4000;
 
 /** 予約の料金。料金表（cost.ts。100万トークンあたりのセント）を1,000万トークンあたりに直す。時刻では変わらない */
 export function anthropicReservePrice(modelId: string): LlmBatchPrice | undefined {
@@ -22,6 +24,7 @@ export function anthropicBatchDriver(client: Client): BatchDriver {
   return {
     provider: ANTHROPIC_PROVIDER,
     settingKeys: ["max_tokens"],
+    maxOutputTokens: ANTHROPIC_MAX_OUTPUT_TOKENS,
     priceAt: (modelId) => anthropicReservePrice(modelId),
     prepare(r, customId) {
       const items = [{ customId, params: toAnthropicParams(r.model, r.messages) }];
@@ -42,7 +45,7 @@ export function anthropicBatchDriver(client: Client): BatchDriver {
       const it = reconcileResults([t.customId], res.value).matched.get(t.customId);
       // 結果がない・形が合わない・重なった：課金されたか分からない
       if (it === undefined) return { kind: "costUnknown", result: "failed", errorCode: "provider_error" };
-      if (it.type === "succeeded") return { kind: "succeeded", output: it.output, respondedModel: it.respondedModel, usage: it.usage };
+      if (it.type === "succeeded") return { kind: "succeeded", output: it.output, respondedModel: it.respondedModel, usage: it.usage, truncated: it.stopReason === "max_tokens" };
       // errored・canceled・expired は課金されない（https://platform.claude.com/docs/en/build-with-claude/batch-processing 。2026-11-07 確認）
       if (it.type === "expired") return { kind: "notBilled", result: "expired", errorCode: "timeout" };
       const limited = it.type === "errored" && (it.errorType === "rate_limit_error" || it.errorType === "overloaded_error");
