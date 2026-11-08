@@ -81,7 +81,7 @@ describe("OpenAI のバッチの口", () => {
       ok: true,
       value: {
         id: BATCH, status: "validating", endpoint: "/v1/responses", inputFileId: FILE, outputFileId: null, errorFileId: null,
-        counts: { total: 0, completed: 0, failed: 0 }, createdAt: 1762673724_000, expiresAt: 1762760124_000, endedAt: null, validationErrors: 0,
+        counts: { total: 0, completed: 0, failed: 0 }, createdAt: 1762673724_000, expiresAt: 1762760124_000, endedAt: null, validationErrors: 0, customId: null,
       },
     });
     expect(`${seen[0]!.init.method} ${seen[0]!.url}`).toBe("POST https://api.openai.com/v1/batches");

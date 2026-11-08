@@ -165,6 +165,8 @@ export interface BatchStatus {
   /** 終わった時刻（completed・failed・expired・cancelled のどれか） */
   endedAt: number | null;
   validationErrors: number;
+  /** 作成で付けた名前（metadata の custom_id）。なければ null */
+  customId: string | null;
 }
 export type BatchCreateResult = OpenAIBatchCall<BatchStatus> & { billingUnknown?: true };
 
@@ -310,6 +312,7 @@ function parseStatus(json: unknown): BatchStatus {
     expiresAt: optTime(j.expires_at),
     endedAt: ends.length === 0 ? null : Math.max(...ends),
     validationErrors: isObj(errors) && Array.isArray(errors.data) ? errors.data.length : 0,
+    customId: isObj(j.metadata) && isStr(j.metadata.custom_id) ? j.metadata.custom_id : null,
   };
 }
 
@@ -550,7 +553,12 @@ export class OpenAIBatchClient {
    * 送った本文とそのハッシュを、結果と一緒に返す。ファイルの上げは課金されないので、billingUnknown は付けない。
    */
   async upload(items: readonly BatchRequestItem[]): Promise<UploadResult> {
-    const body = openaiBatchFileBody(items);
+    return this.uploadBody(openaiBatchFileBody(items));
+  }
+
+  /** openaiBatchFileBody で作った中身を、加工せずにファイルとして上げる（契約：記録のハッシュと送った本文を一致させる） */
+  async uploadBody(body: string): Promise<UploadResult> {
+    if (typeof body !== "string" || body === "") throw new RangeError("body must be a non-empty string");
     const bytes = new TextEncoder().encode(body);
     const sent: SentBody = { body, sha256: await sha256Hex(bytes) };
     const form = new FormData();
@@ -567,12 +575,14 @@ export class OpenAIBatchClient {
    * 応答の inputFileId と endpoint が送ったものと違えば、形が合わない（malformed）として billingUnknown を付ける
    * （何かが作られたが、頼んだものか分からない）。
    */
-  async create(inputFileId: string): Promise<BatchCreateResult> {
+  async create(inputFileId: string, customId?: string): Promise<BatchCreateResult> {
     checkId(inputFileId);
-    const body = JSON.stringify({ input_file_id: inputFileId, endpoint: OPENAI_BATCH_ENDPOINT, completion_window: OPENAI_COMPLETION_WINDOW });
+    if (customId !== undefined && !CUSTOM_ID.test(customId)) throw new RangeError("customId must match ^[A-Za-z0-9_-]{1,64}$");
+    const metadata = customId === undefined ? {} : { metadata: { custom_id: customId } };
+    const body = JSON.stringify({ input_file_id: inputFileId, endpoint: OPENAI_BATCH_ENDPOINT, completion_window: OPENAI_COMPLETION_WINDOW, ...metadata });
     const r = await this.#json("POST", "/v1/batches", body, (json) => {
       const s = parseStatus(json);
-      return need(s.inputFileId === inputFileId && s.endpoint === OPENAI_BATCH_ENDPOINT, s);
+      return need(s.inputFileId === inputFileId && s.endpoint === OPENAI_BATCH_ENDPOINT && s.customId === (customId ?? null), s);
     });
     if (!r.ok && uncertainOnCreate(r)) return { ...r, billingUnknown: true };
     return r;
@@ -618,6 +628,12 @@ export class OpenAIBatchClient {
       });
       return out;
     }, this.#resultsTimeoutMs);
+  }
+
+  /** ファイルの中身をそのまま返す（find が、上げた本文のハッシュを確かめるのに使う） */
+  async fileContent(fileId: string): Promise<OpenAIBatchCall<string>> {
+    checkId(fileId);
+    return this.#call("GET", `/v1/files/${fileId}/content`, undefined, (text) => text, this.#resultsTimeoutMs);
   }
 
   #json<T>(method: string, path: string, body: string | undefined, parse: (json: unknown) => T): Promise<OpenAIBatchCall<T>> {

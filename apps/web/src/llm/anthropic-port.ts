@@ -1,14 +1,12 @@
 // Anthropic の Message Batches API で、バッチの口（契約 LlmBatchPort）を作る（#179）。
 // 送る形：system は先頭の1件だけ Messages API の system に移し、settings は max_tokens だけ（temperature は送らない）。
-// 形への直し方は toAnthropicParams、本文は anthropicBatchBody で決まり、送った本文のハッシュを返す。
+// 形への直し方は toAnthropicParams、本文は anthropicBatchBody で決まる。本文の中の1件のID（custom_id）は batchItemIdOf の前半。
 import type { LlmBatchPrice } from "../contracts";
 import { AnthropicBatchClient, anthropicApiKeyFromEnv, anthropicBatchBody, reconcileResults, toAnthropicParams } from "./anthropic-batch";
 import { BatchPort, type BatchDriver, type BatchPortOptions } from "./batch-port";
 import { anthropicBatchPrice } from "./cost";
 
 export const ANTHROPIC_PROVIDER = "anthropic";
-/** 記録にないバッチを探すときに読む一覧のページ数の上限（1ページ100件）。超えたら決められない（unknown） */
-const LOOKUP_MAX_PAGES = 20;
 /** 送る出力の上限（#179 の lead の決定2：投稿400字と注文10件なら十分） */
 export const ANTHROPIC_MAX_OUTPUT_TOKENS = 4000;
 
@@ -18,7 +16,7 @@ export function anthropicReservePrice(modelId: string): LlmBatchPrice | undefine
   return p && { inputCentsPer10MTok: p.inputCentsPerMTok * 10, outputCentsPer10MTok: p.outputCentsPerMTok * 10 };
 }
 
-type Client = Pick<AnthropicBatchClient, "create" | "retrieve" | "results" | "cancel" | "list">;
+type Client = Pick<AnthropicBatchClient, "createBody" | "retrieve" | "results" | "cancel">;
 
 export function anthropicBatchDriver(client: Client): BatchDriver {
   return {
@@ -26,53 +24,30 @@ export function anthropicBatchDriver(client: Client): BatchDriver {
     settingKeys: ["max_tokens"],
     maxOutputTokens: ANTHROPIC_MAX_OUTPUT_TOKENS,
     priceAt: (modelId) => anthropicReservePrice(modelId),
-    prepare(r, customId) {
-      const items = [{ customId, params: toAnthropicParams(r.model, r.messages) }];
-      return {
-        body: anthropicBatchBody(items),
-        async send() {
-          const c = await client.create(items);
-          if (c.ok) return { ok: true, batchId: c.value.id, sentBodyHash: c.sent.sha256 };
-          return { ok: false, errorCode: c.errorCode, ...(c.billingUnknown ? { billingUnknown: true as const } : {}) };
-        },
-      };
+    body: (r, itemId) => anthropicBatchBody([{ customId: itemId, params: toAnthropicParams(r.model, r.messages) }]),
+    async send(body) {
+      const c = await client.createBody(body);
+      if (c.ok) return { ok: true, batchId: c.value.id };
+      // 作られたか分からない失敗（応答なし・408・5xx・形が合わない）は billingUnknown。ほかの 4xx は作らずに断ったもの
+      return c.billingUnknown ? { ok: false, errorCode: c.errorCode, billingUnknown: true } : { ok: false, errorCode: c.errorCode, notCreated: true };
     },
-    async outcome(t) {
+    /** Anthropic のバッチの情報には名前（customId）がなく、処理中は本文も見えないので、契約のとおり確かめられない（not_found） */
+    find: async () => ({ status: "not_found" }),
+    async outcome(t, itemId) {
       const s = await client.retrieve(t.batchId);
       if (!s.ok || s.value.processingStatus !== "ended") return "pending";
       const res = await client.results(t.batchId);
       if (!res.ok) return "pending";
-      const it = reconcileResults([t.customId], res.value).matched.get(t.customId);
-      // 結果がない・形が合わない・重なった：課金されたか分からない
-      if (it === undefined) return { kind: "costUnknown", result: "failed", errorCode: "provider_error" };
-      if (it.type === "succeeded") return { kind: "succeeded", output: it.output, respondedModel: it.respondedModel, usage: it.usage, truncated: it.stopReason === "max_tokens" };
-      // errored・canceled・expired は課金されない（https://platform.claude.com/docs/en/build-with-claude/batch-processing 。2026-11-07 確認）
-      if (it.type === "expired") return { kind: "notBilled", result: "expired", errorCode: "timeout" };
-      const limited = it.type === "errored" && (it.errorType === "rate_limit_error" || it.errorType === "overloaded_error");
-      return { kind: "notBilled", result: "failed", errorCode: limited ? "rate_limited" : "provider_error" };
+      const it = reconcileResults([itemId], res.value).matched.get(itemId);
+      if (it !== undefined && it.type === "succeeded") return { kind: "succeeded", output: it.output, respondedModel: it.respondedModel, usage: it.usage, truncated: it.stopReason === "max_tokens" };
+      // errored・canceled・expired は資料では課金されない（https://platform.claude.com/docs/en/build-with-claude/batch-processing 。2026-11-07 確認）が、
+      // 送ったバッチは答えを受け取らなければ費用0で閉じられない（契約）ので、予約した費用で数える。結果がない・形が合わないときも同じ
+      if (it?.type === "expired") return { kind: "costUnknown", result: "expired", errorCode: "timeout" };
+      const limited = it?.type === "errored" && (it.errorType === "rate_limit_error" || it.errorType === "overloaded_error");
+      return { kind: "costUnknown", result: "failed", errorCode: limited ? "rate_limited" : "provider_error" };
     },
     async cancel(batchId) {
       return (await client.cancel(batchId)).ok;
-    },
-    /**
-     * Anthropic のバッチの情報には customId がないので、since より後に作られた、記録にないバッチをすべて見つかったとする
-     * （Claude の AI は1体なので、ほかの AI のバッチと取り違えない。2体以上にするなら作り直す）
-     */
-    async lookup(q) {
-      const found: string[] = [];
-      let afterId: string | undefined;
-      for (let page = 0; page < LOOKUP_MAX_PAGES; page += 1) {
-        const r = await client.list({ limit: 100, ...(afterId === undefined ? {} : { afterId }) });
-        if (!r.ok) return { kind: "unknown" };
-        for (const b of r.value.data) if (b.createdAt >= q.since && !q.recordedBatchIds.has(b.id)) found.push(b.id);
-        // 一覧は新しい順。いちばん古いものが since より前なら、その先は読まなくてよい
-        const oldest = r.value.data.at(-1);
-        if (!r.value.hasMore || r.value.lastId === null || (oldest !== undefined && oldest.createdAt < q.since)) {
-          return found.length > 0 ? { kind: "found", batchIds: found } : { kind: "none" };
-        }
-        afterId = r.value.lastId;
-      }
-      return { kind: "unknown" };
     },
   };
 }
