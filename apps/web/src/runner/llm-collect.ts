@@ -3,6 +3,9 @@
 // 閉じた記録を書く → 出力を読み、判断の記録・投稿・注文票を書く。出力が形に合わない・上限で切れたら agent.run の失敗（invalid_output）を残し、
 // その日は注文しない。回し直しても同じ記録を二重に書かない（失敗の記録は、参照に①か閉じた記録の seq を持たせ、それで見つける）。
 // 試運転（policy.dryRun）の間も、注文の判断の記録（agent.run）は書く。注文票だけを書かない（commitSheet を持たない口しか受け取らない）。
+// 試運転かどうかは、依頼を記録したとき（16:35 の①の dryRun）に決まる。この段で書く agent.run には①の印をそのまま写し、
+// 印のある①からは、あとで試運転を切っても注文票を作らない（commitSheet を呼ばない）。
+// 逆に、本物として記録した①でも、今が試運転なら注文票は作らない（記録の印は①のとおり付けない。注文を出さない側に倒す）。
 // 入力は、①より前の記録から作り直し、送った本文のハッシュと同じであることを確かめてから使う（入力の seq を記録に残すため）。
 import type { LlmBatchClosed, LlmPrompt } from "../contracts";
 import { canonicalize } from "../events/canonical";
@@ -53,9 +56,12 @@ function orderRunOf(events: readonly LogEvent[], sub: LogEvent, closed: LogEvent
   );
 }
 
+/** 試運転の印のある依頼（①）か（#179）。①に付けた印を、その依頼の agent.run にもそのまま写す */
+const isDryRun = (sub: LogEvent) => pl(sub).dryRun === true;
+
 /**
- * 片づいた依頼か：閉じていて、注文の判断の記録がある（成功なら、注文票まで書いた。試運転か締めのあとなら記録だけでよい）。
- * 見つからないまま予約した費用で閉じた依頼は、締めまでは片づいていない（見つけたら取り消しを頼む）
+ * 片づいた依頼か：閉じていて、注文の判断の記録がある（成功なら、注文票まで書いた。①に試運転の印があるか、今が試運転か、
+ * 締めのあとなら記録だけでよい）。見つからないまま予約した費用で閉じた依頼は、締めまでは片づいていない（見つけたら取り消しを頼む）
  */
 function settled(events: readonly LogEvent[], sub: LogEvent, now: number, dryRun: boolean): boolean {
   const closed = closedOf(events, sub);
@@ -64,7 +70,7 @@ function settled(events: readonly LogEvent[], sub: LogEvent, now: number, dryRun
   const run = orderRunOf(events, sub, closed);
   if (!run) return false;
   // 締めを過ぎたら、注文票はもう書けない
-  if (pl(run).ok !== true || dryRun || now >= cutoffOf(pl(sub).tradingDate as string)) return true;
+  if (pl(run).ok !== true || isDryRun(sub) || dryRun || now >= cutoffOf(pl(sub).tradingDate as string)) return true;
   return events.some((e) => (e.type === "order_sheet.committed" || e.type === "order_sheet.rejected") && pl(e).runSeq === run.seq);
 }
 
@@ -112,7 +118,7 @@ async function settle(day: DayAccess, llm: LlmDeps, a: LlmInvestor, sub: LogEven
   // 閉じたのに判断を使えない依頼の失敗の run。参照に①と閉じた記録の seq を持たせ、回し直しではそれで見つける（二重に書かない）
   const fail = async (closed: LogEvent, errorCode: string) => {
     if (orderRunOf(day.events(), sub, closed)) return;
-    const payload = llmRunPayload(a, { prompt, inputSeqs: [], requestHash: pl(sub).sentBodyHash as string, startedAt: now, finishedAt: day.clock.now(), ok: false, errorCode, cost: costOf(sub, closed) });
+    const payload = llmRunPayload(a, { prompt, inputSeqs: [], requestHash: pl(sub).sentBodyHash as string, startedAt: now, finishedAt: day.clock.now(), ok: false, errorCode, cost: costOf(sub, closed), dryRun: isDryRun(sub) });
     await must(day.append("agent.run", payload, [sub.seq, closed.seq]), "agent.run");
   };
   let closed = closedOf(day.events(), sub);
@@ -167,7 +173,7 @@ async function settle(day: DayAccess, llm: LlmDeps, a: LlmInvestor, sub: LogEven
 async function timeout(day: DayAccess, a: LlmInvestor, sub: LogEvent, closed: LogEvent, prompt: LlmPrompt): Promise<boolean> {
   if (orderRunOf(day.events(), sub, closed)) return false;
   const at = day.clock.now();
-  await must(day.append("agent.run", llmRunPayload(a, { prompt, inputSeqs: [], requestHash: pl(sub).sentBodyHash as string, startedAt: at, finishedAt: at, ok: false, errorCode: "timeout", cost: costOf(sub, closed) }), [sub.seq, closed.seq]), "agent.run");
+  await must(day.append("agent.run", llmRunPayload(a, { prompt, inputSeqs: [], requestHash: pl(sub).sentBodyHash as string, startedAt: at, finishedAt: at, ok: false, errorCode: "timeout", cost: costOf(sub, closed), dryRun: isDryRun(sub) }), [sub.seq, closed.seq]), "agent.run");
   return true;
 }
 
@@ -177,6 +183,8 @@ async function decide(day: DayAccess, llm: LlmDeps, a: LlmInvestor, sub: LogEven
   const startedAt = day.clock.now();
   const cost = costOf(sub, closed);
   const linked = { batchSeq: closed.seq, sentBodyHash: pl(sub).sentBodyHash };
+  // 試運転の印は①のとおり（今の設定によらない）
+  const dryRun = isDryRun(sub);
   // 締めを過ぎて断られたら CutoffPassed（呼び出し元が timeout の失敗にする）。ほかの理由で断られたら例外
   const write = async (r: Promise<{ ok: true; event: LogEvent } | { ok: false; reason: string }>, what: string) => {
     const x = await r;
@@ -185,7 +193,7 @@ async function decide(day: DayAccess, llm: LlmDeps, a: LlmInvestor, sub: LogEven
     throw new Error(`${what}: ${x.reason}`);
   };
   const run = (x: { purpose: "post" | "order"; inputSeqs: number[] } & ({ ok: true; outputHash: string } | { ok: false; errorCode: string })) =>
-    write(day.append("agent.run", { ...llmRunPayload(a, { ...x, prompt, requestHash: pl(sub).sentBodyHash as string, startedAt, finishedAt: day.clock.now(), cost }), ...linked }, [...x.inputSeqs, closed.seq]), "agent.run");
+    write(day.append("agent.run", { ...llmRunPayload(a, { ...x, prompt, requestHash: pl(sub).sentBodyHash as string, startedAt, finishedAt: day.clock.now(), cost, dryRun }), ...linked }, [...x.inputSeqs, closed.seq]), "agent.run");
   // 判断の記録は締めより前だけ（記録の検査）。締めを過ぎたら、その日は判断なし
   if (startedAt >= cutoff) {
     if (runs.length > 0) throw new CutoffPassed("after the cutoff");
@@ -250,8 +258,10 @@ async function decide(day: DayAccess, llm: LlmDeps, a: LlmInvestor, sub: LogEven
   }
   // 注文の判断の記録は、投稿の有無・試運転によらず書く（その日の判断が片づいた印にもなる）
   const orderRun = await runSeq("order");
-  // 試運転：注文票は書かない（commitSheet を持たない口）
-  if (!day.commitSheet) return { wrote, note: "dry run (no order sheet)" };
+  // 試運転として記録した依頼（印のある①）からは、今の設定によらず注文票を作らない。commitSheet も呼ばない（記録の検査の拒否に頼らない）
+  if (dryRun) return { wrote, note: "dry run (no order sheet)" };
+  // 本物として記録した依頼でも、今が試運転なら注文票は書かない（commitSheet を持たない口）
+  if (!day.commitSheet) return { wrote, note: "dry run now (no order sheet)" };
   if (!day.events().some((e) => (e.type === "order_sheet.committed" || e.type === "order_sheet.rejected") && pl(e).runSeq === orderRun)) {
     await write(day.commitSheet(a.id, { tradingDate: date, orders: decision.orders, runSeq: orderRun, inputSeqs }), `commitSheet ${a.id}`);
     wrote = true;

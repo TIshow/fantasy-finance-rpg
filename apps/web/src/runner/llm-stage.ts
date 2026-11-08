@@ -4,11 +4,13 @@
 // 流れは契約（src/contracts/llm.ts の LlmBatchPort）のとおり：本文を作る → 上限を確かめる → ①予約を記録 → 送る → ③バッチのIDを記録。
 // 書くのは保管だけ。API キーはここに来ない（各社の口が環境変数から読む）。
 import type { Clock, LlmBatchPort, LlmPolicy, LlmPreparedBatch, SheetInput } from "../contracts";
+import { canonicalize } from "../events/canonical";
+import { sha256Hex } from "../events/hash";
 import { jstDayOf, LLM_DAILY_COST_LIMIT, llmCostUsed } from "../events/llm-cost";
 import type { LogEvent } from "../events/types";
 import { cutoffOf, nextBusinessDay, tradingDateFor } from "../ledger/ledger";
 import type { Account } from "../ledger/types";
-import { checkDailyBatchReservations } from "../llm/batch-plan";
+import { batchReservationOf, checkDailyBatchReservations } from "../llm/batch-plan";
 import { investorPrompt, investorUserText } from "../llm/investor-prompt";
 import type { ValuesPort } from "../store/pg-values";
 import { type LlmInvestor, investorRequest } from "./llm-agents";
@@ -69,13 +71,16 @@ export function isSuspended(events: readonly LogEvent[], agentId: string, scope:
   return [agentId, "*"].some((id) => on.get(id)?.has(scope) ?? false);
 }
 
-/** LLM の agent.run の中身。費用とトークン数の欄は、分かるものだけ */
+/**
+ * LLM の agent.run の中身。費用とトークン数の欄は、分かるものだけ。
+ * dryRun が true なら試運転の印（dryRun: true）を書く。印のある注文の判断からは、注文票を作らない（#179）
+ */
 export function llmRunPayload(
   a: LlmInvestor,
-  x: { prompt: { id: string; version: string; hash: string }; inputSeqs: number[]; requestHash: string; startedAt: number; finishedAt: number; purpose?: "post" | "order" } & ({ ok: true; outputHash: string } | { ok: false; errorCode: string }) & { cost?: Payload },
+  x: { prompt: { id: string; version: string; hash: string }; inputSeqs: number[]; requestHash: string; startedAt: number; finishedAt: number; purpose?: "post" | "order"; dryRun?: boolean } & ({ ok: true; outputHash: string } | { ok: false; errorCode: string }) & { cost?: Payload },
 ): Payload {
   const { prompt, inputSeqs, requestHash, startedAt, finishedAt, cost } = x;
-  const base = { agentId: a.id, purpose: x.purpose ?? "order", model: a.model, prompt, inputSeqs, requestHash, startedAt, finishedAt, ...(cost ?? {}) };
+  const base = { agentId: a.id, purpose: x.purpose ?? "order", model: a.model, prompt, inputSeqs, requestHash, startedAt, finishedAt, ...(cost ?? {}), ...(x.dryRun === true ? { dryRun: true } : {}) };
   return x.ok ? { ...base, outputHash: x.outputHash, ok: true } : { ...base, ok: false, errorCode: x.errorCode };
 }
 
@@ -99,11 +104,19 @@ export async function llmSubmit(day: DayAccess, llm: LlmDeps, date: string): Pro
   });
   const todo = active.filter((a) => !submissionOf(events, a.id, T) && !(isSuspended(events, a.id, "posts") && isSuspended(events, a.id, "orders")));
   if (todo.length === 0) return { stage, status: "done" };
-  // 3体の予約の合計が目標（80円）を超える設定なら、どのAIも依頼せず、段を失敗にする（設定の誤りなので、毎日の実行の終了コードで知らせる）
+  // 料金表にないモデルなど、予約を作れない設定なら、どのAIも依頼せず、段を失敗にする
+  try {
+    for (const a of active) batchReservationOf(a.model, now, llm.yenPerUsd);
+  } catch (e) {
+    return { stage, status: "skipped", detail: `error: ${errorText(e)}` };
+  }
+  // 3体の予約の合計が目標（80円）を超える設定なら、どのAIにも送らず、AIごとに agent.run の失敗（budget_exceeded・費用0）を
+  // その日1回だけ残す（見る人に見える形）。設定の誤りなので、段の結果も失敗（"error: "）にして、毎日の実行の終了コードで知らせる
+  let overTarget: string | undefined;
   try {
     checkDailyBatchReservations(active.map((a) => a.model), now, { yenPerUsd: llm.yenPerUsd });
   } catch (e) {
-    return { stage, status: "skipped", detail: `error: ${errorText(e)}` };
+    overTarget = errorText(e);
   }
   const prompt = await investorPrompt();
   // 入力に使う記録は、この段の始めの記録の写しで3体とも同じにする（あとで書く①・③は入らない）。3体の市場の文が同じことも確かめる
@@ -133,18 +146,28 @@ export async function llmSubmit(day: DayAccess, llm: LlmDeps, date: string): Pro
       if (market !== undefined && marketText !== market) throw new Error("the market text differs between investors");
       market = marketText;
       const request = investorRequest(a, { prompt, tradingDate: T, submittedAt: at, inputSeqs, userText: text, yenPerUsd: llm.yenPerUsd });
-      const port = llm.portOf(a.model.provider);
-      const prepared = await port.prepare(request);
-      const run = (errorCode: string, cost: Payload) => day.append("agent.run", llmRunPayload(a, { prompt, inputSeqs, requestHash: prepared.sentBodyHash, startedAt: at, finishedAt: day.clock.now(), ok: false, errorCode, cost }), inputSeqs);
-      // 上限：記録から数えたその日の使用済み＋この予約が、記録の上限と policy の上限の小さいほうを超えるなら、送らずに失敗を残す
-      const limit = Math.min(LLM_DAILY_COST_LIMIT, llm.policy.dailyCostLimit);
-      if (llmCostUsed(evs, jstDayOf(at)) + request.maxCost > limit) {
-        await must(run("budget_exceeded", { maxCost: request.maxCost, cost: 0 }), "agent.run");
+      const run = (errorCode: string, cost: Payload, requestHash: string) =>
+        day.append("agent.run", llmRunPayload(a, { prompt, inputSeqs, requestHash, startedAt: at, finishedAt: day.clock.now(), ok: false, errorCode, cost, dryRun: llm.policy.dryRun }), inputSeqs);
+      // 3体の予約の合計が目標を超える設定なら、本文を作らずに（設定の誤りで作れないこともある）失敗を残す。
+      // 依頼のハッシュは、送る本文がないので、依頼の中身（正規化した JSON）の SHA-256
+      if (overTarget !== undefined) {
+        const requestHash = await sha256Hex(new TextEncoder().encode(canonicalize(request)));
+        await must(run("budget_exceeded", { maxCost: request.maxCost, cost: 0 }, requestHash), "agent.run");
         notes.push(`${a.id}:budget_exceeded`);
         wrote = true;
         continue;
       }
-      const sub = await day.append("llm.batch.submitted", submittedPayload(prepared, llm.yenPerUsd), []);
+      const port = llm.portOf(a.model.provider);
+      const prepared = await port.prepare(request);
+      // 上限：記録から数えたその日の使用済み＋この予約が、記録の上限と policy の上限の小さいほうを超えるなら、送らずに失敗を残す
+      const limit = Math.min(LLM_DAILY_COST_LIMIT, llm.policy.dailyCostLimit);
+      if (llmCostUsed(evs, jstDayOf(at)) + request.maxCost > limit) {
+        await must(run("budget_exceeded", { maxCost: request.maxCost, cost: 0 }, prepared.sentBodyHash), "agent.run");
+        notes.push(`${a.id}:budget_exceeded`);
+        wrote = true;
+        continue;
+      }
+      const sub = await day.append("llm.batch.submitted", submittedPayload(prepared, llm.yenPerUsd, llm.policy.dryRun), []);
       if (!sub.ok) {
         notes.push(`${a.id}:not reserved (${sub.reason})`);
         continue;
@@ -159,7 +182,7 @@ export async function llmSubmit(day: DayAccess, llm: LlmDeps, date: string): Pro
         // 作られていないと確か：費用0で閉じ、その日の判断がないことを失敗の run で見えるようにする
         const price = { inputCentsPer10MTok: request.reservePrice.inputCentsPer10MTok, outputCentsPer10MTok: request.reservePrice.outputCentsPer10MTok };
         await must(day.append("llm.batch.closed", { batchSeq, agentId: a.id, result: "failed", cost: 0, inputTokens: 0, outputTokens: 0, notCreatedError: sent.errorCode, ...price }, [batchSeq]), "llm.batch.closed");
-        await must(run(sent.errorCode, { maxCost: request.maxCost, cost: 0 }), "agent.run");
+        await must(run(sent.errorCode, { maxCost: request.maxCost, cost: 0 }, prepared.sentBodyHash), "agent.run");
         notes.push(`${a.id}:not sent (${sent.errorCode})`);
       } else {
         notes.push(`${a.id}:send unknown (${sent.errorCode}); the next run looks for it`);
@@ -171,14 +194,18 @@ export async function llmSubmit(day: DayAccess, llm: LlmDeps, date: string): Pro
       errors.push(`${a.id}: ${errorText(e)}`);
     }
   }
+  if (overTarget !== undefined) errors.unshift(overTarget);
   const rest = [...notes, ...(waiting.length > 0 ? [`post-close of ${date} not done: ${waiting.join(",")}`] : [])].join("; ");
   const detail = errors.length > 0 ? `error: ${errors.join("; ")}${rest ? `; ${rest}` : ""}` : rest || undefined;
   const status = wrote ? "written" : errors.length > 0 ? "skipped" : waiting.length > 0 ? "waiting" : "done";
   return { stage, status, ...(detail ? { detail } : {}) };
 }
 
-/** ①の中身（契約の流れの2。料金とトークン数の上限は依頼から、ハッシュ・customId・本文の出力の上限は本文を作った結果から） */
-export function submittedPayload(p: LlmPreparedBatch, yenPerUsd: number): Payload {
+/**
+ * ①の中身（契約の流れの2。料金とトークン数の上限は依頼から、ハッシュ・customId・本文の出力の上限は本文を作った結果から）。
+ * dryRun が true なら試運転の印（dryRun: true）を書く。その依頼の判断は、翌朝の設定によらず試運転として扱う（#179）
+ */
+export function submittedPayload(p: LlmPreparedBatch, yenPerUsd: number, dryRun = false): Payload {
   const r = p.request;
   return {
     agentId: r.agentId,
@@ -196,6 +223,7 @@ export function submittedPayload(p: LlmPreparedBatch, yenPerUsd: number): Payloa
     maxInputTokens: r.maxInputTokens,
     maxOutputTokens: r.maxOutputTokens,
     bodyMaxOutputTokens: p.bodyMaxOutputTokens,
+    ...(dryRun ? { dryRun: true } : {}),
   };
 }
 
