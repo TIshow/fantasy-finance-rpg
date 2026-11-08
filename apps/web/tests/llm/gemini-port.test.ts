@@ -3,8 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { LlmBatchRequest, LlmBatchTicket } from "../../src/contracts";
 import { sha256Hex } from "../../src/events/hash";
-import { BatchBudget, batchCustomIdOf } from "../../src/llm/batch-port";
-import { GEMINI_CREATE_SETTLE_MS, GeminiBatchClient } from "../../src/llm/gemini-batch";
+import { GeminiBatchClient } from "../../src/llm/gemini-batch";
 import { llmTokenCost } from "../../src/events/llm-cost";
 import { GEMINI_PRICE_SWITCH_AT } from "../../src/llm/gemini-pricing";
 import { GEMINI_MAX_OUTPUT_TOKENS, geminiBatchPort, geminiReservePrice } from "../../src/llm/gemini-port";
@@ -14,7 +13,8 @@ const KEY = "AIza-test-not-a-real-key";
 const ID = "k7qpd2x1v9m3abcd";
 const AT = Date.parse("2026-11-09T07:35:00Z");
 const PRICE = { inputCentsPer10MTok: 375, outputCentsPer10MTok: 1875 };
-const CID = await batchCustomIdOf("gemini-ai", "2026-11-10");
+/** 本文の中の1件のID（表示名と1件のキー）。customId の前半 */
+const CID = "gemini-ai-20261110";
 
 function fakeFetch(respond: (method: string, url: string) => Response | Promise<Response>) {
   const seen: { method: string; path: string; body?: string }[] = [];
@@ -27,13 +27,13 @@ function fakeFetch(respond: (method: string, url: string) => Response | Promise<
 }
 const make = (f: typeof fetch, now = AT + 5000) =>
   geminiBatchPort({
-    budget: new BatchBudget({ dailyCostLimit: 1000, dryRun: false }, async () => ({ used: 0, recordedKeys: new Set() })),
+    policy: { dailyCostLimit: 1000, dryRun: false },
     clock: { now: () => now },
     client: new GeminiBatchClient({ apiKey: KEY, fetch: f }),
   });
-/** 記録済みの状態を、この依頼の名前（customId）にしたもの */
+/** 記録済みの状態を、この依頼の表示名にしたもの */
 const created = () => recorded("gemini-batch-created.json").replace("ffr-2026-11-09-a1b2c3", CID);
-/** 記録済みの終わったバッチから、key の1件だけを残し、依頼の customId に置き換えたもの */
+/** 記録済みの終わったバッチから、key の1件だけを残し、本文の中の1件のIDに置き換えたもの */
 function finished(key: string, state = "BATCH_STATE_SUCCEEDED") {
   const j = JSON.parse(recorded("gemini-batch-succeeded.json"));
   const list = j.response.inlinedResponses.inlinedResponses.filter((x: { metadata: { key: string } }) => x.metadata.key === key);
@@ -62,7 +62,7 @@ const req = (over: Partial<LlmBatchRequest> = {}): LlmBatchRequest => ({
   maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
   ...over,
 });
-const ticket = (over: Partial<LlmBatchTicket> = {}): LlmBatchTicket => ({ agentId: "gemini-ai", provider: "google", modelId: "gemini-3.8-flash", batchId: ID, customId: CID, maxCost: 100, tradingDate: "2026-11-10", submittedAt: AT, ...over });
+const ticket = (over: Partial<LlmBatchTicket> = {}): LlmBatchTicket => ({ batchSeq: 3, agentId: "gemini-ai", provider: "google", modelId: "gemini-3.8-flash", customId: `${CID}-${"c".repeat(16)}`, sentBodyHash: "c".repeat(64), reservedAt: AT, maxCost: 100, tradingDate: "2026-11-10", submittedAt: AT, batchId: ID, ...over });
 
 describe("Gemini のバッチの口", () => {
   it("予約の料金は submittedAt で選ぶ（値上げの48時間前からは高いほう）", () => {
@@ -71,50 +71,39 @@ describe("Gemini のバッチの口", () => {
     expect(geminiReservePrice("gemini-unknown", AT)).toBeUndefined();
   });
 
-  it("依頼：名前を customId にした決まった本文を送り、そのハッシュと控えを返す。temperature は送らない", async () => {
+  it("本文：表示名と1件のキーは customId の前半。送るときは本文をそのまま送り、batchId を返す", async () => {
     const { f, seen } = fakeFetch(() => new Response(created()));
-    const r = await make(f).submit(req());
     const body = `{"batch":{"model":"models/gemini-3.8-flash","displayName":"${CID}","inputConfig":{"requests":{"requests":[{"request":{"systemInstruction":{"parts":[{"text":"あなたは投資家です"}]},"contents":[{"role":"user","parts":[{"text":"入力"}]}],"generationConfig":{"maxOutputTokens":8000,"thinkingConfig":{"thinkingLevel":"LOW"}}},"metadata":{"key":"${CID}"}}]}}}}`;
+    const hash = await sha256Hex(new TextEncoder().encode(body));
+    const p = await make(f).prepare(req());
+    expect(p).toMatchObject({ body, sentBodyHash: hash, customId: `${CID}-${hash.slice(0, 16)}`, bodyMaxOutputTokens: 8000 });
+    expect(await make(f).send(p, 7)).toEqual({ ok: true, batchId: ID });
     expect(seen).toEqual([{ method: "POST", path: "/v1/models/gemini-3.8-flash:batchGenerateContent", body }]);
-    expect(r).toEqual({
-      ok: true,
-      sentBodyHash: await sha256Hex(new TextEncoder().encode(body)),
-      ticket: { agentId: "gemini-ai", provider: "google", modelId: "gemini-3.8-flash", batchId: ID, customId: CID, maxCost: 36, tradingDate: "2026-11-10", submittedAt: AT },
-    });
   });
 
-  it("出力の上限は 8,000。違う max_tokens・足りない予約・20,000 バイトを超える本文は断る", async () => {
-    const { f, seen } = fakeFetch(() => new Response(created()));
-    await expect(make(f).submit(req({ model: { provider: "google", modelId: "gemini-3.8-flash", settings: { max_tokens: "65536" } }, maxOutputTokens: 65_536, maxCost: 1000 }))).rejects.toThrow(RangeError);
-    await expect(make(f).submit(req({ maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS - 1 }))).rejects.toThrow(RangeError);
+  it("出力の上限は 8,000。違う max_tokens・足りない予約・20,000 バイトを超える本文・temperature・値上げをまたぐのに安い料金は断る", async () => {
+    const { f } = fakeFetch(() => new Response(created()));
+    await expect(make(f).prepare(req({ model: { provider: "google", modelId: "gemini-3.8-flash", settings: { max_tokens: "65536" } }, maxOutputTokens: 65_536, maxCost: 1000 }))).rejects.toThrow(RangeError);
+    await expect(make(f).prepare(req({ maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS - 1 }))).rejects.toThrow(RangeError);
     expect(llmTokenCost({ inputTokens: 20_000, outputTokens: GEMINI_MAX_OUTPUT_TOKENS }, { ...PRICE, yenPerUsd: 160 })).toBe(36);
-    await expect(make(f).submit(req({ maxCost: 35 }))).rejects.toThrow(RangeError);
-    await expect(make(f).submit(req({ messages: [{ role: "user", content: "あ".repeat(6700) }] }))).rejects.toThrow(/byte length/);
-    expect(seen).toHaveLength(0);
-  });
-
-  it("考えた過程と合計の残りを出力に数えても、出力の上限までなら費用は maxCost を超えない。上限で止まった答えは truncated: true", async () => {
-    const j = JSON.parse(finished("run-a"));
-    const usage = j.response.inlinedResponses.inlinedResponses[0].response.usageMetadata;
-    Object.assign(usage, { promptTokenCount: 20_000, candidatesTokenCount: 3000, thoughtsTokenCount: 4000, totalTokenCount: 20_000 + GEMINI_MAX_OUTPUT_TOKENS });
-    j.response.inlinedResponses.inlinedResponses[0].response.candidates[0].finishReason = "MAX_TOKENS";
-    const r = await make(fakeFetch(() => new Response(JSON.stringify(j))).f).collect(ticket({ maxCost: 36 }));
-    expect(r).toMatchObject({ result: "collected", truncated: true, usage: { inputTokens: 20_000, outputTokens: GEMINI_MAX_OUTPUT_TOKENS } });
-    if (r.status !== "closed") throw new Error("pending");
-    expect(r.usage.cost).toBeLessThanOrEqual(36);
-  });
-
-  it("値上げをまたぐ依頼は、高い料金で予約しなければ断る。temperature も断る", async () => {
-    const { f, seen } = fakeFetch(() => new Response(created()));
+    await expect(make(f).prepare(req({ maxCost: 35 }))).rejects.toThrow(RangeError);
+    await expect(make(f).prepare(req({ messages: [{ role: "user", content: "あ".repeat(6700) }] }))).rejects.toThrow(/byte length/);
+    await expect(make(f).prepare(req({ model: { provider: "google", modelId: "gemini-3.8-flash", settings: { max_tokens: "8000", temperature: "0" } } }))).rejects.toThrow(RangeError);
     const late = GEMINI_PRICE_SWITCH_AT - 3_600_000;
-    await expect(make(f, late + 5000).submit(req({ submittedAt: late }))).rejects.toThrow(RangeError);
-    await expect(make(f).submit(req({ model: { provider: "google", modelId: "gemini-3.8-flash", settings: { max_tokens: "8000", temperature: "0" } } }))).rejects.toThrow(RangeError);
-    expect(seen).toHaveLength(0);
+    await expect(make(f, late + 5000).prepare(req({ submittedAt: late }))).rejects.toThrow(RangeError);
   });
 
-  it("作成の応答の名前が違えば、作られたか分からない（billingUnknown）", async () => {
-    const { f } = fakeFetch(() => new Response(recorded("gemini-batch-created.json")));
-    expect(await make(f).submit(req())).toMatchObject({ ok: false, errorCode: "provider_error", billingUnknown: true });
+  it("作成の応答の名前が違えば分からない（billingUnknown）。400 は作られていない（notCreated）", async () => {
+    const p = await make(fakeFetch(() => new Response("{}")).f).prepare(req());
+    expect(await make(fakeFetch(() => new Response(recorded("gemini-batch-created.json"))).f).send(p, 7)).toEqual({ ok: false, errorCode: "provider_error", billingUnknown: true });
+    expect(await make(fakeFetch(() => new Response("{}", { status: 400 })).f).send(p, 7)).toEqual({ ok: false, errorCode: "provider_error", notCreated: true });
+  });
+
+  it("探す：表示名は本文の中にあり customId を持てないので、いつも not_found（提供元に問い合わせない）", async () => {
+    const { f, seen } = fakeFetch(() => new Response(created()));
+    const { batchId: _b, ...reservation } = ticket();
+    expect(await make(f).find(reservation)).toEqual({ status: "not_found" });
+    expect(seen).toHaveLength(0);
   });
 
   describe("受け取り", () => {
@@ -126,6 +115,17 @@ describe("Gemini のバッチの口", () => {
     it("成功：考えた過程を除いた出力。費用は予約の料金で、考えた過程のトークンも出力に数える", async () => {
       // (20,000×0.375ドル＋4,500×1.875ドル)/100万 ＝ 0.0159375ドル × 160円 ＝ 2.55円 → 2.6円
       expect(await make(fakeFetch(() => new Response(finished("run-a"))).f).collect(ticket())).toEqual({ status: "closed", result: "collected", output: '{"post":null,"orders":[]}', respondedModel: "gemini-3.8-flash", usage: { inputTokens: 20_000, outputTokens: 4500, cost: 26 }, price: PRICE, finishedAt: AT + 5000 });
+    });
+
+    it("考えた過程と合計の残りを出力に数えても、出力の上限までなら費用は maxCost を超えない。上限で止まった答えは truncated: true", async () => {
+      const j = JSON.parse(finished("run-a"));
+      const usage = j.response.inlinedResponses.inlinedResponses[0].response.usageMetadata;
+      Object.assign(usage, { promptTokenCount: 20_000, candidatesTokenCount: 3000, thoughtsTokenCount: 4000, totalTokenCount: 20_000 + GEMINI_MAX_OUTPUT_TOKENS });
+      j.response.inlinedResponses.inlinedResponses[0].response.candidates[0].finishReason = "MAX_TOKENS";
+      const r = await make(fakeFetch(() => new Response(JSON.stringify(j))).f).collect(ticket({ maxCost: 36 }));
+      expect(r).toMatchObject({ result: "collected", truncated: true, usage: { inputTokens: 20_000, outputTokens: GEMINI_MAX_OUTPUT_TOKENS } });
+      if (r.status !== "closed") throw new Error("pending");
+      expect(r.usage.cost).toBeLessThanOrEqual(36);
     });
 
     it("値上げをまたいだバッチも、予約の料金（submittedAt で選んだ料金）で閉じる", async () => {
@@ -146,24 +146,6 @@ describe("Gemini のバッチの口", () => {
       const { f, seen } = fakeFetch((m) => new Response(m === "POST" ? "" : created()));
       expect(await make(f).abandon(ticket())).toMatchObject({ result: "expired", errorCode: "timeout", usage: { cost: 100 }, costUnknown: true });
       expect(seen.map((s) => `${s.method} ${s.path}`)).toEqual([`GET /v1/batches/${ID}`, `POST /v1/batches/${ID}:cancel`, `GET /v1/batches/${ID}`]);
-    });
-  });
-
-  describe("記録にないバッチを探す（名前で探す）", () => {
-    const list = (...ops: string[]) => fakeFetch(() => new Response(`{"operations":[${ops.join(",")}]}`)).f;
-    // since は早めに渡し、1時間は requestedAt から数える
-    const q = (over = {}) => ({ agentId: "gemini-ai", tradingDate: "2026-11-10", since: AT - 600_000, requestedAt: AT, now: AT + GEMINI_CREATE_SETTLE_MS + 1, recordedBatchIds: new Set<string>(), ...over });
-
-    it("あれば found、記録にあるものなら none。なければ、1時間たっていれば none、たっていなければ unknown", async () => {
-      expect(await make(list(created())).findUnrecorded(q())).toEqual({ kind: "found", batchIds: [ID] });
-      expect(await make(list(created())).findUnrecorded(q({ recordedBatchIds: new Set([ID]) }))).toEqual({ kind: "none" });
-      expect(await make(list()).findUnrecorded(q())).toEqual({ kind: "none" });
-      expect(await make(list()).findUnrecorded(q({ now: AT + GEMINI_CREATE_SETTLE_MS }))).toEqual({ kind: "unknown" });
-    });
-
-    it("同じ名前が2つなら記録にないものを返す。一覧が読めなければ unknown", async () => {
-      expect(await make(list(created(), created().replaceAll(ID, "zz9"))).findUnrecorded(q({ recordedBatchIds: new Set([ID]) }))).toEqual({ kind: "found", batchIds: ["zz9"] });
-      expect(await make(fakeFetch(() => new Response("", { status: 500 })).f).findUnrecorded(q())).toEqual({ kind: "unknown" });
     });
   });
 });

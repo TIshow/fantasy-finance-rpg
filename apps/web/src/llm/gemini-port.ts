@@ -1,10 +1,10 @@
 // Gemini API のバッチで、バッチの口（契約 LlmBatchPort）を作る（#179）。
 // 送る形：system は先頭の1件だけ systemInstruction に移し、assistant は model と呼ぶ。settings は max_tokens（maxOutputTokens）と
 // thinking_level だけ（temperature は送らない）。形への直し方は toGeminiRequest、本文は geminiBatchBody で決まる。
-// バッチの名前（displayName）は customId にし、作られたか分からないときは名前で一覧を探す。
+// バッチの名前（displayName）と中の1件のキーは、本文の中の1件のID（batchItemIdOf の前半）にする。
 import type { LlmBatchPrice } from "../contracts";
-import { BatchPort, type BatchDriver, type BatchOutcome, type BatchPortOptions } from "./batch-port";
-import { GEMINI_PROVIDER, GeminiBatchClient, findGeminiBatchByDisplayName, geminiApiKeyFromEnv, geminiBatchBody, reconcileGeminiResults } from "./gemini-batch";
+import { BatchPort, batchItemIdOfCustomId, type BatchDriver, type BatchOutcome, type BatchPortOptions } from "./batch-port";
+import { GEMINI_PROVIDER, GeminiBatchClient, geminiApiKeyFromEnv, geminiBatchBody, reconcileGeminiResults } from "./gemini-batch";
 import { geminiBatchPrice } from "./gemini-pricing";
 
 /**
@@ -24,7 +24,7 @@ export function geminiReservePrice(modelId: string, submittedAt: number): LlmBat
   return p && { inputCentsPer10MTok: p.inputCentsPer10MTok, outputCentsPer10MTok: p.outputCentsPer10MTok };
 }
 
-type Client = Pick<GeminiBatchClient, "create" | "results" | "cancel" | "list">;
+type Client = Pick<GeminiBatchClient, "createBody" | "results" | "cancel">;
 const UNKNOWN: BatchOutcome = { kind: "costUnknown", result: "failed", errorCode: "provider_error" };
 
 export function geminiBatchDriver(client: Client): BatchDriver {
@@ -33,24 +33,24 @@ export function geminiBatchDriver(client: Client): BatchDriver {
     settingKeys: ["max_tokens", "thinking_level"],
     maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
     priceAt: geminiReservePrice,
-    prepare(r, customId) {
-      const items = [{ customId, messages: r.messages }];
-      return {
-        body: geminiBatchBody(r.model, customId, items),
-        async send() {
-          const c = await client.create(r.model, customId, items);
-          if (c.ok) return { ok: true, batchId: c.value.id, sentBodyHash: c.sent.sha256 };
-          return { ok: false, errorCode: c.errorCode, ...(c.billingUnknown ? { billingUnknown: true as const } : {}) };
-        },
-      };
+    body: (r, itemId) => geminiBatchBody(r.model, itemId, [{ customId: itemId, messages: r.messages }]),
+    async send(body, r, customId) {
+      const c = await client.createBody(r.model, batchItemIdOfCustomId(customId), body);
+      if (c.ok) return { ok: true, batchId: c.value.id };
+      return c.billingUnknown ? { ok: false, errorCode: c.errorCode, billingUnknown: true } : { ok: false, errorCode: c.errorCode, notCreated: true };
     },
-    async outcome(t) {
+    /**
+     * 表示名は本文の中にあるので、本文のハッシュを含む customId を名前にできない。また一覧からは送った本文のバイト列を取り出せない。
+     * 契約の「customId の名前を持つ候補」を確かめられないので、not_found にする（予約した費用で閉じる）
+     */
+    find: async () => ({ status: "not_found" }),
+    async outcome(t, itemId) {
       const res = await client.results(t.batchId);
       if (!res.ok) return "pending";
       const { status, items } = res.value;
       if (status.state === "pending" || status.state === "running") return "pending";
       if (status.state === "failed") return UNKNOWN;
-      const it = reconcileGeminiResults([t.customId], items).matched.get(t.customId);
+      const it = reconcileGeminiResults([itemId], items).matched.get(itemId);
       // 結果がない（期限切れ・取り消しで処理されなかったものを含む）：課金されたか分からない
       if (it === undefined) return status.state === "expired" ? { kind: "costUnknown", result: "expired", errorCode: "timeout" } : UNKNOWN;
       // 失敗した1件の課金は資料に書かれていない
@@ -61,32 +61,6 @@ export function geminiBatchDriver(client: Client): BatchDriver {
     },
     async cancel(batchId) {
       return (await client.cancel(batchId)).ok;
-    },
-    /**
-     * customId の名前のバッチを、一覧の全ページから探す（findGeminiBatchByDisplayName）。requestedAt（前の実行が送ったかもしれない
-     * 一番遅い時刻）から1時間たつまでは、見つからなくても unknown。
-     * 名前の読めない項目（AI Studio で付けた空白入りの名前など）が一覧に残っていると、いつも unknown になる。
-     * そのときは運用者が AI Studio でその項目を確かめ、要らなければ消す（自動ではやり直さない）
-     */
-    async lookup(q) {
-      const r = await findGeminiBatchByDisplayName(client, q.customId, { requestedAt: q.requestedAt, now: q.now });
-      switch (r.kind) {
-        case "notFound":
-          return { kind: "none" };
-        case "found":
-          if (!q.recordedBatchIds.has(r.batch.id)) return { kind: "found", batchIds: [r.batch.id] };
-          return r.maybeDuplicated ? { kind: "unknown" } : { kind: "none" };
-        case "foundUnreadable":
-          if (r.id === undefined) return { kind: "unknown" };
-          if (!q.recordedBatchIds.has(r.id)) return { kind: "found", batchIds: [r.id] };
-          return r.maybeDuplicated ? { kind: "unknown" } : { kind: "none" };
-        case "duplicated": {
-          const ids = r.ids.filter((id) => !q.recordedBatchIds.has(id));
-          return ids.length > 0 ? { kind: "found", batchIds: ids } : { kind: "unknown" };
-        }
-        default:
-          return { kind: "unknown" };
-      }
     },
   };
 }

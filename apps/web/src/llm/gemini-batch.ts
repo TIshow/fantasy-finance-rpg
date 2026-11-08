@@ -548,7 +548,12 @@ export class GeminiBatchClient {
    * create を呼ぶ直前に呼び出し側が自分の時計で取った時刻を使う（gemini-pricing.ts の geminiBatchPrice）。
    */
   async create(model: LlmModel, displayName: string, items: readonly GeminiBatchRequestItem[]): Promise<GeminiCreateResult> {
-    const body = geminiBatchBody(model, displayName, items);
+    return this.createBody(model, displayName, geminiBatchBody(model, displayName, items));
+  }
+
+  /** geminiBatchBody(model, displayName, …) で作った本文を、加工せずに送ってバッチを作る（契約：記録のハッシュと送った本文を一致させる） */
+  async createBody(model: LlmModel, displayName: string, body: string): Promise<GeminiCreateResult> {
+    if (!isObj(model) || !isStr(model.modelId) || !MODEL_ID.test(model.modelId) || typeof body !== "string" || body === "") throw new RangeError("model and body are required");
     const sent: SentBody = { body, sha256: await sha256Hex(new TextEncoder().encode(body)) };
     // 応答のモデルと名前が送ったものと違えば、何かが作られたが頼んだものか分からないので、形が合わない（billingUnknown）とする
     const r = await this.#call("POST", `/${GEMINI_API_VERSION}/models/${model.modelId}:batchGenerateContent`, body, (json) => {
