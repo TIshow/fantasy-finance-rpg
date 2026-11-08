@@ -6,7 +6,9 @@ import { sha256Hex } from "../../src/events/hash";
 import { llmTokenCost } from "../../src/events/llm-cost";
 import { AnthropicBatchClient } from "../../src/llm/anthropic-batch";
 import { anthropicBatchPort, anthropicReservePrice } from "../../src/llm/anthropic-port";
+import { BATCH_SEND_TIMEOUT_MS } from "../../src/llm/batch-port";
 import { batchCostDeciyen } from "../../src/llm/cost";
+import { hangingFetch, settledAt } from "./send-timeout";
 
 const recorded = (name: string) => readFileSync(new URL(`./recorded/${name}`, import.meta.url), "utf8");
 const KEY = "sk-ant-test-not-a-real-key";
@@ -90,6 +92,17 @@ describe("Anthropic のバッチの口", () => {
     expect(await make(fakeFetch(() => new Response("{}", { status: 400 })).f).send(p, 7)).toEqual({ ok: false, errorCode: "provider_error", notCreated: true });
   });
 
+  it("作成の待ち時間は送る時間の上限（10分）より短く、返らなければ通信を中断して billingUnknown（裏で送り続けない）", async () => {
+    const p = await make(fakeFetch(() => new Response("{}")).f).prepare(req());
+    const { f, state } = hangingFetch();
+    let r: unknown;
+    const at = await settledAt(async () => (r = await make(f).send(p, 7)), BATCH_SEND_TIMEOUT_MS);
+    expect(at).not.toBeNull();
+    expect(at!).toBeLessThan(BATCH_SEND_TIMEOUT_MS);
+    expect(state).toEqual({ calls: 1, aborted: 1 });
+    expect(r).toEqual({ ok: false, errorCode: "timeout", billingUnknown: true });
+  });
+
   it("探す：名前も中身も確かめられないので、いつも not_found（提供元に問い合わせない）", async () => {
     const { f, seen } = fakeFetch(() => new Response("{}"));
     const hash = "c".repeat(64);
@@ -114,6 +127,10 @@ describe("Anthropic のバッチの口", () => {
       expect(r).toEqual({ status: "closed", result: "collected", output: '{"post":null,"orders":[]}', respondedModel: "claude-sonnet-5-5", usage: { inputTokens: 20_000, outputTokens: 1500, cost: 44 }, price: PRICE, finishedAt: AT + 5000 });
       expect(llmTokenCost(usage, { ...PRICE, yenPerUsd: 160 })).toBe(batchCostDeciyen(usage, { inputCentsPerMTok: 100, outputCentsPerMTok: 500 }, 160));
       expect(await make(ended(results("run-a").replace('"end_turn"', '"max_tokens"')).f).collect(ticket)).toMatchObject({ result: "collected", truncated: true });
+      // キャッシュへの書き込みがあれば、入力の倍率1の予約で見込めないので、予約した費用（答えとトークン数はそのまま）
+      const cached = await make(ended(results("run-a").replace('"cache_creation_input_tokens":null', '"cache_creation_input_tokens":3000')).f).collect(ticket);
+      expect(cached).toMatchObject({ result: "collected", usage: { cacheCreationInputTokens: 3000, cost: 200 }, costUnknown: true });
+      expect(cached).not.toHaveProperty("price");
     });
 
     it("errored・expired は資料では課金されないが、送ったバッチなので予約した費用（costUnknown）。結果にないときも同じ", async () => {

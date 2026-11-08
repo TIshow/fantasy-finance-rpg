@@ -56,11 +56,11 @@ const isCount = (v: unknown): v is number => typeof v === "number" && Number.isS
 export type SendResult = LlmSendResult;
 
 /**
- * 終わったバッチの1件の結果。truncated：出力の上限で切れた。
+ * 終わったバッチの1件の結果。truncated：出力の上限で切れた。succeeded の costUnknown：答えはあるが、費用を予約で見込めない（予約した費用で閉じる）。
  * costUnknown：答えがない（失敗・期限切れ・取り消し）。送ったバッチは、課金されないと資料にあっても費用0で閉じられないので、すべてこれ（費用 maxCost）
  */
 export type BatchOutcome =
-  | { kind: "succeeded"; output: string; respondedModel: string; usage: TokenUsage; truncated: boolean }
+  | { kind: "succeeded"; output: string; respondedModel: string; usage: TokenUsage; truncated: boolean; costUnknown?: true }
   | { kind: "costUnknown"; result: "expired" | "failed"; errorCode: BatchErrorCode };
 
 /** find の問い。作成時刻が from〜to の、名前が customId のバッチを探す */
@@ -121,6 +121,7 @@ export class BatchPort implements LlmBatchPort {
   readonly #clock: Clock;
   readonly #yen: number;
   readonly #sendTimeoutMs: number;
+  readonly #sent = new Set<number>();
 
   constructor(driver: BatchDriver, options: BatchPortOptions) {
     const { policy } = options;
@@ -149,8 +150,16 @@ export class BatchPort implements LlmBatchPort {
   async send(p: LlmPreparedBatch, batchSeq: number): Promise<LlmSendResult> {
     if (!isObj(p) || !isStr(p.body) || !isCount(batchSeq)) throw new RangeError("prepared and batchSeq are required");
     this.#check(p.request, false);
-    const hash = await sha256Hex(new TextEncoder().encode(p.body));
-    if (p.sentBodyHash !== hash || p.customId !== batchCustomIdOf(batchItemIdOf(p.request.agentId, p.request.tradingDate), hash)) throw new RangeError("the prepared body does not match its hash or customId");
+    // 手で組んだ値で、大きすぎる本文や別の出力の上限を送らないよう、依頼から本文を作り直して比べる
+    const r = p.request;
+    const itemId = batchItemIdOf(r.agentId, r.tradingDate);
+    const bytes = new TextEncoder().encode(p.body);
+    if (this.#driver.body(r, itemId) !== p.body || r.maxInputTokens < bytes.length * (this.#driver.inputCostFactor ?? 1) || p.bodyMaxOutputTokens !== this.#driver.maxOutputTokens) throw new RangeError("the prepared body does not match the request");
+    const hash = await sha256Hex(bytes);
+    if (p.sentBodyHash !== hash || p.customId !== batchCustomIdOf(itemId, hash)) throw new RangeError("the prepared body does not match its hash or customId");
+    // 同じ予約（①）で2回送らない（この口の中で覚える）
+    if (this.#sent.has(batchSeq)) throw new RangeError("this reservation has already been sent");
+    this.#sent.add(batchSeq);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<LlmSendResult>((resolve) => {
       timer = setTimeout(() => resolve({ ok: false, errorCode: "timeout", billingUnknown: true }), this.#sendTimeoutMs);
@@ -254,10 +263,12 @@ export class BatchPort implements LlmBatchPort {
       ...(u.cacheCreationInputTokens > 0 ? { cacheCreationInputTokens: u.cacheCreationInputTokens } : {}),
       ...(u.cacheReadInputTokens > 0 ? { cacheReadInputTokens: u.cacheReadInputTokens } : {}),
     };
-    const cost = llmTokenCost(tokens, { yenPerUsd: this.#yen, ...price });
+    const cost = o.costUnknown ? t.maxCost : llmTokenCost(tokens, { yenPerUsd: this.#yen, ...price });
     if (cost === null) return unknown("failed", "provider_error");
     const usage = { ...tokens, cost };
-    if (abandoned) return { status: "closed", result: "expired", errorCode: "timeout", usage, price, finishedAt };
-    return { status: "closed", result: "collected", output: o.output, respondedModel: o.respondedModel, usage, price, finishedAt, ...(o.truncated ? { truncated: true as const } : {}) };
+    // 費用を予約で見込めない答え（キャッシュへの書き込みなど）は、トークン数はそのまま、費用は予約した費用（料金は付けない）
+    const charge = o.costUnknown ? { costUnknown: true as const } : { price };
+    if (abandoned) return { status: "closed", result: "expired", errorCode: "timeout", usage, ...charge, finishedAt };
+    return { status: "closed", result: "collected", output: o.output, respondedModel: o.respondedModel, usage, ...charge, finishedAt, ...(o.truncated ? { truncated: true as const } : {}) };
   }
 }

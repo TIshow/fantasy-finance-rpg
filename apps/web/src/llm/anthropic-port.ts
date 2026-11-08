@@ -39,7 +39,11 @@ export function anthropicBatchDriver(client: Client): BatchDriver {
       const res = await client.results(t.batchId);
       if (!res.ok) return "pending";
       const it = reconcileResults([itemId], res.value).matched.get(itemId);
-      if (it !== undefined && it.type === "succeeded") return { kind: "succeeded", output: it.output, respondedModel: it.respondedModel, usage: it.usage, truncated: it.stopReason === "max_tokens" };
+      if (it !== undefined && it.type === "succeeded") {
+        // 入力の倍率1は、キャッシュへの書き込み（入力の2倍）が起きない前提（cache_control を送らない）。起きていたら予約で見込めないので、予約した費用で閉じる
+        const unknown = it.usage.cacheCreationInputTokens > 0 ? { costUnknown: true as const } : {};
+        return { kind: "succeeded", output: it.output, respondedModel: it.respondedModel, usage: it.usage, truncated: it.stopReason === "max_tokens", ...unknown };
+      }
       // errored・canceled・expired は資料では課金されない（https://platform.claude.com/docs/en/build-with-claude/batch-processing 。2026-11-07 確認）が、
       // 送ったバッチは答えを受け取らなければ費用0で閉じられない（契約）ので、予約した費用で数える。結果がない・形が合わないときも同じ
       if (it?.type === "expired") return { kind: "costUnknown", result: "expired", errorCode: "timeout" };
