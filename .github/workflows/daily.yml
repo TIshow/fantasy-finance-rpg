@@ -5,12 +5,12 @@ name: daily
 # 手で動かす口（workflow_dispatch）は、変数に関係なく動く。
 on:
   schedule:
-    # 日本時間の月〜金。cron は UTC で書く。毎時ちょうどは混むので避ける。
+    # 毎日（架空の市場は休日なし。D-047）。cron は UTC で書く。毎時ちょうどは混むので避ける。
     # 下の照合の条件は、16:35 の行の文字列と同じであることに頼る（変えるときは両方を変える）
-    - cron: "50 21 * * 0-4" # 06:50 判断
-    - cron: "20 22 * * 0-4" # 07:20 判断のやり直し（1回目が済んでいれば何も書かない）
-    - cron: "35 0 * * 1-5" # 09:35 板寄せ・約定・その日の評価と引け後の処理
-    - cron: "35 7 * * 1-5" # 16:35 残りの補い（ふだんは何も書かない）と照合
+    - cron: "50 21 * * *" # 06:50 判断
+    - cron: "20 22 * * *" # 07:20 判断のやり直し（1回目が済んでいれば何も書かない）
+    - cron: "35 0 * * *" # 09:35 板寄せ・約定・その日の評価と引け後の処理
+    - cron: "35 7 * * *" # 16:35 残りの補い（ふだんは何も書かない）と照合
   workflow_dispatch:
     inputs:
       date:
@@ -82,7 +82,7 @@ jobs:
       # 引けのあとの回と、手で動かして照合を選んだときに、記録だけから台帳を作り直して照合する。
       # 締めに間に合わなかった（終了コード3）ときも照合する
       - name: daily verify
-        if: ${{ !cancelled() && steps.daily.outputs.code != '' && steps.daily.outputs.code != '2' && (github.event.schedule == '35 7 * * 1-5' || (github.event_name == 'workflow_dispatch' && inputs.verify)) }}
+        if: ${{ !cancelled() && steps.daily.outputs.code != '' && steps.daily.outputs.code != '2' && (github.event.schedule == '35 7 * * *' || (github.event_name == 'workflow_dispatch' && inputs.verify)) }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npm run --silent daily -- verify | tee "$RUNNER_TEMP/verify.json"
