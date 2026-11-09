@@ -6,7 +6,8 @@ import { missedCutoff } from "../../scripts/daily-lib";
 import { replay } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
 import { cutoffOf, decisionOpensAt, marketClosedDays } from "../../src/ledger/ledger";
-import type { StageResult } from "../../src/runner/day";
+import { INVESTOR_PROMPT_VERSION, PAST_INVESTOR_PROMPTS } from "../../src/llm/investor-prompt";
+import { type StageResult, runDay } from "../../src/runner/day";
 import { jst } from "../contracts/fakes";
 import { answer } from "./llm-fakes";
 import { DAYS, LLM_IDS, llmWorld, p } from "./llm-world";
@@ -130,8 +131,8 @@ describe("土日をまたぐ1週間（毎日の実行の時刻どおり）", asy
     expect(of("order_sheet.rejected")).toEqual([]);
     for (const d of days) {
       const sheets = of("order_sheet.committed").filter((e) => p(e).tradingDate === d);
-      // 11/9 の LLM の AI は、依頼（前の取引日の 16:35）がないので注文しない
-      expect(sheets, d).toHaveLength(d === D0 ? 10 : 13);
+      // 11/9 の LLM の依頼は、前の取引日（11/6）の夜の実行がないので、11/9 の 04:50 の実行が出す
+      expect(sheets, d).toHaveLength(13);
       for (const s of sheets) expect(s.recordedAt).toBeLessThan(cutoffOf(d));
       if (d !== D0) for (const s of sheets) expect(s.recordedAt).toBeGreaterThanOrEqual(decisionOpensAt(d, marketClosedDays(new Set())));
       expect(of("auction.cleared").filter((e) => p(e).date === d), d).toHaveLength(6);
@@ -141,6 +142,7 @@ describe("土日をまたぐ1週間（毎日の実行の時刻どおり）", asy
 
   it("LLM の依頼は、毎日の 16:35 に、次の暦日の取引日の分（金曜の夜は土曜の分）", () => {
     const subs = of("llm.batch.submitted");
+    expect(subs.filter((e) => p(e).tradingDate === D0).map((e) => e.recordedAt)).toEqual(LLM_IDS.map(() => jst(D0, 4, 50)));
     for (const [i, d] of days.slice(0, -1).entries()) {
       const mine = subs.filter((e) => p(e).tradingDate === days[i + 1]);
       expect(mine.map((e) => p(e).agentId).sort(), d).toEqual([...LLM_IDS].sort());
@@ -151,5 +153,119 @@ describe("土日をまたぐ1週間（毎日の実行の時刻どおり）", asy
   it("記録だけから作り直した台帳と一致する", async () => {
     const ledger = await replay(events, w.values, { holidayTables: w.holidayTables });
     for (const id of LLM_IDS) expect(ledger.account(id)).toEqual(w.store.account(id));
+  });
+});
+
+describe("前の日の夜の実行がすべて抜けたとき（日付が変わってから最初の実行）", () => {
+  for (const [label, h, m] of [["04:50 の実行", 4, 50], ["00:10 まで遅れた 23:50 の実行", 0, 10]] as const) {
+    it(`${label}が、その日の分の LLM の依頼を出し、規則の AI の判断と LLM の受け取りまで進める。あとの実行は何も書かない`, async () => {
+      const w = await nightWorld();
+      await w.runAt(D0, 6, 50);
+      await w.runAt(D0, 9, 35);
+      answerAll(w);
+      const r = await w.runAt(D1, h, m);
+      const stages = r.map((x) => `${x.stage}:${x.status}`);
+      // 引け後の処理（9:35 に済み）→ 依頼 → 規則の AI の判断 → 受け取り の順
+      expect(stages.indexOf("llm.submit:written")).toBeGreaterThan(-1);
+      expect(stages.indexOf("llm.submit:written")).toBeLessThan(stages.indexOf("decide:written"));
+      expect(stages.indexOf("decide:written")).toBeLessThan(stages.indexOf("llm.collect:written"));
+      const subs = (await w.of("llm.batch.submitted")).filter((e) => p(e).tradingDate === D1);
+      expect(subs.map((e) => p(e).agentId).sort()).toEqual([...LLM_IDS].sort());
+      for (const e of subs) expect(e.recordedAt).toBe(jst(D1, h, m));
+      expect(await sheetsOf(w, D1)).toHaveLength(13);
+      const before = (await w.all()).length;
+      for (const [hh, mm] of [[6, 50], [7, 20]] as const) expect((await w.runAt(D1, hh, mm)).filter((x) => x.status === "written")).toEqual([]);
+      expect(await w.all()).toHaveLength(before);
+      await replay(await w.all(), w.values, { holidayTables: w.holidayTables });
+    });
+  }
+});
+
+describe("臨時休場の日（market.closed）をはさむ夜の実行", () => {
+  it("休場の日の実行は「取引日でない」を返し、続けて次の取引日の判断と LLM の依頼をする", async () => {
+    const w = await nightWorld();
+    const D2 = DAYS[2]!;
+    const D3 = DAYS[3]!;
+    for (const [h, m] of [[6, 50], [9, 35]] as const) await w.runAt(D0, h, m);
+    // D0 の夜の実行が抜け、D1 の朝に D1 の判断をして、板寄せと引け後の処理を済ませる
+    for (const [h, m] of [[6, 50], [9, 35]] as const) await w.runAt(D1, h, m);
+    // D1 の日中に、D2 を臨時休場にする。D1 の夜の実行も抜ける
+    expect(await w.store.append({ type: "market.closed", actor: "operator:owner", refs: [], payload: { date: D2, reason: "試験" } })).toMatchObject({ ok: true });
+    answerAll(w);
+    const r = await w.runAt(D2, 7, 0);
+    expect(r[0]).toEqual({ stage: "day", status: "skipped", detail: "not a trading day" });
+    expect(r.find((x) => x.stage === "llm.submit")).toMatchObject({ status: "written" });
+    expect(nextOf(r, "decide")).toMatchObject({ status: "written", date: D3 });
+    const sheets = await sheetsOf(w, D3);
+    expect(sheets).toHaveLength(13);
+    for (const s of sheets) expect(s.recordedAt).toBe(jst(D2, 7));
+    expect((await w.of("llm.batch.submitted")).filter((e) => p(e).tradingDate === D2)).toEqual([]);
+    expect(await sheetsOf(w, D2)).toEqual([]);
+    await replay(await w.all(), w.values, { holidayTables: w.holidayTables });
+  });
+});
+
+describe("夜の判断と朝の判断の入力", () => {
+  it("同じ取引日を、前の日の夜に判断しても、朝に判断しても、記録の入力（inputSeqs）は同じ", async () => {
+    const inputsOf = async (night: boolean) => {
+      const w = await nightWorld();
+      for (const [h, m] of [[6, 50], [9, 35]] as const) await w.runAt(D0, h, m);
+      // 朝に判断する側は、16:35 の実行で次の取引日の判断をしない（その日の依頼までは同じ）
+      w.deps.decideNext = night;
+      await w.runAt(D0, 16, 35);
+      w.deps.decideNext = true;
+      if (!night) await w.runAt(D1, 6, 50);
+      const events = await w.all();
+      const sheets = events.filter((e) => e.type === "order_sheet.committed" && p(e).tradingDate === D1);
+      expect(sheets).toHaveLength(10);
+      return Object.fromEntries(sheets.map((s) => [p(s).agentId as string, { sheet: p(s).inputSeqs, run: p(events[(p(s).runSeq as number) - 1]!).inputSeqs }]));
+    };
+    const night = await inputsOf(true);
+    const morning = await inputsOf(false);
+    expect(Object.keys(night).sort()).toEqual(Object.keys(morning).sort());
+    expect(night).toEqual(morning);
+  });
+});
+
+describe("判断の受け付けの始まりより前", () => {
+  it("前の取引日の引けより前に判断の段を動かしても、書かずに待つ（保管に拒否を残さない）", async () => {
+    const w = await nightWorld();
+    const D2 = DAYS[2]!;
+    for (const [h, m] of [[6, 50], [9, 35], [16, 35]] as const) await w.runAt(D0, h, m);
+    // D2 の受け付けは D1 の 16:30 から。D1 の 8:00（D1 の締めの前で、D1 の板寄せはまだ）に D2 の日付で回す
+    w.clock.set(jst(D1, 8));
+    const before = (await w.all()).length;
+    const r = await runDay(D2, w.deps);
+    expect(r.find((x) => x.stage === "decide")).toEqual({ stage: "decide", status: "waiting", detail: `before the decision window of ${D2}` });
+    expect(await w.all()).toHaveLength(before);
+    expect(await w.of("order_sheet.rejected")).toEqual([]);
+  });
+});
+
+describe("前の版のプロンプトで出した依頼を、今の版で受け取る", () => {
+  it("判断なしの失敗を残し、記録のプロンプトは依頼の版（2）のもの。段の詳細に版の違いが出る", async () => {
+    const w = await nightWorld();
+    for (const [h, m] of [[6, 50], [9, 35]] as const) await w.runAt(D0, h, m);
+    // 依頼だけを版 2 で作る（作り直しには clock つきの口を使うので、そちらは今の版のまま）
+    const llm = w.deps.llm!;
+    const portOf = llm.portOf;
+    llm.portOf = (provider, c) => {
+      const port = portOf(provider, c);
+      if (c) return port;
+      const prepare: typeof port.prepare = (r) => port.prepare({ ...r, prompt: PAST_INVESTOR_PROMPTS["2"]! });
+      return new Proxy(port, { get: (t, k) => (k === "prepare" ? prepare : typeof Reflect.get(t, k) === "function" ? Reflect.get(t, k).bind(t) : Reflect.get(t, k)) });
+    };
+    await w.runAt(D0, 16, 35);
+    llm.portOf = portOf;
+    expect((await w.of("llm.batch.submitted")).filter((e) => p(e).tradingDate === D1).map((e) => p(e).promptVersion)).toEqual(LLM_IDS.map(() => "2"));
+    answerAll(w);
+    const r = await w.runAt(D0, 17, 50);
+    expect(nextOf(r, "llm.collect")!.detail).toContain(`prompt version 2 was replaced by ${INVESTOR_PROMPT_VERSION}`);
+    const runs = (await w.of("agent.run")).filter((e) => LLM_IDS.includes(p(e).agentId as string) && e.recordedAt === jst(D0, 17, 50));
+    expect(runs.map((e) => [p(e).ok, p(e).errorCode, p(e).prompt])).toEqual(LLM_IDS.map(() => [false, "provider_error", PAST_INVESTOR_PROMPTS["2"]]));
+    expect((await sheetsOf(w, D1)).filter((s) => LLM_IDS.includes(p(s).agentId as string))).toEqual([]);
+    const before = (await w.all()).length;
+    await w.runAt(D0, 23, 50);
+    expect(await w.all()).toHaveLength(before);
   });
 });
