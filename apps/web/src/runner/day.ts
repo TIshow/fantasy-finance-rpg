@@ -1,5 +1,6 @@
 // 1日の流れ（#27 PR-1）。取引日 T について、前の日の残り（始値の約定・引け後）→ 判断（締めより前）→ 寄り付きの約定
-// → 引け後の処理と評価、の順に行う。書くのは保管（EventStore）だけ。約定・評価・引け後の中身は、runner が持つ台帳
+// → 引け後の処理と評価、の順に行う。T の引けのあとに回したときは、続けて次の取引日の判断（と LLM の受け取り）も進める
+// （判断の受け付けは、前の取引日の引けのあとから。#228）。取引日は架空の市場の暦（D-047。2026-11-09 から毎日）。書くのは保管（EventStore）だけ。約定・評価・引け後の中身は、runner が持つ台帳
 // （Ledger.compute*）で作る。どの段も、ログを見て済んでいる分は飛ばし、欠けている分だけを書くので、同じ日をもう一度
 // 回しても二重にならず、途中で落ちても回し直せば続きから進む。外部通信・DB なし。LLM は渡された口（deps.llm）だけを使う。
 // 前提：保管に書くのは、1つの runner だけ（runDay の途中に別の書き手が追記すると、写しと合わずに例外になる）。
@@ -10,7 +11,7 @@ import { sha256Hex } from "../events/hash";
 import { Ledger } from "../events/replay";
 import type { LogEvent } from "../events/types";
 import type { HolidayTable } from "../holidays/table";
-import { cutoffOf, isBusinessDay, nextBusinessDay, previousBusinessDay } from "../ledger/ledger";
+import { cutoffOf, decisionOpensAt, isTradingDay, nextTradingDay, previousTradingDay } from "../ledger/ledger";
 import type { Account, Deciyen, Order } from "../ledger/types";
 import type { ValuesPort } from "../store/pg-values";
 import { type SplitInput, adjustCloses } from "./adjust";
@@ -93,42 +94,96 @@ export interface RunnerDeps {
    */
   seed?: number;
   /**
-   * LLM の AI 投資家（#179）。渡せば、引けのあとにその次の営業日の分を各社のバッチに依頼し（llmSubmit）、
-   * 取引日の朝に答えを受け取って投稿と注文票を書く（llmCollect。規則の AI の判断のあと、寄り付きの前）。渡さなければ LLM を呼ばない
+   * LLM の AI 投資家（#179）。渡せば、引けのあとにその次の取引日の分を各社のバッチに依頼し（llmSubmit）、
+   * 答えが返ったら、取引日の締めまでのどの実行でも受け取って投稿と注文票を書く（llmCollect。規則の AI の判断のあと）。
+   * 渡さなければ LLM を呼ばない
    */
   llm?: LlmDeps;
+  /**
+   * true なら、次の取引日の判断を受け付ける時間（date の引けのあとから、次の取引日の締めの前まで）に始めた実行で、
+   * date の段のあとに、次の取引日の判断と LLM の受け取りも進める（夜の実行。#228）。毎日の実行（runDaily）は true にする。
+   * 渡さなければ、date の段だけ（次の取引日の判断は、その日の runDay が受け付けの始まりから行う）
+   */
+  decideNext?: boolean;
 }
 
 const HOUR = 3_600_000;
-/** 判断（締め 8:30 の 1時間半前）・寄り付きの取り込み（9:30）・引けの取り込み（16:30）。日本時間 */
-export const scheduleOf = (date: string) => ({ decideAt: cutoffOf(date) - 1.5 * HOUR, openAt: cutoffOf(date) + HOUR, closeAt: cutoffOf(date) + 8 * HOUR });
+/**
+ * 寄り付きの取り込み（9:30）・引けの取り込み（16:30）。日本時間。closed（架空の市場の休み。EventLog.holidays()）を渡せば、
+ * 判断の受け付けの始まり（decideAt：前の取引日の引けの 16:30。decisionOpensAt。#228）も返す
+ */
+export function scheduleOf(date: string): { openAt: number; closeAt: number };
+export function scheduleOf(date: string, closed: ReadonlySet<string>): { decideAt: number; openAt: number; closeAt: number };
+export function scheduleOf(date: string, closed?: ReadonlySet<string>) {
+  const at = { openAt: cutoffOf(date) + HOUR, closeAt: cutoffOf(date) + 8 * HOUR };
+  return closed ? { decideAt: decisionOpensAt(date, closed), ...at } : at;
+}
 
-/** 段ごとの結果：書いた・済んでいた・待つ（データがまだない、など）・飛ばした（締めの後など）。待った段は、回し直せば進む */
-export type StageResult = { stage: string; status: "written" | "done" | "waiting" | "skipped"; detail?: string };
+/**
+ * 段ごとの結果：書いた・済んでいた・待つ（データがまだない、など）・飛ばした（締めの後など）。待った段は、回し直せば進む。
+ * date は、次の取引日の段（引けのあとに続けて進めた判断と受け取り）にだけ付ける
+ */
+export type StageResult = { stage: string; status: "written" | "done" | "waiting" | "skipped"; detail?: string; date?: string };
 
+/**
+ * date（取引日）の分を、済んでいない段から進める。deps.decideNext が true で、次の取引日の判断を受け付ける時間
+ * （date の引けのあとから、次の取引日の締めの前まで）に始めた実行なら、続けて次の取引日の判断と LLM の受け取りも進める
+ * （夜の実行で、翌朝を待たずに判断する。#228）。date が取引日でない（臨時休場）ときも、次の取引日の判断は進める。
+ * 引けより前に始めて引けまで待った実行（--wait）は、次の取引日の判断を、次の取引日の runDay に任せる
+ * （その runDay は、受け付けの始まり（decideAt）がもう来ているので、待たずに判断する）
+ */
 export async function runDay(date: string, deps: RunnerDeps): Promise<StageResult[]> {
+  const startedAt = deps.clock.now();
   const day = await Day.load(deps);
-  if (!isBusinessDay(date, day.log.holidays())) return [{ stage: "day", status: "skipped", detail: "not a business day" }];
-  const prev = previousBusinessDay(date, day.log.holidays());
-  const s = scheduleOf(date);
   const out: StageResult[] = [];
   const disclose = async () => {
     if (deps.seed === undefined) return;
     const written = await day.disclose(deps.seed);
     if (written.length > 0) out.push({ stage: "disclose", status: "written", detail: written.join(",") });
   };
-  await deps.waitUntil(s.decideAt);
-  out.push(...(await day.catchUp(prev)));
-  // 前の日の板寄せをここで補ったなら、その日の引けのあとに来た発表も、判断の前に書く（判断が、締めより前の発表を見るように）
-  await disclose();
-  out.push(await day.decide(date, prev));
-  if (deps.llm) out.push(await llmStage("llm.collect", () => llmCollect(day.access(!deps.llm!.policy.dryRun), deps.llm!, date)));
-  await deps.waitUntil(s.openAt);
-  out.push(await day.open(date));
-  await deps.waitUntil(s.closeAt);
-  out.push(...(await day.catchUp(date)));
-  await disclose();
-  if (deps.llm) out.push(await llmStage("llm.submit", () => llmSubmit(day.access(), deps.llm!, date)));
+  const collect = async (d: string) => (deps.llm ? [await llmStage("llm.collect", () => llmCollect(day.access(!deps.llm!.policy.dryRun), deps.llm!, d))] : []);
+  if (!isTradingDay(date, day.log.holidays())) out.push({ stage: "day", status: "skipped", detail: "not a trading day" });
+  else {
+    const prev = previousTradingDay(date, day.log.holidays());
+    const s = scheduleOf(date, day.log.holidays());
+    await deps.waitUntil(s.decideAt);
+    const decideStage = async () => {
+      out.push(...(await day.catchUp(prev)));
+      // 前の日の板寄せをここで補ったなら、その日の引けのあとに来た発表も、判断の前に書く（判断が、締めより前の発表を見るように）
+      await disclose();
+      const r = [await day.decide(date, prev), ...(await collect(date))];
+      out.push(...r);
+      return r.some((x) => x.status === "waiting");
+    };
+    // 待つ段があれば、朝（締めの1時間半前）にもう一度試す。実際に待つ実行（--wait・試験）だけ。待たない実行（GitHub Actions）は、
+    // 時計が進まないので試し直さず、あとの実行（04:50・06:50・07:20）が進める
+    if (await decideStage()) {
+      const morning = cutoffOf(date) - 1.5 * HOUR;
+      if (deps.clock.now() < morning) {
+        await deps.waitUntil(morning);
+        if (deps.clock.now() >= morning) await decideStage();
+      }
+    }
+    await deps.waitUntil(s.openAt);
+    out.push(await day.open(date));
+    await deps.waitUntil(s.closeAt);
+    out.push(...(await day.catchUp(date)));
+    await disclose();
+    if (deps.llm) out.push(await llmStage("llm.submit", () => llmSubmit(day.access(), deps.llm!, date)));
+  }
+  // 次の取引日の判断：受け付けの時間の中で、まだ締めの前のときだけ（手で古い日を回したときに、締めを過ぎた日を「間に合わなかった」と書かない）
+  const next = nextTradingDay(date, day.log.holidays());
+  const now = deps.clock.now();
+  if (deps.decideNext === true && startedAt >= decisionOpensAt(next, day.log.holidays()) && now < cutoffOf(next)) {
+    const prevOfNext = previousTradingDay(next, day.log.holidays());
+    // 朝の実行と同じ順：前の日の残りを補い、時期が来た決算を書いてから判断する（発表は板寄せの日の 15:30 のあとなので、
+    // 引けのあとに書いた分で、次の締めまでに来る発表はすべて）
+    const tagged = (r: StageResult): StageResult => ({ ...r, date: next });
+    out.push(...(await day.catchUp(prevOfNext)));
+    await disclose();
+    out.push(tagged(await day.decide(next, prevOfNext)));
+    out.push(...(await collect(next)).map(tagged));
+  }
   return out;
 }
 
@@ -356,7 +411,8 @@ class Day {
   }
 
   /**
-   * 締めより前に、AIごとに入力を固定して agent.run を書き、投稿と注文票の確定を行う。
+   * 判断の受け付けの時間（前の取引日の引けのあとから、date の締めの前まで）に、AIごとに入力を固定して agent.run を書き、
+   * 投稿と注文票の確定を行う。受け付けの始まりより前なら待つ（保管が注文票を断るので、書く前に止める）。
    * 判断（出力）は、正規化した JSON をログの外に置き、outputHash で引き直せるようにする。run を書いた後に落ちたら、
    * 回し直しでは判断をやり直さず、記録した run の出力と入力から、欠けた投稿・注文票だけを補う。
    * 停止中のAIは、投稿を作らない（投稿の停止）・注文票は保管に渡して拒否（suspended）を残す（注文の停止）。
@@ -366,6 +422,7 @@ class Day {
   async decide(date: string, prev: string): Promise<StageResult> {
     const stage = "decide";
     if (this.find("prices.open", (p) => p.date === date)) return { stage, status: "skipped", detail: "after the open" };
+    if (this.deps.clock.now() < decisionOpensAt(date, this.log.holidays())) return { stage, status: "waiting", detail: `before the decision window of ${date}` };
     if (!this.pricesDone(prev)) return { stage, status: "waiting", detail: this.listedOnly() ? `auctions of ${prev} not done` : `no close of ${prev}` };
     // 取引対象がすべて上場した銘柄なら、終値は入力に入れない（切り替えの前の古い終値に、取引対象の外の銘柄が残るため）
     const closes = this.listedOnly() ? [] : this.log.events.filter((e) => e.type === "prices.close").slice(-(this.deps.inputDays ?? 20));
@@ -426,7 +483,7 @@ class Day {
         const first = closes[0] ? (pl(closes[0]).date as string) : date;
         // 権利落ち日が休場になった公表は、どの引け後の処理にも渡らない（§6.2 で運営者が決める）ので、列も調整しない
         const H = this.log.holidays();
-        const inRange = (exDate: string) => first < exDate && exDate <= date && isBusinessDay(exDate, H);
+        const inRange = (exDate: string) => first < exDate && exDate <= date && isTradingDay(exDate, H);
         const splits = this.log.events.filter((e) => e.type === "corporate_action.announced" && pl(e).kind === "split" && inRange(pl(e).exDate as string)).map((e) => {
           const v = this.deps.values.get(pl(e).valuesHash as string)!.value as { from: number; to: number };
           return { seq: e.seq, symbol: pl(e).symbol as string, exDate: pl(e).exDate as string, from: v.from, to: v.to };
@@ -507,7 +564,7 @@ class Day {
   async catchUp(upTo: string): Promise<StageResult[]> {
     const H = this.log.holidays();
     const days: string[] = [];
-    for (let d = upTo; ; d = previousBusinessDay(d, H)) {
+    for (let d = upTo; ; d = previousTradingDay(d, H)) {
       const agents = this.agentsOn(d);
       const done = this.pricesDone(d) && agents.every((id) => this.find("corporate_actions.applied", (p) => p.agentId === id && p.asOf === d && p.closedSeq === undefined));
       if (done) break;
@@ -532,9 +589,9 @@ class Day {
     if (this.deps.clock.now() < cutoffOf(date)) return { stage: "open", status: "waiting", detail: "before the cutoff" };
     const listed = this.listings();
     const sheets = this.log.events.filter((e) => e.type === "order_sheet.committed" && pl(e).tradingDate === date);
-    // 板寄せの日付は戻せない（後の日を先に書くと、前の日をもう書けない）。前の営業日の板寄せがそろうまで待つ
+    // 板寄せの日付は戻せない（後の日を先に書くと、前の日をもう書けない）。前の取引日の板寄せがそろうまで待つ
     // （回し忘れた日があり、追いつきが前の日で止まっているとき）
-    const prev = previousBusinessDay(date, this.log.holidays());
+    const prev = previousTradingDay(date, this.log.holidays());
     const behind = this.universe().filter((x) => listed.has(x) && cutoffOf(prev) > listed.get(x)! && !this.find("auction.cleared", (p) => p.symbol === x && p.date === prev));
     if (behind.length > 0) return { stage: "open", status: "waiting", detail: `auctions of ${prev} not done: ${behind.join(",")}` };
     let wrote = false;
@@ -569,7 +626,7 @@ class Day {
   }
 
   /**
-   * 終値を取り込み、AIごとに評価と引け後の処理。引け後の処理には、権利落ち日が翌営業日の企業行動の公表をすべて
+   * 終値を取り込み、AIごとに評価と引け後の処理。引け後の処理には、権利落ち日が次の取引日の企業行動の公表をすべて
    * （seq の昇順で）渡し、分割・配当を反映する（EVENT_LOG §3.3）。約定待ちの注文票があれば待つ
    */
   async afterClose(date: string): Promise<StageResult> {
@@ -586,9 +643,9 @@ class Day {
       closeSeq = close.seq;
     }
     const auctionSeqs = this.log.events.filter((e) => e.type === "auction.cleared" && pl(e).date === date).map((e) => e.seq);
-    const exDate = nextBusinessDay(date, this.log.holidays());
+    const exDate = nextTradingDay(date, this.log.holidays());
     // 前の日の引け後の処理が済んでいないAIがいれば、この日の評価もできない（順に1日ずつ進む）
-    const prev = previousBusinessDay(date, this.log.holidays());
+    const prev = previousTradingDay(date, this.log.holidays());
     const behind = this.agentsOn(prev).filter((id) => !this.find("corporate_actions.applied", (p) => p.agentId === id && p.asOf === prev));
     if (behind.length > 0) return { stage, status: "waiting", detail: `post-close of ${prev} not done: ${behind.join(",")}` };
     // 公表は、どのAIもこの日の引け後の処理を済ませる前にしか書けない（#67）ので、ここで読んだものがすべて

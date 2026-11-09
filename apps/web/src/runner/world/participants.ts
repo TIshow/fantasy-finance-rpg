@@ -25,7 +25,7 @@ export const NOISE_ID = "noise";
 
 /**
  * 上場した企業ごとのマーケットメイカーと、ばらばらに売買する参加者を登録し、最初の株を配る（shares.allotted）。
- * listCompanies のあと、同じ日（最初の板寄せの締めより前）に呼ぶ。startDate は、いまから締めがまだ来ていない最初の営業日
+ * listCompanies のあと、同じ日（最初の板寄せの締めより前）に呼ぶ。startDate は、いまから締めがまだ来ていない最初の取引日
  * （登録の決まり。違えば保管が断り、例外になる）。済んでいる分は飛ばすので、呼び直せば続きから進む。
  * 配分は、参加者がまだ売買を始めていないときだけ書ける：あとから上場した企業を、売買を始めた参加者には配れない
  */
@@ -60,7 +60,7 @@ const refPrice = (x: ListedInput): Deciyen => x.refPrice.price;
 /** 目安の価格：締めより前に発表済みの決算（直近4四半期）から fairPrice で出す。発表がまだなければ上場の価格 */
 const fairOf = (company: Company, x: ListedInput): Deciyen => (x.disclosures.length > 0 ? fairPrice(company, x.disclosures.map((q, index) => ({ index, ...q }))) : x.listing.price);
 /**
- * その日の値幅と目安の価格。前の営業日（記録された直近の板寄せの結果）に値段がつかなかった銘柄では、目安の価格を値幅の中まで
+ * その日の値幅と目安の価格。前の取引日（記録された直近の板寄せの結果）に値段がつかなかった銘柄では、目安の価格を値幅の中まで
  * 寄せる（dayFair。#139 の lead の決定）。マーケットメイカーとばらばらの参加者は、どちらもこの価格で値幅の端の日を決める
  */
 const targetOf = (company: Company, x: ListedInput) => {
@@ -124,7 +124,7 @@ export async function noiseAgent(seed: number, companies: readonly Company[] = C
     decide(input: DecisionInput) {
       const pulled: string[] = [];
       const markets = input.listed.map((x) => {
-        // 値幅の端の日：その日の目安の価格（発表済みの決算から。前の営業日に値段がつかなければ値幅の中まで寄せたもの）が、
+        // 値幅の端の日：その日の目安の価格（発表済みの決算から。前の取引日に値段がつかなければ値幅の中まで寄せたもの）が、
         // 値幅の外にある銘柄。マーケットメイカーも同じ価格・同じ決め方をする
         const company = companies.find((c) => c.symbol === x.symbol);
         if (!company) return { symbol: x.symbol, prevPrice: refPrice(x), band: priceBand(refPrice(x)) };

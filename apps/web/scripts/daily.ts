@@ -1,5 +1,7 @@
 // 毎日の実行のコマンド（#30）。DATABASE_URL の保管に対して動く。
 //   daily run [--date YYYY-MM-DD] [--wait]   その日の分を、済んでいない段から進める（同じ日を何度回しても二重にならない。同時に2つは動かない）
+//                                            日付の既定は日本時間の今日。その日の引けのあとに始めた実行は、次の取引日の判断と
+//                                            LLM の受け取りも進める（17:50・23:50 の実行は翌日の分を判断する。#228）
 //   daily verify                                         記録だけから台帳を作り直して照合する
 //   daily migrate                                        表を作る（DATABASE_ADMIN_URL。表の持ち主の接続。アプリの接続では流さない）
 //   daily withdraw --seq <n> --reason <理由> [--erase-body] [--operator <名前>]

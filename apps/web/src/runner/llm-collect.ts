@@ -1,4 +1,5 @@
-// LLM の AI 投資家の受け取りと判断の段（翌朝 06:50・07:20 の実行。#179）。
+// LLM の AI 投資家の受け取りと判断の段（#179）。依頼（前の取引日の 16:35）のあと、取引日の締めまでのどの実行でも動く
+// （夜の 17:50・23:50、早朝の 04:50、朝の 06:50・07:20。答えが返っていれば夜のうちに注文票を確定する。#228）。
 // 取引日が date 以前で、まだ片づいていない依頼（①）ごとに：③がなければ提供元で探す → 受け取る（締めを過ぎていれば打ち切る）→
 // 閉じた記録を書く → 出力を読み、判断の記録・投稿・注文票を書く。出力が形に合わない・上限で切れたら agent.run の失敗（invalid_output）を残し、
 // その日は注文しない。回し直しても同じ記録を二重に書かない（失敗の記録は、参照に①か閉じた記録の seq を持たせ、それで見つける）。
@@ -11,7 +12,7 @@ import type { LlmBatchClosed, LlmPrompt } from "../contracts";
 import { canonicalize } from "../events/canonical";
 import { llmReservationOf, llmSentOf, llmTicketOf } from "../events/llm-cost";
 import type { LogEvent } from "../events/types";
-import { cutoffOf, previousBusinessDay } from "../ledger/ledger";
+import { cutoffOf, previousTradingDay } from "../ledger/ledger";
 import type { BatchClosed } from "../llm/batch-port";
 import { investorPrompt, investorUserText } from "../llm/investor-prompt";
 import { type InvestorDecision, parseInvestorOutput } from "../llm/investor-output";
@@ -203,7 +204,7 @@ async function decide(day: DayAccess, llm: LlmDeps, a: LlmInvestor, sub: LogEven
   // 入力を①より前の記録から作り直し、送った本文と同じであることを確かめる
   const before = day.events().filter((e) => e.seq < sub.seq);
   const at = pl(sub).submittedAt as number;
-  const prev = previousBusinessDay(date, day.holidays());
+  const prev = previousTradingDay(date, day.holidays());
   const input = investorInputOf(before, { agentId: a.id, tradingDate: date, prev, submittedAt: at, account: day.account(a.id), body: (h) => bodyText(day.values, h) });
   const { text, inputSeqs } = investorUserText(input);
   const again = await llm.portOf(a.model.provider, { now: () => at }).prepare(investorRequest(a, { prompt, tradingDate: date, submittedAt: at, inputSeqs, userText: text, yenPerUsd: pl(sub).yenPerUsd as number }));

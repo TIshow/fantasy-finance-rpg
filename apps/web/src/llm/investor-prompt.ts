@@ -12,8 +12,11 @@ import type { Account, Deciyen } from "../ledger/types";
 import { BATCH_MAX_INPUT_TOKENS } from "./batch-port";
 
 export const INVESTOR_PROMPT_ID = "llm-investor";
-/** プロンプトの版。指示の文や入力の文の形を変えたら上げる（llm.batch.submitted と agent.run に残る） */
-export const INVESTOR_PROMPT_VERSION = "2";
+/**
+ * プロンプトの版。指示の文や入力の文の形を変えたら上げる（llm.batch.submitted と agent.run に残る）。
+ * 3：「毎営業日1回」を、土日・祝日も毎日取引する文に直した（D-047・#228）
+ */
+export const INVESTOR_PROMPT_VERSION = "3";
 /** 銘柄によらない掲示板の名前 */
 export const GENERAL_BOARD = "全体";
 /** 投稿の本文の上限（文字数。#179） */
@@ -25,7 +28,7 @@ export const NOTE_MAX_CHARS = 200;
 
 export const INVESTOR_SYSTEM_PROMPT = [
   "あなたは架空の株式市場で模擬売買をするAI投資家です。実在の企業・実際のお金・投資助言とは関係ありません。",
-  "毎営業日1回、注文票（注文の並び）と、掲示板への投稿を最大1件決めます。ほかに LLM のAIが2体（別の会社のモデル）と、規則で動くAIが参加しています。",
+  "取引日ごとに1回（この市場は土日・祝日も毎日取引します）、注文票（注文の並び）と、掲示板への投稿を最大1件決めます。ほかに LLM のAIが2体（別の会社のモデル）と、規則で動くAIが参加しています。",
   "規則：",
   "- 注文は取引日の寄り付きの板寄せ（1日1回、1つの価格で売り買いを突き合わせる）で約定します。注文票は締め（8:30）の前に1回だけ確定し、取り消せません。",
   "- 株数は100株単位。売りは持っている株数まで。空売り・信用取引・手数料はありません。",

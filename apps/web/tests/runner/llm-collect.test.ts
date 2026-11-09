@@ -197,18 +197,19 @@ describe("締めでの打ち切り・止まったあとのやり直し・試運�
   });
 });
 
-describe("金曜の夜の依頼を、月曜の朝に受け取る", async () => {
+describe("金曜の夜の依頼は、土曜（架空の市場の取引日）の分", async () => {
   const w = await llmWorld();
   for (const f of Object.values(w.llm.providers)) f.outcome = () => answer(JSON.stringify({ post: null, orders: [] }));
   for (const d of DAYS) await w.run(d);
-  const MON = "2026-11-16";
+  const SAT = "2026-11-14";
 
-  it("金曜（11/13）の引けのあとに、月曜の分を依頼し、月曜の朝に受け取って注文票を確定する", async () => {
-    const subs = (await w.of("llm.batch.submitted")).filter((e) => p(e).tradingDate === MON);
+  it("金曜（11/13）の引けのあとに、次の暦日の土曜（11/14）の分を依頼し、受け取って注文票を確定する（D-047）", async () => {
+    const subs = (await w.of("llm.batch.submitted")).filter((e) => p(e).tradingDate === SAT);
     expect(subs).toHaveLength(3);
+    expect((await w.of("llm.batch.submitted")).some((e) => p(e).tradingDate === "2026-11-16")).toBe(false);
     expect(subs.every((e) => e.recordedAt < jst(DAYS[4]!, 23, 59))).toBe(true);
-    await w.run(MON);
-    const sheets = (await w.of("order_sheet.committed")).filter((e) => p(e).tradingDate === MON && subs.some((s) => p(s).agentId === p(e).agentId));
+    await w.run(SAT);
+    const sheets = (await w.of("order_sheet.committed")).filter((e) => p(e).tradingDate === SAT && subs.some((s) => p(s).agentId === p(e).agentId));
     expect(sheets).toHaveLength(3);
     await replay(await w.all(), w.values, { holidayTables: w.holidayTables });
   });

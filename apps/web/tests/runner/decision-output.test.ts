@@ -112,9 +112,13 @@ describe("判断の出力が記録の形に直せないとき（Postgres の保�
     };
     await runDaily(DAY, { db, clock, waitUntil, holidayTable, prepare });
     const events = await readAllEvents(db);
-    // もう一度回しても、何も書かない
+    // 引けのあとにもう一度回すと、次の取引日（11/10）の判断だけを書く（#228）。その日の分は何も書かない。3回目は何も書かない
     await runDaily(DAY, { db, clock, waitUntil, holidayTable, prepare });
-    expect(await readAllEvents(db)).toHaveLength(events.length);
+    const night = (await readAllEvents(db)).slice(events.length);
+    expect(night.filter((e) => e.type === "order_sheet.committed").map((e) => p(e).tradingDate)).toEqual(Array(10).fill("2026-11-10"));
+    expect(night.every((e) => ["agent.run", "post.published", "order_sheet.committed"].includes(e.type))).toBe(true);
+    await runDaily(DAY, { db, clock, waitUntil, holidayTable, prepare });
+    expect(await readAllEvents(db)).toHaveLength(events.length + night.length);
     expect(badRuns(events)).toEqual([{ ok: false, errorCode: "invalid_output" }]);
     // AI投資家3体・マーケットメイカー6・ばらばらの参加者1
     expect(events.filter((e) => e.type === "order_sheet.committed" && p(e).agentId !== BAD && p(e).tradingDate === DAY)).toHaveLength(10);

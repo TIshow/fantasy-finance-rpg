@@ -1,8 +1,8 @@
 // LLM の AI 投資家に渡す入力の値を、記録から集める（#179）。
 // 使うのは、依頼の予約（llm.batch.submitted）を書く前の記録だけ（events に渡すのは、その前までの記録。念のため、予約の時刻より
-// あとに記録したものも外す）。依頼は前の営業日（prev）の引けのあとに作るので、値段は取引日より前の板寄せ、決算は締めより前に
+// あとに記録したものも外す）。依頼は前の取引日（prev）の引けのあとに作るので、値段は取引日より前の板寄せ、決算は締めより前に
 // 記録した発表、掲示板はそれまでの投稿だけになる。
-// 翌朝の受け取りでは、同じ記録（予約より前）から同じ値を作り直し、送った本文のハッシュと比べる（作り直しても同じであることを確かめる）。
+// 受け取り（その夜か翌朝）では、同じ記録（予約より前）から同じ値を作り直し、送った本文のハッシュと比べる（作り直しても同じであることを確かめる）。
 import type { LogEvent } from "../events/types";
 import { cutoffOf } from "../ledger/ledger";
 import type { Account, Deciyen } from "../ledger/types";
@@ -19,7 +19,7 @@ const pl = (e: LogEvent) => e.payload as Payload;
 export interface InvestorInputContext {
   agentId: string;
   tradingDate: string;
-  /** 取引日の前の営業日（この日の引け後の処理のあとに依頼を作る） */
+  /** 取引日の前の取引日（この日の引け後の処理のあとに依頼を作る） */
   prev: string;
   /** 予約の時刻（UNIXミリ秒）。これよりあとに記録したものは使わない */
   submittedAt: number;

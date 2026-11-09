@@ -9,7 +9,7 @@ import { replay } from "../src/events/replay";
 import type { LogEvent } from "../src/events/types";
 import { holidayTable as bundledHolidays, holidaysFor, type HolidayTable } from "../src/holidays";
 import { IngestedMarketData } from "../src/ingest/market-data";
-import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay } from "../src/ledger/ledger";
+import { isValidDate, marketClosedDays, upcomingTradingDay } from "../src/ledger/ledger";
 import { INITIAL_CASH } from "../src/ledger/types";
 import { anthropicBatchPort } from "../src/llm/anthropic-port";
 import { type BatchPortOptions, YEN_PER_USD } from "../src/llm/batch-port";
@@ -105,11 +105,13 @@ const must = async (what: string, r: Promise<{ ok: boolean; reason?: string }>) 
   if (!x.ok) throw new Error(`${what}: ${x.reason}`);
 };
 
-/** いまから締めがまだ来ていない最初の営業日（新しい参加者の開始日） */
-export function firstOpenDay(now: number, table: HolidayTable): string {
+/**
+ * いまから締めがまだ来ていない最初の取引日（新しい参加者の開始日。架空の市場の暦。D-047）。
+ * closures は記録された臨時休場の日（market.closed）。保管の検査（登録の開始日）と同じ休みの集合で決める
+ */
+export function firstOpenDay(now: number, table: HolidayTable, closures: ReadonlySet<string> = new Set()): string {
   const today = jstDate(now);
-  const days = holidaysFor(today, jstDate(now + 30 * 86_400_000), table);
-  for (let d = today; ; d = nextBusinessDay(d, days)) if (isBusinessDay(d, days) && now < cutoffOf(d)) return d;
+  return upcomingTradingDay(now, marketClosedDays(holidaysFor(today, jstDate(now + 30 * 86_400_000), table), closures));
 }
 
 /**
@@ -124,7 +126,8 @@ export async function productionSetup({ store, clock, seed, holidayTable, llmInv
   await listCompanies(store, seed);
   // 決算の発表：上場の直後の四半期と、前の実行が引けのあとに書けなかった分（時期が来ていて、まだ書いていないもの）
   await discloseDue(store, seed, clock);
-  const startDate = firstOpenDay(clock.now(), holidayTable);
+  const closures = new Set((await read(store)).filter((e) => e.type === "market.closed").map((e) => (e.payload as { date: string }).date));
+  const startDate = firstOpenDay(clock.now(), holidayTable, closures);
   await setUpParticipants(store, startDate);
   const investors = await ruleAgents();
   const registered = new Set((await read(store)).filter((e) => e.type === "agent.registered").map((e) => (e.payload as { agentId: string }).agentId));
@@ -170,10 +173,12 @@ async function runLocked(date: string, o: DailyOptions): Promise<StageResult[]> 
     // 決算の発表は runDay が、判断の前と1日の最後に書く
     seed: o.seed ?? WORLD_SEED,
     ...(o.llm ? { llm: o.llm } : {}),
+    // 引けのあとに始めた実行（16:35・17:50・23:50 など）は、次の取引日の判断も進める（#228）
+    decideNext: true,
   };
   const results = await runDay(date, deps);
-  // 休日の実行（runDay が何もしない）でも、時期が来た決算を書く（前の営業日の引けのあとの実行がなかったとき）。
-  // 営業日なら runDay が書き終えているので、何も書かない
+  // 取引日でない日（臨時休場）の実行でも、時期が来た決算を書く（前の取引日の引けのあとの実行がなかったとき）。
+  // 取引日なら runDay が書き終えているので、何も書かない
   const disclosed = await discloseDue(store, o.seed ?? WORLD_SEED, o.clock);
   return disclosed.length > 0 ? [...results, { stage: "disclose", status: "written", detail: disclosed.join(",") }] : results;
 }

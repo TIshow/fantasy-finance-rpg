@@ -1,4 +1,4 @@
-// 通しの試験（#27 PR-2）：規則で動く仮のAI 3体で、架空データの10営業日を回す。外部通信・DB・LLM なし。
+// 通しの試験（#27 PR-2）：規則で動く仮のAI 3体で、架空データの10取引日を回す。外部通信・DB・LLM なし。
 import { describe, expect, it } from "vitest";
 import { verifyChain } from "../../src/events/chain";
 import { replay } from "../../src/events/replay";
@@ -16,9 +16,9 @@ import { mulberry32, randInt } from "../fixtures/prng";
 
 const SYMBOLS = ["TSTA", "TSTB", "TSTC"];
 const PRIOR = "2026-11-06";
-/** 10営業日（祝日なし）。11/18 は終値の取り込みが翌日の未明まで遅れる */
-const DAYS = ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-16", "2026-11-17", "2026-11-18", "2026-11-19", "2026-11-20"];
-const LATE = "2026-11-18";
+/** 10取引日（架空の市場は 11/9 から毎日が取引日。土日の 11/14・11/15 を含む）。11/16 は終値の取り込みが翌日の未明まで遅れる */
+const DAYS = ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15", "2026-11-16", "2026-11-17", "2026-11-18"];
+const LATE = "2026-11-16";
 const p = (e: LogEvent) => e.payload as Record<string, unknown>;
 
 /** 架空の始値・終値と、それを取得する時刻。値動きは大きめ（規則が売買するように）。同じシードなら同じ */
@@ -46,7 +46,7 @@ function quotes(seed: number, lateFetchAt: number): { fetchedAt: number; quote: 
 type Seen = { agentId: string; tradingDate: string; at: number; closes: { seq: number; date: string; prices: Readonly<Record<string, number | null>> }[]; splitSeqs: number[] };
 
 /**
- * 保管・取り込み・runner を組み、前営業日から10営業日を回す。取り込みは取得の時刻に staticSource から行う。
+ * 保管・取り込み・runner を組み、前営業日から10取引日を回す。取り込みは取得の時刻に staticSource から行う。
  * salt の乱数は固定（データのシードだけでログが変わることを見るため）。
  * lateFetchAt：LATE の終値を取得する時刻。interrupt：毎日、判断の後・寄り付きの前で一度止めてから回し直す
  */
@@ -57,7 +57,7 @@ async function run(seed: number, opts: { lateFetchAt?: number; interrupt?: boole
   const values = new RunnerValues(() => Uint8Array.from({ length: 16 }, () => Math.floor(rand() * 256)));
   const store = new InMemoryEventStore(values, holidayTables, clock);
   const market = new IngestedMarketData(clock);
-  const pending = quotes(seed, opts.lateFetchAt ?? jst("2026-11-19", 3));
+  const pending = quotes(seed, opts.lateFetchAt ?? jst("2026-11-17", 3));
   const waitUntil = async (at: number) => {
     while (pending.length > 0 && pending[0]!.fetchedAt <= at) {
       const t = pending[0]!.fetchedAt;
@@ -97,7 +97,7 @@ async function run(seed: number, opts: { lateFetchAt?: number; interrupt?: boole
   return { store, values, holidayTables, deps, seen, events: await store.read(0, 100_000) };
 }
 
-describe("規則のAI 3体で10営業日を通す", async () => {
+describe("規則のAI 3体で10取引日を通す", async () => {
   const r = await run(20261104);
   const of = (type: LogEvent["type"]) => r.events.filter((e) => e.type === type);
   const ids = ["ai-ma5", "ai-reversal", "ai-hold"];
@@ -114,7 +114,7 @@ describe("規則のAI 3体で10営業日を通す", async () => {
     for (const id of ids) expect(traded(id), id).toBeGreaterThan(0);
     expect(of("fills.executed").some((e) => (p(e).fills as { side: string; qty: number }[]).some((f) => f.side === "sell" && f.qty > 0))).toBe(true);
     for (const run of of("agent.run")) expect((p(run).model as { provider: string }).provider).toBe("rule");
-    // 公表は、権利落ち日の前営業日の引け後の処理で、全員に1回ずつ渡る
+    // 公表は、権利落ち日の前の取引日の引け後の処理で、全員に1回ずつ渡る
     for (const a of of("corporate_action.announced")) {
       const got = of("corporate_actions.applied").filter((e) => (p(e).announcedSeqs as number[]).includes(a.seq));
       expect(got.map((e) => p(e).agentId).sort()).toEqual([...ids].sort());
@@ -215,14 +215,14 @@ describe("規則のAI 3体で10営業日を通す", async () => {
     }
     // 遅れた日の終値は、取り込んだ後の判断（翌日の朝）から入力に入る
     const late = of("prices.close").find((e) => p(e).date === LATE)!;
-    expect(late.recordedAt).toBeGreaterThanOrEqual(jst("2026-11-19", 3));
+    expect(late.recordedAt).toBeGreaterThanOrEqual(jst("2026-11-17", 3));
     expect(of("agent.run").filter((e) => (p(e).inputSeqs as number[]).includes(late.seq)).length).toBeGreaterThan(0);
     expect(of("agent.run").filter((e) => (p(e).inputSeqs as number[]).includes(late.seq)).every((e) => e.seq > late.seq && e.recordedAt >= late.recordedAt)).toBe(true);
   });
 
   it("前の日の終値が朝の判断より後に届いた日は、判断を待ち（その日は注文しない）、その後に追いつく", async () => {
-    const next = "2026-11-19";
-    const late = await run(20261104, { lateFetchAt: jst(next, 8) }); // 判断（7:00）の後、締め（8:30）の前に届く
+    const next = "2026-11-17";
+    const late = await run(20261104, { lateFetchAt: jst(next, 8) }); // 朝の判断の試し直し（7:00）の後、締め（8:30）の前に届く
     const ev = late.events;
     const lateClose = ev.find((e) => e.type === "prices.close" && p(e).date === LATE)!;
     expect(lateClose.recordedAt).toBeGreaterThanOrEqual(jst(next, 8));

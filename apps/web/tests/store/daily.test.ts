@@ -86,8 +86,14 @@ describe("runDaily", () => {
     await fresh();
     const w = world();
     for (const d of DAYS) await runDaily(d, opts(w));
+    const day = await count();
+    expect(day.n).toBeGreaterThan(30);
+    // 最後の日の引けのあとに回し直すと、次の取引日（11/11）の判断だけを書く（#228）。それより前の日の分は何も書かない
+    for (const d of DAYS) await runDaily(d, opts(w));
+    const night = (await readAllEvents(db)).slice(day.n);
+    expect(night.filter((e) => e.type === "order_sheet.committed").map((e) => (e.payload as { tradingDate: string }).tradingDate)).toEqual(["2026-11-11", "2026-11-11", "2026-11-11"]);
+    expect(night.every((e) => ["agent.run", "post.published", "order_sheet.committed"].includes(e.type))).toBe(true);
     const after = await count();
-    expect(after.n).toBeGreaterThan(30);
     for (const d of DAYS) await runDaily(d, opts(w));
     expect(await count()).toEqual(after);
     const report = await verifyDatabase(db, FIXTURE_HOLIDAYS);
