@@ -285,7 +285,8 @@ describe("祝日の一覧の版と取引対象（§3.5）", () => {
     const log = await newLog([], [table(["2026-11-11"], B), table(["2026-11-10"], C), { ...table([], D), firstYear: 2027 }]);
     const { src, run } = await setup(log); // 開始日 11/10 まで使った
     const adopt = (sha: string) => reason(log.append(op("holidays.adopted", jst("2026-11-09", 23), { holidaysSha256: sha })));
-    expect(await adopt(C)).toBe("holiday table changes 2026-11-10, which the log already used");
+    // 11/9 以後の日付は取引日の判定に祝日を使わないので、使った日付でも直せる（D-047。11/9 より前は every-day.test.ts で確かめる）
+    expect(await adopt(C)).toBe("ok");
     expect(await adopt(D)).toBe("holiday table must cover 2026-2026");
     expect(await adopt(B)).toBe("ok");
     const sheetSeq = await commit(log, jst("2026-11-10", 8), sheet(run, [src]));
@@ -308,7 +309,8 @@ describe("祝日の一覧の版と取引対象（§3.5）", () => {
     expect(await adopt(G, jst("2026-11-09", 23))).toBe("ok");
     const sheetSeq = await commit(log, jst("2026-11-10", 8), sheet(run, [src]));
     await finishDay(log, "2026-11-10", "2026-11-11", sheetSeq); // 引け後処理の権利落ち日 11/11 まで使った
-    expect(await adopt(G2, jst("2026-11-10", 16))).toBe("holiday table changes 2026-11-11, which the log already used");
+    // 11/9 以後の日付なので、使った 11/11 の直しも採用できる（D-047）
+    expect(await adopt(G2, jst("2026-11-10", 16))).toBe("ok");
   });
 
   it("取引対象にない銘柄は注文できず、取引対象は重複のない昇順で替え、約定待ちの注文票があれば銘柄を外せない", async () => {

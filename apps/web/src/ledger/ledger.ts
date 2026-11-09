@@ -1,6 +1,6 @@
 // 模擬売買の台帳（docs/PAPER_TRADING_RULES.md）。純関数だけで、外部や時計に依存しない。
 import { priceBand, TICK } from "./auction";
-import { cutoffOf, decisionOpensAt, isValidDate, previousTradingDay, upcomingTradingDay } from "./calendar";
+import { cutoffOf, decisionOpensAt, EVERY_DAY_FROM, isValidDate, previousTradingDay, upcomingTradingDay } from "./calendar";
 import { INITIAL_CASH, LOT, type Account, type Deciyen, type Fill, type FillReason, type Order, type OrderSheet, type RejectReason } from "./types";
 
 export {
@@ -54,9 +54,10 @@ export function validateSheet(sheet: OrderSheet, ctx: CommitContext): { ok: true
   if (!Number.isSafeInteger(sheet.committedAt) || !isValidDate(sheet.tradingDate) || !Array.isArray(sheet.orders)) return { ok: false, reason: "invalid_sheet" };
   if (sheet.committedAt >= cutoffOf(sheet.tradingDate)) return { ok: false, reason: "after_cutoff" };
   // 約定日は、確定時刻から見て締めがまだ来ていない最初の取引日（架空の市場の暦。D-047）だけ。
-  // さらに、確定は前の取引日の引け（16:30）のあと。前の取引日の締めと引けの間の確定は、どの取引日にも受け付けない（#228）
+  // さらに、切り替えの日より後の取引日では、確定は前の取引日の引け（16:30）のあと。前の取引日の締めと引けの間の確定は、
+  // どの取引日にも受け付けない（#228）。切り替えの日まで（11/9 以前）の取引日には当てない（すでにある記録の照合と拒否の理由を変えないため）
   if (sheet.tradingDate !== upcomingTradingDay(sheet.committedAt, ctx.holidays)) return { ok: false, reason: "wrong_trading_date" };
-  if (sheet.committedAt < decisionOpensAt(sheet.tradingDate, ctx.holidays)) return { ok: false, reason: "wrong_trading_date" };
+  if (sheet.tradingDate > EVERY_DAY_FROM && sheet.committedAt < decisionOpensAt(sheet.tradingDate, ctx.holidays)) return { ok: false, reason: "wrong_trading_date" };
   // 前の取引日の引け後処理が済んだ口座でだけ確定できる。確定から約定までに保有が変わらないようにするため
   if (ctx.accountAsOf !== previousTradingDay(sheet.tradingDate, ctx.holidays)) return { ok: false, reason: "account_not_ready" };
   if (ctx.alreadyCommitted) return { ok: false, reason: "already_committed" };

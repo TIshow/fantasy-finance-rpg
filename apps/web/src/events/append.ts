@@ -5,7 +5,7 @@
 import { coveredHolidays, type HolidayTable } from "../holidays/table";
 import { MAX_PRICE, TICK } from "../ledger/auction";
 // 取引日の判定は、すべて架空の市場の暦（D-047。切り替えの日から毎日が取引日）。実在の市場の暦（isBusinessDay）はここでは使わない
-import { cutoffOf, decisionOpensAt, isTradingDay, isValidDate, marketClosedDays, nextTradingDay, previousTradingDay, upcomingTradingDay, validateSheet } from "../ledger/ledger";
+import { cutoffOf, decisionOpensAt, EVERY_DAY_FROM, isTradingDay, isValidDate, marketClosedDays, nextTradingDay, previousTradingDay, upcomingTradingDay, validateSheet } from "../ledger/ledger";
 import type { Listing } from "../ledger/ledger";
 import { registrationProblem, type Account, type Order, type ParticipantKind, type RejectReason } from "../ledger/types";
 import { CanonicalizeError } from "./canonical";
@@ -198,7 +198,9 @@ export class EventLog {
 
   /**
    * 架空の市場の休みの集合（marketClosedDays。D-047）。切り替えの日より前は祝日と臨時休場、以後は臨時休場だけ。
-   * isTradingDay・nextTradingDay・previousTradingDay・upcomingTradingDay・decisionOpensAt に渡す
+   * isTradingDay・nextTradingDay・previousTradingDay・upcomingTradingDay・decisionOpensAt にだけ渡す。
+   * 名前は前のままだが、祝日の一覧ではない。実在の市場の暦（isBusinessDay・nextBusinessDay・previousBusinessDay・tradingDateFor）と
+   * 組み合わせない（11/9 以後の祝日が抜けた集合で土日だけを休みにする、前の暦でも新しい暦でもない判定になる）
    */
   holidays(): ReadonlySet<string> {
     if (!this.calendar) throw new Error("no holiday table adopted");
@@ -332,9 +334,11 @@ export class EventLog {
 
   /**
    * 受け付けの時間の中の確定なのに、元の判断（run）が受け付けの始まり（前の取引日の引け）より前に記録されているか（#228）。
-   * 確定そのものが時間の外なら、validateSheet が wrong_trading_date を返すので、ここでは見ない（理由が1つに決まるように）
+   * 確定そのものが時間の外なら、validateSheet が wrong_trading_date を返すので、ここでは見ない（理由が1つに決まるように）。
+   * 切り替えの日まで（11/9 以前）の取引日には当てない（すでにある記録の照合を変えないため）
    */
   private runBeforeWindow(committedAt: number, runAt: number, tradingDate: string): boolean {
+    if (tradingDate <= EVERY_DAY_FROM) return false;
     const H = this.holidays();
     try {
       if (upcomingTradingDay(committedAt, H) !== tradingDate) return false;
@@ -547,6 +551,9 @@ export class EventLog {
         if (!Number.isSafeInteger(p.bodyMaxOutputTokens) || (p.bodyMaxOutputTokens as number) < 1 || (p.bodyMaxOutputTokens as number) > (p.maxOutputTokens as number)) return "bodyMaxOutputTokens must be a positive integer up to maxOutputTokens";
         try {
           if (p.tradingDate !== upcomingTradingDay(at, H)) return "tradingDate must be the next trading date";
+          // 切り替えの日より後の取引日では、依頼も判断の受け付けの時間の中（前の取引日の引けのあと）だけ。
+          // 早すぎる依頼は、費用の枠を使うのに、その答えから注文票を確定できないため（#228）
+          if (p.tradingDate > EVERY_DAY_FROM && at < decisionOpensAt(p.tradingDate, H)) return "submittedAt must be after the close of the previous trading day";
         } catch {
           return "submittedAt is outside the adopted holiday table";
         }
@@ -842,13 +849,14 @@ export class EventLog {
 
 /**
  * 祝日の一覧を替えてよいか（§3.5）。ログがもう使った日付（latest まで）の休場日が同じで、
- * 新しい一覧が、いまの一覧の始まりの年から latest の年までを覆うこと。latest より後の日付は直してよい
+ * 新しい一覧が、いまの一覧の始まりの年から latest の年までを覆うこと。latest より後の日付は直してよい。
+ * 切り替えの日（EVERY_DAY_FROM。D-047）以後の日付は、架空の市場の取引日の判定に祝日を使わないので、いつでも直してよい
  */
 function calendarChange(cur: HolidayTable, next: HolidayTable, latest: string): string | null {
   const lastUsed = latest === "" ? cur.firstYear : Number(latest.slice(0, 4));
   if (next.firstYear > cur.firstYear || next.lastYear < lastUsed) return `holiday table must cover ${cur.firstYear}-${lastUsed}`;
   for (const d of new Set([...cur.dates, ...next.dates])) {
-    if (Number(d.slice(0, 4)) >= cur.firstYear && d <= latest && cur.dates.has(d) !== next.dates.has(d)) return `holiday table changes ${d}, which the log already used`;
+    if (Number(d.slice(0, 4)) >= cur.firstYear && d <= latest && d < EVERY_DAY_FROM && cur.dates.has(d) !== next.dates.has(d)) return `holiday table changes ${d}, which the log already used`;
   }
   return null;
 }

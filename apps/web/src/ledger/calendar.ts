@@ -1,4 +1,7 @@
 // 東証の営業日と注文の締め（docs/PAPER_TRADING_RULES.md §1）。祝日の一覧は呼び出し側から受け取る。
+// isBusinessDay・nextBusinessDay・previousBusinessDay・tradingDateFor は、実在の市場の暦だけに使う（取り込み口など）。
+// holidays には祝日の一覧（holidaysFor() など）を渡す。EventLog.holidays()・marketClosedDays() の集合と組み合わせない。
+// 架空の市場の取引日は、このファイルの下の isTradingDay などを使う（D-047）。
 const DAY_MS = 86_400_000;
 const JST_MS = 9 * 3_600_000;
 
@@ -14,7 +17,7 @@ function parseDate(date: string): number {
 
 const formatDate = (t: number) => new Date(t).toISOString().slice(0, 10);
 
-/** 土日、12月31日〜1月3日、祝日（holidays）でなければ営業日 */
+/** 土日、12月31日〜1月3日、祝日（holidays）でなければ営業日。実在の市場の暦だけ。EventLog.holidays() を渡さない */
 export function isBusinessDay(date: string, holidays: ReadonlySet<string>): boolean {
   const day = new Date(parseDate(date));
   const wd = day.getUTCDay();
@@ -42,7 +45,9 @@ function stepBusinessDay(date: string, holidays: ReadonlySet<string>, step: 1 | 
   throw new Error(`no business day within 31 days of ${date}`);
 }
 
+/** 実在の市場の次の営業日。EventLog.holidays() を渡さない（架空の市場は nextTradingDay） */
 export const nextBusinessDay = (date: string, holidays: ReadonlySet<string>) => stepBusinessDay(date, holidays, 1);
+/** 実在の市場の前の営業日。EventLog.holidays() を渡さない（架空の市場は previousTradingDay） */
 export const previousBusinessDay = (date: string, holidays: ReadonlySet<string>) => stepBusinessDay(date, holidays, -1);
 
 /** 約定日の注文の締め：その日の 8:30（日本時間）を UNIXミリ秒で返す */
@@ -50,7 +55,10 @@ export function cutoffOf(tradingDate: string): number {
   return parseDate(tradingDate) - JST_MS + 8.5 * 3_600_000;
 }
 
-/** その時刻に確定した注文票が約定する営業日：締めがまだ来ていない最初の営業日 */
+/**
+ * 実在の市場で、その時刻から見た次の営業日：締めがまだ来ていない最初の営業日。
+ * EventLog.holidays() を渡さない（架空の市場の注文票の約定日は upcomingTradingDay）
+ */
 export function tradingDateFor(committedAt: number, holidays: ReadonlySet<string>): string {
   const today = formatDate(committedAt + JST_MS);
   if (isBusinessDay(today, holidays) && committedAt < cutoffOf(today)) return today;
@@ -121,7 +129,8 @@ export function upcomingTradingDay(at: number, closed: ReadonlySet<string>): str
 
 /**
  * 取引日 D の判断（注文票の確定）を受け付け始める時刻：前の取引日の引け（16:30。締めの8時間後）。
- * 受け付けるのは、この時刻から D の締め（cutoffOf(D)）の前まで（#228 の lead の決定）
+ * 受け付けるのは、この時刻から D の締め（cutoffOf(D)）の前まで（#228 の lead の決定）。
+ * 記録の検査がこの決まりを当てるのは、D が EVERY_DAY_FROM より後の取引日だけ（11/9 以前の記録の照合を変えないため）
  */
 export function decisionOpensAt(tradingDate: string, closed: ReadonlySet<string>): number {
   return cutoffOf(previousTradingDay(tradingDate, closed)) + 8 * HOUR_MS;
