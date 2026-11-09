@@ -199,7 +199,7 @@ export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account
     points: [`${x(dates.indexOf(o.days[0]!.date))},${y(o.initialCash)}`, ...o.days.map((d) => `${x(dates.indexOf(d.date) + 1)},${y(d.total)}`)].join(" "),
   });
   const drawn = view.agents.filter((o) => o.agentId !== agentId && o.days.length > 0).map(line);
-  const chart = last ? { lines: [...drawn, line(a)], baseY: y(a.initialCash), to: formatMonthDay(dates.at(-1)!), label: `${a.days.length}営業日の総資産の推移（${drawn.length + 1}体を重ねて表示）` } : null;
+  const chart = last ? { lines: [...drawn, line(a)], baseY: y(a.initialCash), to: formatMonthDay(dates.at(-1)!), label: `${a.days.length}取引日の総資産の推移（${drawn.length + 1}体を重ねて表示）` } : null;
 
   // 持ち株：最後の評価の保有。取得原価は台帳の口座から
   const val = [...mine].reverse().find((t) => t.kind === "valuation");
