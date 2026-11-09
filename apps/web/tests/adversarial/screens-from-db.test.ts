@@ -51,9 +51,9 @@ import { FakeClock, jst } from "../contracts/fakes";
 import { openPglite, resetSchema } from "../store/pglite";
 
 const URL_FOR_TEST = "postgres://reader@pglite.invalid/ffr";
-/** 2026-11-02（月）から 2026-12-01（火）まで。11/3・11/23 と週末を除くと20営業日（tests/store/twenty-days.test.ts と同じ） */
+/** 2026-11-02（月）から 2026-11-24（火）まで、20取引日。11/9 からは土日・祝日も取引日なので、除くのは 11/3 と 11/7・11/8 だけ（D-047。tests/store/twenty-days.test.ts と同じ） */
 const FIRST = "2026-11-02";
-const LAST = "2026-12-01";
+const LAST = "2026-11-24";
 const SYMBOLS = COMPANIES.map((c) => c.symbol);
 
 const p = (e: LogEvent) => e.payload as Record<string, any>;
@@ -442,7 +442,7 @@ describe("画面のデータの出どころが、PGlite の20営業日の記録�
   // 1回の実行の中で続けて書かれ、1件ずつ別のトランザクションなので、その間に読むと「今日の約定はあるが評価はまだ（または一部だけ）」が見える。
   // その状態は、評価の追記を途中で失敗させて作る。この確かめは記録を書き足すので、最後に置く
   it("次の営業日の途中（判断のあと・約定のあと評価の前・評価が一部だけ）に読んでも、トップと AIのページの数字は手計算と一致し、順位は評価のそろった日で、評価のあとに約定した銘柄は取得単価を出さない", async () => {
-    const NEXT = "2026-12-02";
+    const NEXT = "2026-11-25";
     const crashingOn = (type: string, n: number): SqlDb => {
       let seen = 0;
       return { ...db, transaction: (fn) => db.transaction((tx) => fn({ ...tx, query: (t, q) => (t.startsWith("INSERT INTO events") && q?.[2] === type && ++seen === n ? Promise.reject(new Error("crash")) : tx.query(t, q)) })) };
@@ -509,7 +509,7 @@ describe("画面のデータの出どころが、PGlite の20営業日の記録�
   // AI投資家の持っている銘柄に値段がつかなかった日を最終日にする。この確かめも記録を書き足すので、最後に置く
   it("持っている銘柄に値段がつかなかった日が最終日のとき、AIのページの持ち株と銘柄のページの持ち主に印が付き、値段は直近の値段で、評価額は手計算と一致する", async () => {
     const waitUntil = async (at: number) => void (at > clock.now() && clock.set(at));
-    let t = Date.parse("2026-12-02T00:00:00Z");
+    let t = Date.parse("2026-11-25T00:00:00Z");
     let found: { id: string; symbol: string; date: string } | undefined;
     let h2 = hand;
     let evs = events;

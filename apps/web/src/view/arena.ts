@@ -31,7 +31,7 @@ export function sparkline(values: number[], baseline: number): Sparkline {
   const points = pts.map((v, i) => `${Math.round((i * SPARK_W) / Math.max(1, pts.length - 1))},${y(v)}`).join(" ");
   const last = values.at(-1) ?? baseline;
   const words = { up: "初期資金より上", down: "初期資金より下", flat: "初期資金と同じ" };
-  return { points, baseY: y(baseline), label: `${Math.max(0, n - 1)}営業日の資産の推移（${words[dir(last - baseline)]}）` };
+  return { points, baseY: y(baseline), label: `${Math.max(0, n - 1)}取引日の資産の推移（${words[dir(last - baseline)]}）` };
 }
 
 /** 直近の（非表示でなく本文が保管にある）投稿 */

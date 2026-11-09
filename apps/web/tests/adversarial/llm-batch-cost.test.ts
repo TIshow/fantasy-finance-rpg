@@ -305,24 +305,39 @@ describe("日本時間の0時の境目と取引日", () => {
     expect(await reason(log, sub(jst("2026-11-10", 0, 1), "alpha", "2026-11-10", 1, { ...CHEAP, customId: "x2" }))).toMatch(/duplicate key llmbatch:alpha:2026-11-10$/);
   });
 
-  it("取引日は、記録の時刻で締めがまだ来ていない最初の営業日だけ（前日・当日の締め後・2営業日先・土日・祝日は断る）", async () => {
+  // D-047（#228）：11/9 からは、架空の市場は土日・祝日も取引日。取引日は「締めがまだ来ていない最初の暦日」になる
+  it("取引日は、記録の時刻で締めがまだ来ていない最初の取引日だけ（前日・当日の締め後・2日先は断る。11/9 以後は土日・祝日も取引日）", async () => {
     const log = await setup();
     const at = jst(DAY, 16, 35);
     for (const td of ["2026-11-09", "2026-11-11", "2026-11-08", "2026-11-14"]) {
       expect(await reason(log, sub(at, "alpha", td, 100)), td).toBe("tradingDate must be the next trading date");
     }
-    // 金曜の夜 23:59 と土曜の 00:00 は、月曜が祝日（11-23）なので火曜（11-24）
-    expect(await reason(log, sub(jst("2026-11-20", 23, 59), "alpha", "2026-11-23", 100))).toBe("tradingDate must be the next trading date");
-    await okSent(log, sub(jst("2026-11-20", 23, 59), "alpha", "2026-11-24", 100));
-    await okSent(log, sub(jst("2026-11-21", 0, 0), "beta", "2026-11-24", 100));
-    // 当日 8:30 ちょうどは締めのあと
+    // 金曜の夜 23:59 は土曜（11-21）。月曜（祝日）・火曜は断る
+    for (const td of ["2026-11-23", "2026-11-24"]) {
+      expect(await reason(log, sub(jst("2026-11-20", 23, 59), "alpha", td, 100)), td).toBe("tradingDate must be the next trading date");
+    }
+    await okSent(log, sub(jst("2026-11-20", 23, 59), "alpha", "2026-11-21", 100));
+    // 土曜の 00:00 も、締め（8:30）の前なので土曜
+    await okSent(log, sub(jst("2026-11-21", 0, 0), "beta", "2026-11-21", 100));
+    // 日曜の夜の依頼は、祝日の月曜（11-23）の分
+    await okSent(log, sub(jst("2026-11-22", 16, 35), "alpha", "2026-11-23", 100));
+    // 当日 8:30 ちょうどは締めのあと。次の日の分になる
     expect(await reason(log, sub(jst("2026-11-24", 8, 30), "gamma", "2026-11-24", 100))).toBe("tradingDate must be the next trading date");
     await okSent(log, sub(jst("2026-11-24", 8, 29, 59, 999), "gamma", "2026-11-24", 100));
   });
 
-  it("採用した祝日の一覧の外の時刻では、依頼を書けない", async () => {
+  // 前は「一覧の外の時刻では書けない」を確かめていた。D-047 で、11/9 以後の取引日は祝日の一覧を引かなくなったので、
+  // 一覧の範囲の外の年（2027年の年末から2028年）でも、締めと受け付けの時間が合えば書ける（core の PR #230 の振る舞い）。
+  // これでよいかは lead の判断待ち（#228）。決まりが「一覧の外は断る」になったら、この試験を前の期待に戻す
+  it("11/9 以後の時刻は、祝日の一覧の範囲の外でも、締めと受け付けの時間で取引日が決まる（lead の判断待ち）", async () => {
     const log = await setup();
-    expect(await reason(log, sub(jst("2027-12-30", 16, 35), "alpha", "2028-01-04", 100))).toMatch(/outside the adopted holiday table|invalid tradingDate|beyond/);
+    // 2027-12-30 16:35 の次の取引日は 12-31（年末も取引日）。2028-01-04 は断る
+    expect(await reason(log, sub(jst("2027-12-30", 16, 35), "alpha", "2028-01-04", 100))).toBe("tradingDate must be the next trading date");
+    await okSent(log, sub(jst("2027-12-30", 16, 35), "alpha", "2027-12-31", 100));
+    // 一覧の外の年（2028年）の取引日も書ける
+    await okSent(log, sub(jst("2028-01-03", 16, 35), "beta", "2028-01-04", 100));
+    // 受け付けの始まり（前の取引日の引け 16:30）より前は、一覧の外でも断る
+    expect(await reason(log, sub(jst("2028-01-03", 16, 29, 59, 999), "gamma", "2028-01-04", 100))).toBe("submittedAt must be after the close of the previous trading day");
   });
 });
 

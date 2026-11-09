@@ -65,3 +65,22 @@ describe("priceChart", () => {
     expect(priceChart([d("2026-11-10", 0), d("2026-11-11", 1)], 1000, formatYenMark)!.label).toContain("11/10〜11/11");
   });
 });
+
+describe("土日の取引日（D-047）", () => {
+  const d = (seq: number, date: string, price: number | null): AuctionDay => ({ seq, date, dateText: `${date.slice(5, 7)}/${date.slice(8, 10)}`, price, priceText: price === null ? "値つかず" : formatYenMark(price), volume: 100, volumeText: "100株", carriedText: null, carriedSeq: null });
+
+  it("11/13（金）から11/16（月）まで、土日の11/14・11/15も含めて4日を順に並べる", () => {
+    const c = priceChart([d(1, "2026-11-13", 10_000), d(2, "2026-11-14", 10_100), d(3, "2026-11-15", 10_200), d(4, "2026-11-16", 10_300)], 10_000, formatYenMark)!;
+    expect(pts(c.segments[0]!).map(([x]) => x)).toEqual([75, 225, 375, 525]);
+    expect(c.bars.map((b) => b.label.split(" ")[0])).toEqual(["11/13", "11/14", "11/15", "11/16"]);
+    expect(c.label).toContain("11/13〜11/16");
+    expect(c.label).toContain("4日のうち0日は値つかず");
+  });
+
+  it("切り替え前の記録（金曜の次が月曜）は、土日を足さずそのまま並べる", () => {
+    const c = priceChart([d(1, "2026-11-05", 10_000), d(2, "2026-11-06", 10_100), d(3, "2026-11-09", 10_200)], 10_000, formatYenMark)!;
+    expect(c.bars.map((b) => b.label.split(" ")[0])).toEqual(["11/05", "11/06", "11/09"]);
+    expect(pts(c.segments[0]!).map(([x]) => x)).toEqual([100, 300, 500]);
+  });
+});
+

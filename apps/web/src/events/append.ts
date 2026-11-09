@@ -4,7 +4,8 @@
 // 祝日の一覧の版と取引対象は、ログの holidays.adopted・universe.set が決める（§3.5）。照合でも、記録したときの版を使う。
 import { coveredHolidays, type HolidayTable } from "../holidays/table";
 import { MAX_PRICE, TICK } from "../ledger/auction";
-import { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusinessDay, tradingDateFor, validateSheet } from "../ledger/ledger";
+// 取引日の判定は、すべて架空の市場の暦（D-047。切り替えの日から毎日が取引日）。実在の市場の暦（isBusinessDay）はここでは使わない
+import { cutoffOf, decisionOpensAt, EVERY_DAY_FROM, isTradingDay, isValidDate, marketClosedDays, nextTradingDay, previousTradingDay, upcomingTradingDay, validateSheet } from "../ledger/ledger";
 import type { Listing } from "../ledger/ledger";
 import { registrationProblem, type Account, type Order, type ParticipantKind, type RejectReason } from "../ledger/types";
 import { CanonicalizeError } from "./canonical";
@@ -166,19 +167,6 @@ interface AgentState {
   kind: ParticipantKind;
 }
 
-/** 臨時休場の日を足した休場日の集合（calendar は has() だけを使う） */
-class WithClosures extends Set<string> {
-  constructor(
-    private readonly base: ReadonlySet<string>,
-    private readonly closed: ReadonlyMap<string, number>,
-  ) {
-    super();
-  }
-  override has(date: string): boolean {
-    return this.closed.has(date) || this.base.has(date);
-  }
-}
-
 export type AppendResult = { ok: true; event: LogEvent } | { ok: false; reason: string };
 
 export class EventLog {
@@ -208,9 +196,15 @@ export class EventLog {
 
   constructor(private readonly ctx: AppendContext) {}
 
+  /**
+   * 架空の市場の休みの集合（marketClosedDays。D-047）。切り替えの日より前は祝日と臨時休場、以後は臨時休場だけ。
+   * isTradingDay・nextTradingDay・previousTradingDay・upcomingTradingDay・decisionOpensAt にだけ渡す。
+   * 名前は前のままだが、祝日の一覧ではない。実在の市場の暦（isBusinessDay・nextBusinessDay・previousBusinessDay・tradingDateFor）と
+   * 組み合わせない（11/9 以後の祝日が抜けた集合で土日だけを休みにする、前の暦でも新しい暦でもない判定になる）
+   */
   holidays(): ReadonlySet<string> {
     if (!this.calendar) throw new Error("no holiday table adopted");
-    return new WithClosures(this.calendar.covered, this.closed);
+    return marketClosedDays(this.calendar.covered, new Set(this.closed.keys()));
   }
 
   /** 1件を足す。どれかの検査に通らなければ、何も変えずに理由を返す。注文票の確定と拒否は commitSheet からだけ書ける */
@@ -327,6 +321,7 @@ export class EventLog {
     // LLMが見た入力全体（元の run の入力）を、約定日の判断に使ってよい情報かで確かめる
     const run = this.events[(p.runSeq as number) - 1];
     if (this.runProblem(d, agentId, "order") || this.inputProblem(p.inputSeqs, tradingDate) || this.inputProblem((run?.payload as Record<string, unknown> | undefined)?.inputSeqs, tradingDate)) return "invalid_sheet";
+    if (this.runBeforeWindow(d.recordedAt, run!.recordedAt, tradingDate)) return "invalid_sheet";
     const v = validateSheet(
       { agentId, tradingDate, committedAt: d.recordedAt, orders: p.orders as Order[] },
       { universe: this.universe, alreadyCommitted: this.commits.has(`${agentId}:${tradingDate}`), account: this.ctx.accountOf(agentId), holidays: this.holidays(), accountAsOf: st.asOf, listings: this.listingsFor(tradingDate) },
@@ -335,6 +330,23 @@ export class EventLog {
     // 前の注文票が約定していない、またはその日以後をもう評価した口座では確定できない（§3.3 の順序）
     if (final && this.notReady(st, tradingDate)) return "account_not_ready";
     return null;
+  }
+
+  /**
+   * 受け付けの時間の中の確定なのに、元の判断（run）が受け付けの始まり（前の取引日の引け）より前に記録されているか（#228）。
+   * 確定そのものが時間の外なら、validateSheet が wrong_trading_date を返すので、ここでは見ない（理由が1つに決まるように）。
+   * 切り替えの日まで（11/9 以前）の取引日には当てない（すでにある記録の照合を変えないため）
+   */
+  private runBeforeWindow(committedAt: number, runAt: number, tradingDate: string): boolean {
+    if (tradingDate <= EVERY_DAY_FROM) return false;
+    const H = this.holidays();
+    try {
+      if (upcomingTradingDay(committedAt, H) !== tradingDate) return false;
+      const opens = decisionOpensAt(tradingDate, H);
+      return committedAt >= opens && runAt < opens;
+    } catch {
+      return false; // 一覧の範囲の外の日。validateSheet の判定に任せる
+    }
   }
 
   /** 確定の検査に渡す上場した銘柄。値幅の基準の価格は、約定日より前の直近の価格 */
@@ -350,7 +362,7 @@ export class EventLog {
   /** 臨時休場の追加の引け後処理が、まだ反映していない公表のために要るか（§3.3。翌営業日の注文票と評価より前に書く） */
   private catchUpDue(st: AgentState): boolean {
     if (!st.catchUp) return false;
-    return (this.announced.get(nextBusinessDay(st.catchUp.date, this.holidays())) ?? []).length > 0;
+    return (this.announced.get(nextTradingDay(st.catchUp.date, this.holidays())) ?? []).length > 0;
   }
 
   /**
@@ -398,8 +410,8 @@ export class EventLog {
         if (p.kind === "split" && this.listings.has(p.symbol as string)) return "splits of listed companies are not supported yet";
         let before: string;
         try {
-          if (!isBusinessDay(exDate, H)) return "exDate must be a business day";
-          before = previousBusinessDay(exDate, H);
+          if (!isTradingDay(exDate, H)) return "exDate must be a business day";
+          before = previousTradingDay(exDate, H);
         } catch {
           return "exDate is outside the adopted holiday table";
         }
@@ -429,7 +441,7 @@ export class EventLog {
         const l = this.listings.get(symbol);
         if (!l) return "symbol is not listed";
         if (!this.universe.has(symbol)) return "symbol is not in the universe";
-        if (this.closed.has(date) || !isBusinessDay(date, H)) return "market was closed";
+        if (this.closed.has(date) || !isTradingDay(date, H)) return "market was closed";
         if (d.recordedAt < cutoffOf(date)) return "auction recorded before the cutoff";
         if (l.lastAuction !== null && l.lastAuction >= date) return "a later auction of the symbol is already recorded";
         // 現金の確かめは、注文票のほかの銘柄の値幅も使うので、ほかの銘柄の前の日の板寄せを後から書くと結果が変わる
@@ -450,7 +462,7 @@ export class EventLog {
         if (!this.universe.has(p.symbol as string)) return "symbol is not in the universe";
         // AI投資家は現金だけで始め、株は自分の売買でしか持たない（#110 PR-2d）
         if (st!.kind === "investor") return "shares cannot be allotted to an investor";
-        if (cutoffOf(nextBusinessDay(st!.asOf, H)) <= l.listedAt) return "the symbol cannot be auctioned on the first valuation date";
+        if (cutoffOf(nextTradingDay(st!.asOf, H)) <= l.listedAt) return "the symbol cannot be auctioned on the first valuation date";
         if (st!.pending || st!.valuedDate !== null || [...this.commits].some((c) => c.startsWith(`${agentId}:`))) return "the agent already started trading";
         if (!Number.isSafeInteger(p.qty) || (p.qty as number) <= 0) return "qty must be a positive integer";
         if (l.allotted + (p.qty as number) > l.sharesOutstanding) return "allotments exceed sharesOutstanding";
@@ -467,10 +479,10 @@ export class EventLog {
         return null;
       }
       case "prices.open":
-        if (this.closed.has(p.date as string) || !isBusinessDay(p.date as string, H)) return "market was closed";
+        if (this.closed.has(p.date as string) || !isTradingDay(p.date as string, H)) return "market was closed";
         return d.recordedAt >= cutoffOf(p.date as string) ? null : "open prices recorded before the cutoff";
       case "prices.close":
-        if (!isBusinessDay(p.date as string, H)) return "market was closed";
+        if (!isTradingDay(p.date as string, H)) return "market was closed";
         // 終値は大引け（15:30）のあと（docs/PAPER_TRADING_RULES.md §1）。締め（8:30）の7時間後
         return d.recordedAt >= cutoffOf(p.date as string) + 7 * 3_600_000 ? null : "close prices recorded before 15:30";
       case "market.closed": {
@@ -506,7 +518,7 @@ export class EventLog {
       case "agent.registered": {
         const start = p.startDate;
         // 開始日は、登録した時点で締めがまだ来ていない最初の営業日だけ。先の日にすると、その前の日を臨時休場にできなくなるため
-        if (!isValidDate(start) || start !== tradingDateFor(d.recordedAt, H)) return "startDate must be the next trading date";
+        if (!isValidDate(start) || start !== upcomingTradingDay(d.recordedAt, H)) return "startDate must be the next trading date";
         // 種類と最初の現金（AI投資家は INITIAL_CASH ちょうど。マーケットメイカーなどは上限まで、#110）
         return registrationProblem(p.kind, p.initialCash);
       }
@@ -538,7 +550,10 @@ export class EventLog {
         // 本文に書いた出力の上限（max_tokens など）。予約の見積もりの上限を超えると、実際の請求が予約を超えうる
         if (!Number.isSafeInteger(p.bodyMaxOutputTokens) || (p.bodyMaxOutputTokens as number) < 1 || (p.bodyMaxOutputTokens as number) > (p.maxOutputTokens as number)) return "bodyMaxOutputTokens must be a positive integer up to maxOutputTokens";
         try {
-          if (p.tradingDate !== tradingDateFor(at, H)) return "tradingDate must be the next trading date";
+          if (p.tradingDate !== upcomingTradingDay(at, H)) return "tradingDate must be the next trading date";
+          // 切り替えの日より後の取引日では、依頼も判断の受け付けの時間の中（前の取引日の引けのあと）だけ。
+          // 早すぎる依頼は、費用の枠を使うのに、その答えから注文票を確定できないため（#228）
+          if (p.tradingDate > EVERY_DAY_FROM && at < decisionOpensAt(p.tradingDate, H)) return "submittedAt must be after the close of the previous trading day";
         } catch {
           return "submittedAt is outside the adopted holiday table";
         }
@@ -627,7 +642,7 @@ export class EventLog {
       }
       case "valuation.recorded": {
         if (st!.pending) return "the committed sheet is not filled yet";
-        if (p.date !== nextBusinessDay(st!.asOf, H) || st!.valuedDate === p.date) return "valuation must be for the day after the last post-close";
+        if (p.date !== nextTradingDay(st!.asOf, H) || st!.valuedDate === p.date) return "valuation must be for the day after the last post-close";
         if (this.catchUpDue(st!)) return "apply corporate actions moved by the market closure first";
         // 上場した銘柄は、その日の板寄せが済んでから、板寄せの価格で評価する（書く順で評価の価格が変わらないように）
         const held = Object.keys(this.ctx.accountOf(agentId).holdings);
@@ -646,7 +661,7 @@ export class EventLog {
           const c = st!.catchUp;
           if (!c || c.closedSeq !== p.closedSeq || c.date !== p.asOf) return "no market closure to catch up for this agent and date";
         } else if (st!.valuedDate !== p.asOf || st!.asOf === p.asOf) return "value the day before applying corporate actions";
-        if (p.exDate !== nextBusinessDay(p.asOf as string, H)) return "exDate must be the next business day";
+        if (p.exDate !== nextTradingDay(p.asOf as string, H)) return "exDate must be the next business day";
         // 渡す公表は、権利落ち日がこの日の公表だけを、seq の昇順で（§3.3）
         const seqs = p.announcedSeqs as unknown[];
         for (const [i, s] of seqs.entries()) {
@@ -730,8 +745,8 @@ export class EventLog {
       }
       case "market.closed": {
         const date = p.date as string;
-        const before = previousBusinessDay(date, this.holidays());
-        const moved = nextBusinessDay(before, this.holidays()) === date;
+        const before = previousTradingDay(date, this.holidays());
+        const moved = nextTradingDay(before, this.holidays()) === date;
         this.closed.set(date, e.seq);
         // 休場の前営業日 D の引け後処理が済んだAIは、権利落ち日が D の翌営業日にずれた公表を、追加の処理で反映する（§3.3）。
         // もともと休みの日（土日・祝日）を休場にしても、D の翌営業日は変わらないので要らない。
@@ -740,7 +755,7 @@ export class EventLog {
         break;
       }
       case "agent.registered":
-        this.agents.set(agentId, { startDate: p.startDate as string, asOf: previousBusinessDay(p.startDate as string, this.holidays()), valuedDate: null, pending: null, catchUp: null, kind: (p.kind as ParticipantKind | undefined) ?? "investor" });
+        this.agents.set(agentId, { startDate: p.startDate as string, asOf: previousTradingDay(p.startDate as string, this.holidays()), valuedDate: null, pending: null, catchUp: null, kind: (p.kind as ParticipantKind | undefined) ?? "investor" });
         break;
       case "order_sheet.committed":
         this.sheetsByDate.set(p.tradingDate as string, [...(this.sheetsByDate.get(p.tradingDate as string) ?? []), e.seq]);
@@ -808,7 +823,7 @@ export class EventLog {
     // 入力は、依頼を送る前に記録した情報だけ（送った本文に入っていない情報を、判断に使ったと書けないように）
     if (Array.isArray(p.inputSeqs) && !p.inputSeqs.every((s) => typeof s === "number" && s < (cp.batchSeq as number))) return "inputSeqs must be recorded before the batch submission";
     try {
-      return tradingDateFor(d.recordedAt, H) === sp.tradingDate ? null : "the run must be recorded before the cutoff of the batch's trading date";
+      return upcomingTradingDay(d.recordedAt, H) === sp.tradingDate ? null : "the run must be recorded before the cutoff of the batch's trading date";
     } catch {
       return "recordedAt is outside the adopted holiday table";
     }
@@ -834,13 +849,14 @@ export class EventLog {
 
 /**
  * 祝日の一覧を替えてよいか（§3.5）。ログがもう使った日付（latest まで）の休場日が同じで、
- * 新しい一覧が、いまの一覧の始まりの年から latest の年までを覆うこと。latest より後の日付は直してよい
+ * 新しい一覧が、いまの一覧の始まりの年から latest の年までを覆うこと。latest より後の日付は直してよい。
+ * 切り替えの日（EVERY_DAY_FROM。D-047）以後の日付は、架空の市場の取引日の判定に祝日を使わないので、いつでも直してよい
  */
 function calendarChange(cur: HolidayTable, next: HolidayTable, latest: string): string | null {
   const lastUsed = latest === "" ? cur.firstYear : Number(latest.slice(0, 4));
   if (next.firstYear > cur.firstYear || next.lastYear < lastUsed) return `holiday table must cover ${cur.firstYear}-${lastUsed}`;
   for (const d of new Set([...cur.dates, ...next.dates])) {
-    if (Number(d.slice(0, 4)) >= cur.firstYear && d <= latest && cur.dates.has(d) !== next.dates.has(d)) return `holiday table changes ${d}, which the log already used`;
+    if (Number(d.slice(0, 4)) >= cur.firstYear && d <= latest && d < EVERY_DAY_FROM && cur.dates.has(d) !== next.dates.has(d)) return `holiday table changes ${d}, which the log already used`;
   }
   return null;
 }

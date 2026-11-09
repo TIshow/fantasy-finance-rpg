@@ -19,7 +19,7 @@ const card = (over: Partial<ArenaCard> = {}): ArenaCard => ({
   totalText: "¥9,900,000",
   asOf: "11/18",
   pnl: { direction: "down", text: "-¥100,000", percentText: "-1.00%" },
-  spark: { points: "0,10 140,30", baseY: 20, label: "2営業日の資産の推移（初期資金より下）" },
+  spark: { points: "0,10 140,30", baseY: 20, label: "2取引日の資産の推移（初期資金より下）" },
   top: [{ symbol: "TSTB", weightText: "31.4%", weightPct: 31.4 }],
   quote: "本文そのまま",
   quoteAt: "11/17 16:58",
@@ -71,7 +71,7 @@ describe("カードの部品", () => {
     expect(h).toContain("#FF2E88");
     expect(h).toContain("本文そのまま");
     expect(h).toContain("31.4%");
-    expect(h).toContain("2営業日の資産の推移");
+    expect(h).toContain("2取引日の資産の推移");
     expect(h).toContain("11/18 引け");
     expect(h).toContain('href="/agents/ai-reversal"');
   });

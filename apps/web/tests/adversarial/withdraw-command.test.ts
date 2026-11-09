@@ -9,6 +9,7 @@
 // - 書いたあと、照合（daily verify と同じ）が通り、読むだけの口から作った画面のデータで「非表示（理由）」になる。
 //   続けて erase_withdrawn_body で本文を消しても、照合が通る
 // 欠陥の再現は it.fails（欠陥が直ると落ちるので、直したら it に戻す）。
+import { decisionOpensAt, marketClosedDays } from "../../src/ledger/ledger";
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isTableOwner, productionSetup, runDaily, verifyDatabase, withdrawPost, withdrawReasonProblem } from "../../scripts/daily-lib";
@@ -34,6 +35,8 @@ beforeAll(async () => {
 afterAll(() => db.close());
 
 const DAYS = ["2026-11-09", "2026-11-10", "2026-11-11"];
+/** 取引日 d の判断の受け付けの始まり（前の取引日の引け 16:30。#228）。d の判断の記録は、この時刻から d の締めまでにある（前は d の 0:00 から探していた） */
+const opensOf = (d: string) => decisionOpensAt(d, marketClosedDays(new Set()));
 const NEXT_DAY = "2026-11-12";
 const count = async (table = "public.events") => (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`)).rows[0]!.n;
 const bodyHashOf = (e: LogEvent) => (e.payload as { bodyHash: string }).bodyHash;
@@ -71,7 +74,7 @@ async function setUp() {
     const events = await readAllEvents(db);
     const first = events.find((e) => e.type === "post.published");
     if (!first) throw new Error("no post.published in the production run");
-    const lastDay = events.filter((e) => e.type === "agent.run" && e.recordedAt >= jst(DAYS.at(-1)!, 0));
+    const lastDay = events.filter((e) => e.type === "agent.run" && e.recordedAt >= opensOf(DAYS.at(-1)!));
     const order = lastDay.find((e) => {
       const p = e.payload as { agentId: string; purpose: string };
       return p.purpose === "order" && p.agentId !== (first.payload as { agentId: string }).agentId && !lastDay.some((x) => (x.payload as { agentId: string; purpose: string }).agentId === p.agentId && (x.payload as { purpose: string }).purpose === "post");

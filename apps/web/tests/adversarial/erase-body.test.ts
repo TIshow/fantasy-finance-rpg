@@ -6,6 +6,7 @@
 // - 消したあとも、イベントの行は変わらず、連鎖・daily verify（verifyDatabase）・保管の開き直し・毎日の実行（runDaily）が続けられる
 // - 読むだけの口（src/store/pg-reader.ts の readSnapshot）は、消した本文を undefined として返し、例外にしない
 // - migrate を何度流しても、消した本文は戻らず、守りも変わらない
+import { decisionOpensAt, marketClosedDays, nextTradingDay } from "../../src/ledger/ledger";
 import { readFileSync } from "node:fs";
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -21,6 +22,7 @@ import { migrate, type SqlDb } from "../../src/store/sql";
 import { FakeClock, jst } from "../contracts/fakes";
 import { buildGoldenLog, FIXTURE_HOLIDAYS } from "../fixtures/golden";
 import { openPglite, resetSchema } from "../store/pglite";
+import { expectNextDayDecisionsOnly } from "./next-day-only";
 
 let pg: PGlite;
 let db: SqlDb;
@@ -348,6 +350,8 @@ describe("読むだけの口（readSnapshot）", { timeout: 60_000 }, () => {
 // ---------------------------------------------------------------------------------------------
 // 本番の準備のまま（架空の6社）、毎日の実行を回す DB
 const DAYS = ["2026-11-09", "2026-11-10", "2026-11-11"];
+/** 取引日 d の判断の受け付けの始まり（前の取引日の引け 16:30。#228）。d の判断の記録は、この時刻から d の締めまでにある（前は d の 0:00 から探していた） */
+const opensOf = (d: string) => decisionOpensAt(d, marketClosedDays(new Set()));
 const holidayTables = new Map([[holidayTable.contentSha256, holidayTable]]);
 function world() {
   const clock = new FakeClock(jst(DAYS[0]!, 6, 50));
@@ -378,14 +382,21 @@ describe("消したあとも毎日の実行を続けられる", { timeout: 120_0
     const posts = (await readAllEvents(db)).filter((e) => e.type === "post.published");
     expect(posts.length, "1日目に投稿がない（試験の前提が崩れた）").toBeGreaterThan(0);
     await withdrawAndErase(w.clock, posts);
-    const n = (await readAllEvents(db)).length;
-    await runDaily(DAYS[0]!, opts(w));
-    expect((await readAllEvents(db)).length).toBe(n);
+    // 回し直しは、引けのあとに始まるので次の取引日の判断だけを書き（#228）、消した投稿の日の記録は書き直さない。もう一度回すと何も書かない
+    const again = async (d: string) => {
+      const n = (await readAllEvents(db)).length;
+      await runDaily(d, opts(w));
+      const extra = (await readAllEvents(db)).slice(n);
+      expectNextDayDecisionsOnly(extra, nextTradingDay(d, marketClosedDays(new Set())), d);
+      for (const e of extra) expect(e.recordedAt, d).toBeGreaterThanOrEqual(jst(d, 16, 30));
+      const m = n + extra.length;
+      await runDaily(d, opts(w));
+      expect((await readAllEvents(db)).length, d).toBe(m);
+    };
+    await again(DAYS[0]!);
     for (const d of DAYS.slice(1)) {
       await runDaily(d, opts(w));
-      const m = (await readAllEvents(db)).length;
-      await runDaily(d, opts(w));
-      expect((await readAllEvents(db)).length).toBe(m);
+      await again(d);
     }
     const events = await readAllEvents(db);
     expect(events.filter((e) => e.type === "valuation.recorded" && p(e).date === DAYS.at(-1)).length).toBeGreaterThan(0);
@@ -403,7 +414,7 @@ describe("消したあとも毎日の実行を続けられる", { timeout: 120_0
     const d = DAYS[0]!;
     const stop = (at: number) => (at === scheduleOf(d).openAt ? Promise.reject(new Error("crash")) : w.waitUntil(at));
     await expect(runDaily(d, opts(w, { waitUntil: stop }))).rejects.toThrow("crash");
-    const today = (await readAllEvents(db)).filter((e) => e.type === "post.published" && e.recordedAt >= jst(d, 0));
+    const today = (await readAllEvents(db)).filter((e) => e.type === "post.published" && e.recordedAt >= opensOf(d));
     expect(today.length, "1日目の判断で投稿がない（試験の前提が崩れた）").toBeGreaterThan(0);
     await withdrawAndErase(w.clock, today);
     await runDaily(d, opts(w));
@@ -443,7 +454,7 @@ describe("消したあとも毎日の実行を続けられる", { timeout: 120_0
     await expect(runDaily(d, opts(w, { db: crashing }))).rejects.toThrow("crash");
     expect(hits, "仕込んだ失敗が1回だけ起きていない").toBe(1);
     const events = await readAllEvents(db);
-    const today = events.filter((e) => e.type === "agent.run" && p(e).agentId === id && e.recordedAt >= jst(d, 0));
+    const today = events.filter((e) => e.type === "agent.run" && p(e).agentId === id && e.recordedAt >= opensOf(d));
     const postRun = today.find((e) => p(e).purpose === "post");
     const orderRun = today.find((e) => p(e).purpose === "order");
     expect(postRun && orderRun, "その日の投稿用と注文用の run がない").toBeTruthy();

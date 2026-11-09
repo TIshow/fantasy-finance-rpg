@@ -523,7 +523,8 @@ describe("受け取った答えのトークン数が予約の上限を超えた�
 describe("予約の控えの reservedAt と、契約どおりに作った customId（2962eda）", () => {
   it("reservedAt は①を書いた時刻（recordedAt）で、submittedAt（依頼を決めた時刻）ではない", async () => {
     const log = await setup();
-    const at = jst(DAY, 17);
+    // 17:30 に記録し、16:40 に決めた依頼（11/10 の受け付けは 11/9 の引け 16:30 から。#228）
+    const at = jst(DAY, 17, 30);
     const a = await ok(log, sub(at, "alpha", TD, 100, { submittedAt: at - 3_000_000 }));
     expect(llmReservationOf(a)).toMatchObject({ reservedAt: at, submittedAt: at - 3_000_000, sentBodyHash: BODY });
     const s = await ok(log, sent(at + 1, a));

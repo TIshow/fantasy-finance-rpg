@@ -59,7 +59,7 @@ describe("sparkline", () => {
     expect(ys[0]).toBe(s.baseY);
     expect(Math.min(...ys)).toBeGreaterThanOrEqual(0);
     expect(Math.max(...ys)).toBeLessThanOrEqual(SPARK_H);
-    expect(s.label).toContain("2営業日");
+    expect(s.label).toContain("2取引日");
   });
 
   it("1点・全部同じ値でも壊れない（横線）", () => {

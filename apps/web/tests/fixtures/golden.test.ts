@@ -10,10 +10,13 @@ import { cutoffOf, previousBusinessDay } from "../../src/ledger/calendar";
 import { FIXTURE_HOLIDAYS, buildGoldenLog } from "./golden";
 
 const SEED = 20261104;
-/** buildGoldenLog(seed).events を正規化した JSON の sha256（Python で別に計算） */
+/**
+ * buildGoldenLog(seed).events を正規化した JSON の sha256（Python で別に計算）。
+ * D-047 で、最後の日（11/13（金））の引け後処理の権利落ち日が 11/16（月）から 11/14（土）に変わったので計算し直した
+ */
 const GOLDEN: Record<number, string> = {
-  20261104: "c1454b19f4978b252032e5c4f5295828d0c462ee4f14e51ab30c13cfa456a37d",
-  20261105: "a11afbad512b0268d4d2b5a9a50e1e9ef3b2f17123b995477469cec2d68df7df",
+  20261104: "4aa6f361021321b27e997a521516bcb2232269a907a0101eda1aee0825b14a00",
+  20261105: "ba9069b3811b79cf09c52ed80847f52cbfd46f5acbd79f21c419b80f62fd37b3",
 };
 const logHash = (events: readonly LogEvent[]) => sha256Hex(new TextEncoder().encode(canonicalize(events)));
 const H = FIXTURE_HOLIDAYS.dates;
