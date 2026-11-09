@@ -5,6 +5,7 @@
 // - アプリの接続（ffr_app）で足した偽の記録で、本物の判断の出力を消させられない（毎日の実行の前・途中・後のどこで足しても）
 // - 出力を消す途中で例外が起きても、出力の削除だけが取り消され、本文は消える
 // 欠陥の再現は、前半（通常の it）が前提を確かめて手順を進め、後半（it.fails）が結果だけを見る形にする（前提が崩れれば前半が赤になる）。
+import { decisionOpensAt, marketClosedDays } from "../../src/ledger/ledger";
 import { readFileSync } from "node:fs";
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -28,6 +29,8 @@ beforeAll(async () => {
 afterAll(() => db.close());
 
 const DAYS = ["2026-11-09", "2026-11-10", "2026-11-11"];
+/** 取引日 d の判断の受け付けの始まり（前の取引日の引け 16:30。#228）。d の判断の記録は、この時刻から d の締めまでにある（前は d の 0:00 から探していた） */
+const opensOf = (d: string) => decisionOpensAt(d, marketClosedDays(new Set()));
 const holidayTables = new Map([[holidayTable.contentSha256, holidayTable]]);
 const pl = (e: LogEvent) => e.payload as Record<string, unknown>;
 const has = async (hash: string) => (await db.query("SELECT 1 FROM stored_values WHERE hash = $1 AND kind = 'body'", [hash])).rows.length === 1;
@@ -119,7 +122,7 @@ describe("本文はいつも消え、出力を残すときは手順書に出る"
     const { values } = await openStore(clock);
     const text = values.body(pl(post).bodyHash as string)!.value;
     // アプリの接続で、別の日（3日目）の判断に、同じ文を含む投稿用の run を足す（偽の投稿は足さない）
-    const day3 = events.find((e) => e.type === "agent.run" && pl(e).agentId === id && pl(e).purpose === "order" && e.recordedAt >= jst(DAYS[2]!, 0))!;
+    const day3 = events.find((e) => e.type === "agent.run" && pl(e).agentId === id && pl(e).purpose === "order" && e.recordedAt >= opensOf(DAYS[2]!))!;
     await asApp(async () => {
       const { values: v, store } = await openStore(clock);
       const outputHash = await v.putBody(JSON.stringify({ post: { text } }));
@@ -260,7 +263,7 @@ describe("偽の記録を、毎日の実行の判断と注文用の run の間�
     // 1回目：その AI の2日目の判断（入力の一覧と出力）を知る（規則の AI なので、同じ時計なら毎回同じ）
     const first = await threeDays();
     const id = pl(first.post).agentId as string;
-    const order1 = first.events.find((e) => e.type === "agent.run" && pl(e).agentId === id && e.recordedAt >= jst(DAYS[1]!, 0) && e.recordedAt < jst(DAYS[2]!, 0))!;
+    const order1 = first.events.find((e) => e.type === "agent.run" && pl(e).agentId === id && e.recordedAt >= opensOf(DAYS[1]!) && e.recordedAt < opensOf(DAYS[2]!))!;
     expect(pl(order1).purpose, "2日目は注文用の run だけのはず").toBe("order");
     const { values: v1 } = await openStore(first.clock);
     const note = (JSON.parse(v1.body(pl(order1).outputHash as string)!.value) as { note: string }).note;
@@ -288,7 +291,7 @@ describe("偽の記録を、毎日の実行の判断と注文用の run の間�
     await expect(w.run(DAYS[1]!, { prepare })).rejects.toThrow(/run \d+ does not match the decision of run \d+ \(output or inputs differ/);
     await expect(w.run(DAYS[1]!, { prepare })).rejects.toThrow("does not match the decision of run");
     const events = await readAllEvents(db);
-    const order = events.find((e) => e.type === "agent.run" && pl(e).agentId === id && pl(e).purpose === "order" && e.recordedAt >= jst(DAYS[1]!, 0))!;
+    const order = events.find((e) => e.type === "agent.run" && pl(e).agentId === id && pl(e).purpose === "order" && e.recordedAt >= opensOf(DAYS[1]!))!;
     expect(order.seq).toBe(forged!.post.seq + 1);
     // 偽の出力で注文票が拒否（invalid_order）にならない。注文票はまだない（運営者が偽の記録を調べるまで、その日は止まる）
     expect(events.filter((e) => e.type.startsWith("order_sheet.") && pl(e).runSeq === order.seq)).toEqual([]);
@@ -352,7 +355,7 @@ describe("偽の記録を、毎日の実行の判断と注文用の run の間�
     expect(await has(e.postOutput)).toBe(false);
     for (const h of genuineOutputs) expect(await has(h), h).toBe(true);
     // 注文用の run が、ほかの判断の本物の出力のハッシュを指すと、その行は2つの判断に指されるので消せない
-    const genuineOrder = events.find((x) => x.type === "agent.run" && pl(x).agentId === "ai-hold" && pl(x).purpose === "order" && x.recordedAt >= jst(DAYS[1]!, 0))!;
+    const genuineOrder = events.find((x) => x.type === "agent.run" && pl(x).agentId === "ai-hold" && pl(x).purpose === "order" && x.recordedAt >= opensOf(DAYS[1]!))!;
     const a = await putBody(out("三つ目", { board, text: "三つ目" }));
     const run = await insertRaw("agent.run", "system", { agentId: "ai-hold", purpose: "post", inputSeqs: [7], outputHash: a, ok: true });
     const bodyHash = await putBody("三つ目");

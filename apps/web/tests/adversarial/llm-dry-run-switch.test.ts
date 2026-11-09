@@ -104,16 +104,18 @@ describe("試運転の判断から、どの道でも注文票を確定できな�
     await replayOf(w, await w.all());
   });
 
-  // 【低・宛先 core】注文票の検査（runProblem）は、元の run の取引日を見ない。バッチの答えの run なら、①の取引日（tradingDate）が分かるのに、
-  // 前の取引日の本物の判断の run を、試運転の日（今日）の注文票の runSeq に使える。1つの判断から2日分の注文票ができ、今日の判断は試運転なのに
-  // 本物の注文が出る。毎日の実行はこの呼び方をしない（今日の判断の run だけを渡す）。直し方の方針：batchSeq のある run なら、
-  // 注文票の tradingDate が①の tradingDate と同じことを確かめる（規則の AI の run には取引日の欄がない）
-  it.fails("【低】前の取引日の本物の注文の判断を、試運転の日の注文票に使い回せない（今は確定する）", async () => {
+  // 前は【低・宛先 core】の欠陥として it.fails にしていた：注文票の検査は元の run の取引日を見ないので、前の取引日の本物の判断の run を、
+  // 試運転の日（今日）の注文票の runSeq に使えた。#228（core の PR #230）で、11/10 以後の取引日では、元の判断（agent.run）が
+  // 受け付けの始まり（前の取引日の引け 16:30）より前なら invalid_sheet で拒むようになり、直った。前の取引日の判断は、必ずその前に記録されている。
+  // 11/9 以前の取引日には、この検査を当てない（記録の照合を変えないため）。そこでは前のままだが、もう過ぎた日なので新しい注文票は出せない
+  it("前の取引日の本物の注文の判断を、試運転の日の注文票に使い回せない（#228 で直った）", async () => {
     const { w, runOf } = await dryD2();
     const old = runOf("ai-claude", "order", D1);
     expect([p(old).dryRun, p(old).batchSeq === undefined]).toEqual([undefined, false]);
     const r = await w.store.commitSheet("ai-claude", { tradingDate: D2, orders: BUY, runSeq: old.seq, inputSeqs: [] });
-    expect(r.ok && r.event.type).toBe("order_sheet.rejected");
+    expect([r.ok && r.event.type, r.ok && p(r.event).reason]).toEqual(["order_sheet.rejected", "invalid_sheet"]);
+    expect((await sheetsOf(w, D2)).filter((e) => e.type === "order_sheet.committed")).toEqual([]);
+    await replayOf(w, await w.all());
   });
 
   // 分かっている限界（lead）：LLM の AI か規則の AI かは記録からは見分けられないので、batchSeq のない run は印を確かめられない

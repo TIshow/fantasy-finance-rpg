@@ -1,10 +1,11 @@
 // 検証役（大枠 #139：#30 の毎日の実行のコマンド・#113 PR-3b・#138 の確認）。本番の準備（productionSetup）で、
 // PGlite（試験用の Postgres）の保管に対して runDaily を回し、記録・照合・二重の記録の穴を突く。
 // 成り立つはずのこと（#30・#113 の lead コメント、PAPER_TRADING_RULES §1、MARKET_DESIGN §5）：
-// (1) あとから前の日を回し直しても、休日の当日に回しても、記録は増えない（同じ日をすぐ2回回す場合は daily-production.test.ts）
+// (1) あとから前の日を回し直しても、記録は増えない（同じ日をすぐ2回回す場合は daily-production.test.ts）。
+//     ただし、引けのあとから次の取引日の締めまでに回した実行は、次の取引日の判断だけを書く（#228 の夜の実行）
 // (2) GitHub Actions の形（待たずに 06:50・07:20・09:35・16:35 に回す）でも、待つ形で回したのと同じ台帳になる
 // (3) 取引対象が架空の6社だけなら、その日の評価と引け後の処理は、9:30 の板寄せのあと、09:35 の回に書く。記録の時刻は
-//     実際に書いた時刻のまま。16:35 の回は書くものがなく、何も書かない（#139 の 12:35 UTC の lead の判断で認められた動き）
+//     実際に書いた時刻のまま。16:35 の回は、その日の分は何も書かず、次の取引日の判断だけを書く（#228。前は何も書かなかった）
 // (4) 毎日の実行は、上場の日に上場の前の四半期の決算を発表する（#143 で直った。確かめるのは daily-production.test.ts）
 // (5) verify（verifyDatabase）は、連鎖のハッシュを作り直した改ざん（数字の書き換え・1件の抜き取り）も、
 //     ログの外の値の書き換えも見逃さない。止まる理由は連鎖ではなく、書き換えた記録の再計算の食い違いや、抜けた記録の検査
@@ -21,6 +22,7 @@ import { migrate, type SqlDb } from "../../src/store/sql";
 import { productionSetup, runDaily, verifyDatabase } from "../../scripts/daily-lib";
 import { FakeClock, jst } from "../contracts/fakes";
 import { openPglite, resetSchema } from "../store/pglite";
+import { expectNextDayDecisionsOnly } from "./next-day-only";
 
 let pg: PGlite;
 let db: SqlDb;
@@ -69,18 +71,22 @@ const accountsOf = async (events: readonly LogEvent[]) => {
 };
 
 describe("毎日の実行のコマンドを、本番の準備で3営業日回す（PGlite）", () => {
-  it("前の日をあとから（新しい日から古い日へ）回し直しても、休日の当日に回しても、記録は1件も増えない", async () => {
+  // 前は「休日の当日（11/14・11/15）に回しても増えない」も確かめていた。D-047 で 11/9 以後の土日は取引日になったので外した
+  it("前の日をあとから（新しい日から古い日へ）回し直しても、その日までの記録は1件も増えない。夜に回すと次の取引日の判断だけを1回書く", async () => {
     await fresh();
     const clock = await runWaiting(DAYS);
     const before = await readAllEvents(db);
     clock.set(jst("2026-11-11", 23));
     for (const d of DAYS.slice().reverse()) await runDaily(d, { db, clock, prepare: productionSetup, holidayTable });
-    // 休日の当日（土曜・日曜の10時）に、その日の日付で回す
-    for (const d of ["2026-11-14", "2026-11-15"]) {
-      clock.set(jst(d, 10));
-      await runDaily(d, { db, clock, prepare: productionSetup, holidayTable });
-    }
-    expect(await readAllEvents(db)).toEqual(before);
+    // 11/11 の 23:00 は 11/12 の受け付けの中なので、11/11 の実行が 11/12 の判断を書く（#228）。前の日の分は増えない
+    const night = await readAllEvents(db);
+    expect(night.slice(0, before.length)).toEqual(before);
+    const extra = night.slice(before.length);
+    expect(extra.filter((e) => e.type === "order_sheet.committed").map((e) => p(e).tradingDate)).toEqual(before.filter((e) => e.type === "agent.registered").map(() => "2026-11-12"));
+    expectNextDayDecisionsOnly(extra, "2026-11-12", "rerun at 11/11 23:00");
+    // もう一度回しても、何も増えない
+    for (const d of DAYS.slice().reverse()) await runDaily(d, { db, clock, prepare: productionSetup, holidayTable });
+    expect(await readAllEvents(db)).toEqual(night);
     // 1日の記録の形：参加者ごと・日ごとに注文票・約定・評価・引け後が1件ずつ、銘柄ごと・日ごとに板寄せが1件
     const n = (t: LogEvent["type"]) => before.filter((e) => e.type === t).length;
     const participants = n("agent.registered");
@@ -115,8 +121,14 @@ describe("毎日の実行のコマンドを、本番の準備で3営業日回す
       count = n;
     });
     expect(afterClose.map((x) => x.date)).toEqual(days);
-    for (const x of afterClose) expect(x.after, `16:35 of ${x.date}`).toBe(x.before);
     const events = await readAllEvents(db);
+    // 16:35 の回は、次の取引日の判断（agent.run・注文票・投稿）だけを書く（#228）
+    for (const x of afterClose) {
+      const wrote = events.slice(x.before, x.after);
+      const next = `${x.date.slice(0, 8)}${String(Number(x.date.slice(8)) + 1).padStart(2, "0")}`;
+      expectNextDayDecisionsOnly(wrote, next, `16:35 of ${x.date}`);
+      expect(wrote.filter((e) => e.type === "order_sheet.committed").length, `16:35 of ${x.date}`).toBeGreaterThan(0);
+    }
     const participants = events.filter((e) => e.type === "agent.registered").map((e) => p(e).agentId as string).sort();
     expect(participants.length).toBeGreaterThan(0);
     for (const d of days) {
