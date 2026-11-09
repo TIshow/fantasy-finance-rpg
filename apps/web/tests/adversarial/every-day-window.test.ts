@@ -284,7 +284,7 @@ describe("臨時休場（market.closed）と受け付けの時間", () => {
     expect(outcome(await w.commit(jst(FRI, 23, 50), SUN, await w.run(jst(FRI, 23, 49)), BUY))).toBe("account_not_ready");
     // 土曜の朝に全件失効（market_closed）を記録する
     const f = await w.ledger.computeFills("alpha", sat, undefined);
-    expect(f.payload.fills.map((x: { reason: string | null }) => x.reason)).toEqual(["market_closed"]);
+    expect(f.payload.fills.map((x) => x.reason)).toEqual(["market_closed"]);
     await w.add(w.sys("fills.executed", jst(SAT, 9), { agentId: "alpha", tradingDate: SAT, sheetSeq: sat, ...f.payload }, [sat]));
     // 休場の日中（土曜の 10:00）でも、日曜の受け付けの中。判断が金曜の引けより後なら確定できる
     await w.decide(jst(SAT, 10), SUN, BUY);

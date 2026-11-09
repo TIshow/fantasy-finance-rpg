@@ -31,7 +31,9 @@ import { openPglite, resetSchema } from "../store/pglite";
 const SEED = 20261106;
 /** 1四半期を3日にして、8営業日のうちに2回の発表を起こす */
 const QUARTER = 3;
-const DAYS = ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-16", "2026-11-17", "2026-11-18"];
+// 11/9 からは土日も取引日（D-047）。前は 11/13（金）の次を 11/16（月）にしていたが、それだと runDay が 11/14・11/15 を
+// 追いつきで補い、板寄せの日が10日になる。8取引日になるよう、続いた8日にした
+const DAYS = ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-14", "2026-11-15", "2026-11-16"];
 const AIS = ["ai-ma5", "ai-reversal", "ai-hold"];
 const holidayTables = new Map([[FIXTURE_HOLIDAYS.contentSha256, FIXTURE_HOLIDAYS]]);
 const p = (e: LogEvent) => e.payload as Record<string, unknown>;
