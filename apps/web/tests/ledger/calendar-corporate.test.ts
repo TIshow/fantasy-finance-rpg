@@ -43,26 +43,39 @@ describe("営業日（§1）", () => {
 });
 
 describe("約定日の確認（§3）", () => {
+  // 切り替えの日（D-047）より前の日付で、東証の営業日の決まりのまま確かめる。10/12（月）はスポーツの日
+  const october = new Set(["2026-10-12"]);
   const sheet = (tradingDate: string, committedAt: number): OrderSheet => ({ agentId: "ai-1", tradingDate, committedAt, orders: [] });
-  const check = (s: OrderSheet, accountAsOf = "2026-11-20") =>
-    validateSheet(s, { universe: new Set(["AAA"]), alreadyCommitted: false, account: holding("AAA", 100, 0), holidays, accountAsOf });
+  const check = (s: OrderSheet, accountAsOf = "2026-10-09") =>
+    validateSheet(s, { universe: new Set(["AAA"]), alreadyCommitted: false, account: holding("AAA", 100, 0), holidays: october, accountAsOf });
 
   it("翌営業日でない約定日（先の日付、祝日）は拒否する", () => {
-    expect(check(sheet("2026-11-24", jst("2026-11-20", 20)))).toEqual({ ok: true });
-    expect(check(sheet("2026-11-25", jst("2026-11-20", 20)))).toEqual({ ok: false, reason: "wrong_trading_date" });
-    expect(check(sheet("2026-11-23", jst("2026-11-20", 20)))).toEqual({ ok: false, reason: "wrong_trading_date" });
+    expect(check(sheet("2026-10-13", jst("2026-10-09", 20)))).toEqual({ ok: true });
+    expect(check(sheet("2026-10-14", jst("2026-10-09", 20)))).toEqual({ ok: false, reason: "wrong_trading_date" });
+    expect(check(sheet("2026-10-12", jst("2026-10-09", 20)))).toEqual({ ok: false, reason: "wrong_trading_date" });
   });
 
   it("形式が不正な約定日は、例外ではなく invalid_sheet で拒否する", () => {
     for (const d of ["2026-13-01", "2026/11/24", "", 20261124]) {
-      expect(check({ ...sheet("2026-11-24", jst("2026-11-20", 20)), tradingDate: d } as unknown as OrderSheet)).toEqual({ ok: false, reason: "invalid_sheet" });
+      expect(check({ ...sheet("2026-10-13", jst("2026-10-09", 20)), tradingDate: d } as unknown as OrderSheet)).toEqual({ ok: false, reason: "invalid_sheet" });
     }
   });
 
-  it("前営業日の引け後処理が済んでいない口座では確定できない（前営業日の日中の確定を含む）", () => {
-    // 金曜（11/20）の10:00に、火曜（11/24）の注文票。口座は木曜（11/19）の引け後のまま
-    expect(check(sheet("2026-11-24", jst("2026-11-20", 10)), "2026-11-19")).toEqual({ ok: false, reason: "account_not_ready" });
-    expect(check(sheet("2026-11-24", jst("2026-11-20", 20)), "2026-11-20")).toEqual({ ok: true });
+  it("前営業日の引け後処理が済んでいない口座では確定できない（前営業日の日中の確定を含む）。切り替えより前は受け付けの時間の決まりを当てない", () => {
+    // 金曜（10/9）の10:00に、火曜（10/13）の注文票。口座は木曜（10/8）の引け後のまま
+    expect(check(sheet("2026-10-13", jst("2026-10-09", 10)), "2026-10-08")).toEqual({ ok: false, reason: "account_not_ready" });
+    expect(check(sheet("2026-10-13", jst("2026-10-09", 10)), "2026-10-09")).toEqual({ ok: true });
+    expect(check(sheet("2026-10-13", jst("2026-10-09", 20)), "2026-10-09")).toEqual({ ok: true });
+  });
+
+  it("切り替えの日より後の取引日は、前の取引日の引け（16:30）より前の確定を拒否する（#228）。11/9 の取引日には当てない", () => {
+    const at = (s: OrderSheet, accountAsOf: string) => validateSheet(s, { universe: new Set(["AAA"]), alreadyCommitted: false, account: holding("AAA", 100, 0), holidays: new Set(), accountAsOf });
+    expect(at(sheet("2026-11-10", jst("2026-11-09", 10)), "2026-11-09")).toEqual({ ok: false, reason: "wrong_trading_date" });
+    expect(at(sheet("2026-11-10", jst("2026-11-09", 16, 30) - 1), "2026-11-09")).toEqual({ ok: false, reason: "wrong_trading_date" });
+    expect(at(sheet("2026-11-10", jst("2026-11-09", 16, 30)), "2026-11-09")).toEqual({ ok: true });
+    // 口座が整っていなくても、受け付けの前なら理由は wrong_trading_date
+    expect(at(sheet("2026-11-15", jst("2026-11-14", 12)), "2026-11-13")).toEqual({ ok: false, reason: "wrong_trading_date" });
+    expect(at(sheet("2026-11-09", jst("2026-11-06", 10)), "2026-11-06")).toEqual({ ok: true });
   });
 });
 
@@ -79,8 +92,8 @@ describe("株式分割（§5）", () => {
     expect(totalValue(account, { AAA: yen(1_500) })).toBe(totalValue(acc, { AAA: yen(3_000) }));
   });
 
-  it("分割前の口座のまま、前営業日の日中に分割前の株数で全株売りを確定することはできない", () => {
-    const s: OrderSheet = { agentId: "ai-1", tradingDate: "2026-11-10", committedAt: jst("2026-11-09", 10), orders: [{ symbol: "AAA", side: "sell", qty: 150 }] };
+  it("分割前の口座のまま、前営業日の夜に分割前の株数で全株売りを確定することはできない", () => {
+    const s: OrderSheet = { agentId: "ai-1", tradingDate: "2026-11-10", committedAt: jst("2026-11-09", 20), orders: [{ symbol: "AAA", side: "sell", qty: 150 }] };
     expect(validateSheet(s, { universe: new Set(["AAA"]), alreadyCommitted: false, account: holding("AAA", 150, 0), holidays: none, accountAsOf: "2026-11-06" })).toEqual({
       ok: false,
       reason: "account_not_ready",

@@ -135,7 +135,9 @@ describe("llm.batch.submitted", () => {
     expect(await reason(log, submitted(jst("2026-11-09", 16, 35), { tradingDate: "2026-11-09" }))).toBe("tradingDate must be the next trading date");
     await ok(log, submitted(jst("2026-11-10", 8, 29), { tradingDate: "2026-11-10" }));
     expect(await reason(log, submitted(jst("2026-11-10", 8, 30), { agentId: "beta", tradingDate: "2026-11-10" }))).toBe("tradingDate must be the next trading date");
-    await ok(log, submitted(jst("2026-11-13", 16, 35), { agentId: "beta", tradingDate: "2026-11-16" }));
+    // 切り替えの日（D-047）より後は土日も取引日なので、金曜の夕方の依頼は土曜の取引日
+    expect(await reason(log, submitted(jst("2026-11-13", 16, 35), { agentId: "beta", tradingDate: "2026-11-16" }))).toBe("tradingDate must be the next trading date");
+    await ok(log, submitted(jst("2026-11-13", 16, 35), { agentId: "beta", tradingDate: "2026-11-14" }));
   });
 
   it("取引日は依頼を決めた時刻（submittedAt）で決める。8:29:59 に決めて 8:30:01 に記録しても当日のまま。記録は1時間以内", async () => {

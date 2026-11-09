@@ -125,15 +125,15 @@ describe("臨時休場のあとの追加の引け後処理（§3.3）", () => {
     expect(again.account("alpha")).toEqual(w.ledger.account("alpha"));
   });
 
-  it("もともと休みの日（祝日）を休場にしても、追加の処理は要らず、翌営業日の注文票を確定できる", async () => {
-    // T を祝日にした一覧。D の翌営業日は NEXT で、NEXT が権利落ち日の公表は通常の引け後処理で反映済み
+  it("切り替えの日（D-047）より後は、一覧で祝日の T も取引日。T を休場にすると追加の処理が要る", async () => {
+    // T を祝日にした一覧でも、D の翌取引日は T
     const w = await start(HOLIDAY_T);
     const ann = await w.announce(jst(D, 15, 41));
-    expect((await w.postClose(jst(D, 15, 42), D, NEXT, [ann])).ok).toBe(true);
+    expect((await w.postClose(jst(D, 15, 42), D, NEXT, [ann])).ok).toBe(false);
+    expect((await w.postClose(jst(D, 15, 42), D, T, [])).ok).toBe(true);
     const closed = await w.closeMarket(jst(D, 17));
-    expect((await w.postClose(jst(D, 18), D, NEXT, [], closed)).ok).toBe(false);
-    const c = await w.commit(jst(D, 20), NEXT);
-    expect(c.ok && c.event.type).toBe("order_sheet.committed");
+    expect((await w.commit(jst(D, 20), NEXT)).rejected).toBe("account_not_ready");
+    expect((await w.postClose(jst(D, 21), D, NEXT, [ann], closed)).ok).toBe(true);
   });
 
   it("反映する公表がなければ、追加の処理は書かなくても次へ進め、書くなら空で書ける", async () => {
