@@ -22,6 +22,7 @@ import { PgValueStore } from "../../src/store/pg-values";
 import { migrate, type SqlDb, type SqlRunner } from "../../src/store/sql";
 import { FakeClock, jst } from "../contracts/fakes";
 import { openPglite, resetSchema } from "../store/pglite";
+import { expectNextDayDecisionsOnly } from "./next-day-only";
 
 let pg: PGlite;
 let db: SqlDb;
@@ -93,8 +94,8 @@ async function runAll(w: ReturnType<typeof world>, o: { quarterDays?: number; tw
       await runDaily(d, opts(w));
       const extra = (await readAllEvents(db)).slice(n);
       const next = nextTradingDay(d, new Set());
-      expect([...new Set(extra.map((e) => e.type))].filter((t) => t !== "agent.run" && t !== "order_sheet.committed" && t !== "post.published"), d).toEqual([]);
-      for (const e of extra.filter((x) => x.type === "order_sheet.committed")) expect(p(e).tradingDate, d).toBe(next);
+      expectNextDayDecisionsOnly(extra, next, d);
+      expect(extra.filter((x) => x.type === "order_sheet.committed").length, d).toBeGreaterThan(0);
       const m = n + extra.length;
       await runDaily(d, opts(w));
       expect((await readAllEvents(db)).length, d).toBe(m);
@@ -254,6 +255,13 @@ describe("途中で落ちても、回し直せば落ちなかった場合と同�
     await fresh();
     const a = world();
     for (const d of days) await runDaily(d, opts(a));
+    // 次の取引日（DAYS[2]）の判断を除いた記録。最後の日の回し直しが途中で止まっていても、もう一回の実行で隠れないよう、それより前に比べる。
+    // 次の取引日の判断は、その受け付けの始まり（DAYS[1] の 16:30）より後の agent.run・投稿と、その日の注文票。DAYS[1] の判断は締め（8:30）より前なので混ざらない
+    const nextDay = DAYS[2]!;
+    const opensNext = jst(DAYS[1]!, 16, 30);
+    const withoutNext = (events: readonly LogEvent[]) =>
+      events.filter((e) => !((e.type === "order_sheet.committed" && p(e).tradingDate === nextDay) || ((e.type === "agent.run" || e.type === "post.published") && e.recordedAt >= opensNext)));
+    const base = await shape(withoutNext(await readAllEvents(db)));
     // 落ちて回し直した実行は、引けのあとに始まると次の取引日の判断も書く（#228）。そろえるため、最後の日をもう一度回す
     await runDaily(days.at(-1)!, opts(a));
     const expectedEvents = await readAllEvents(db);
@@ -270,7 +278,9 @@ describe("途中で落ちても、回し直せば落ちなかった場合と同�
         await fresh();
         const b = world();
         const c = crashingAt(n, after);
-        for (const d of [...days, days.at(-1)!]) {
+        for (const [i, d] of [...days, days.at(-1)!].entries()) {
+          // もう一回の実行の前に、次の取引日の判断を除いた記録が、落ちなかった場合と同じか
+          if (i === days.length) expect(await shape(withoutNext(await readAllEvents(db))), `before the extra run: crash at insert ${n}, after commit: ${after}`).toEqual(base);
           for (let tries = 0; ; tries++) {
             if (tries > 3) throw new Error(`no progress on ${d} (crash at insert ${n}, after commit: ${after})`);
             try {

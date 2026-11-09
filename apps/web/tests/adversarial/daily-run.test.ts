@@ -22,6 +22,7 @@ import { migrate, type SqlDb } from "../../src/store/sql";
 import { productionSetup, runDaily, verifyDatabase } from "../../scripts/daily-lib";
 import { FakeClock, jst } from "../contracts/fakes";
 import { openPglite, resetSchema } from "../store/pglite";
+import { expectNextDayDecisionsOnly } from "./next-day-only";
 
 let pg: PGlite;
 let db: SqlDb;
@@ -82,7 +83,7 @@ describe("毎日の実行のコマンドを、本番の準備で3営業日回す
     expect(night.slice(0, before.length)).toEqual(before);
     const extra = night.slice(before.length);
     expect(extra.filter((e) => e.type === "order_sheet.committed").map((e) => p(e).tradingDate)).toEqual(before.filter((e) => e.type === "agent.registered").map(() => "2026-11-12"));
-    expect([...new Set(extra.map((e) => e.type))].filter((t) => !["agent.run", "order_sheet.committed", "post.published"].includes(t))).toEqual([]);
+    expectNextDayDecisionsOnly(extra, "2026-11-12", "rerun at 11/11 23:00");
     // もう一度回しても、何も増えない
     for (const d of DAYS.slice().reverse()) await runDaily(d, { db, clock, prepare: productionSetup, holidayTable });
     expect(await readAllEvents(db)).toEqual(night);
@@ -124,9 +125,8 @@ describe("毎日の実行のコマンドを、本番の準備で3営業日回す
     // 16:35 の回は、次の取引日の判断（agent.run・注文票・投稿）だけを書く（#228）
     for (const x of afterClose) {
       const wrote = events.slice(x.before, x.after);
-      const next = String(Number(x.date.slice(8)) + 1).padStart(2, "0");
-      expect([...new Set(wrote.map((e) => e.type))].filter((t) => !["agent.run", "order_sheet.committed", "post.published"].includes(t)), `16:35 of ${x.date}`).toEqual([]);
-      expect(wrote.filter((e) => e.type === "order_sheet.committed").every((e) => p(e).tradingDate === `${x.date.slice(0, 8)}${next}`), `16:35 of ${x.date}`).toBe(true);
+      const next = `${x.date.slice(0, 8)}${String(Number(x.date.slice(8)) + 1).padStart(2, "0")}`;
+      expectNextDayDecisionsOnly(wrote, next, `16:35 of ${x.date}`);
       expect(wrote.filter((e) => e.type === "order_sheet.committed").length, `16:35 of ${x.date}`).toBeGreaterThan(0);
     }
     const participants = events.filter((e) => e.type === "agent.registered").map((e) => p(e).agentId as string).sort();

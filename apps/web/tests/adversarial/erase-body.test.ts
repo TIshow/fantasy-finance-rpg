@@ -6,7 +6,7 @@
 // - 消したあとも、イベントの行は変わらず、連鎖・daily verify（verifyDatabase）・保管の開き直し・毎日の実行（runDaily）が続けられる
 // - 読むだけの口（src/store/pg-reader.ts の readSnapshot）は、消した本文を undefined として返し、例外にしない
 // - migrate を何度流しても、消した本文は戻らず、守りも変わらない
-import { decisionOpensAt, marketClosedDays } from "../../src/ledger/ledger";
+import { decisionOpensAt, marketClosedDays, nextTradingDay } from "../../src/ledger/ledger";
 import { readFileSync } from "node:fs";
 import type { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -22,6 +22,7 @@ import { migrate, type SqlDb } from "../../src/store/sql";
 import { FakeClock, jst } from "../contracts/fakes";
 import { buildGoldenLog, FIXTURE_HOLIDAYS } from "../fixtures/golden";
 import { openPglite, resetSchema } from "../store/pglite";
+import { expectNextDayDecisionsOnly } from "./next-day-only";
 
 let pg: PGlite;
 let db: SqlDb;
@@ -386,9 +387,8 @@ describe("消したあとも毎日の実行を続けられる", { timeout: 120_0
       const n = (await readAllEvents(db)).length;
       await runDaily(d, opts(w));
       const extra = (await readAllEvents(db)).slice(n);
-      expect([...new Set(extra.map((e) => e.type))].filter((t) => !["agent.run", "order_sheet.committed", "post.published"].includes(t)), d).toEqual([]);
+      expectNextDayDecisionsOnly(extra, nextTradingDay(d, marketClosedDays(new Set())), d);
       for (const e of extra) expect(e.recordedAt, d).toBeGreaterThanOrEqual(jst(d, 16, 30));
-      expect(extra.filter((e) => e.type === "order_sheet.committed").every((e) => p(e).tradingDate !== d), d).toBe(true);
       const m = n + extra.length;
       await runDaily(d, opts(w));
       expect((await readAllEvents(db)).length, d).toBe(m);

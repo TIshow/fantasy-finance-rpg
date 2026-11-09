@@ -118,6 +118,24 @@ describe("締めのあとの実行", () => {
     // 次の取引日（D3）の判断もしない（D2 の引けの前）
     expect(r.some((x) => x.date !== undefined)).toBe(false);
   });
+
+  it("本番と同じ設定（decideNext はずっと有効）：D1 の 09:35 のあと、D2 の 08:45 まで何も動かなければ、D2 の依頼も判断も書かず、D3 の依頼も早まって書かない", async () => {
+    const w = await nightWorld();
+    for (const t of [jst(D0, 6, 50), jst(D0, 9, 35), jst(D0, 16, 35)]) await w.at(t);
+    answerAll(w);
+    await w.at(jst(D1, 6, 50));
+    await w.at(jst(D1, 9, 35));
+    const before = (await w.all()).length;
+    const r = await w.at(jst(D2, 8, 45));
+    expect(missedCutoff(r)).toBe(true);
+    const after = (await w.all()).slice(before);
+    // D2 の依頼（D1 の引けのあとに出すはずだったもの）は、締めを過ぎたので書かない。D3 の依頼は、D2 の引けの前なので書かない
+    expect(after.filter((e) => e.type === "llm.batch.submitted").map((e) => p(e).tradingDate)).toEqual([]);
+    // D2 の注文票も、注文の判断（成功・失敗とも）も書かない
+    expect(after.filter((e) => (e.type === "order_sheet.committed" || e.type === "order_sheet.rejected") && p(e).tradingDate === D2)).toEqual([]);
+    expect(after.filter((e) => e.type === "agent.run" && p(e).purpose === "order")).toEqual([]);
+    expect(r.some((x) => x.date !== undefined)).toBe(false);
+  });
 });
 
 describe("夜の判断を一度したあと", () => {
@@ -168,7 +186,9 @@ describe("16:35 が抜け、引けのあとの最初の実行が 23:50 か 04:50
       const submitted = (e: LogEvent) => e.type === "llm.batch.submitted" && p(e).tradingDate === D1;
       const sheet = (e: LogEvent) => e.type === "order_sheet.committed" && p(e).tradingDate === D1;
       // D0 の引け後の処理が全員分あり、そのあとに D1 の依頼（3社）、そのあとに D1 の規則の AI の注文票
-      expect(wrote.filter(postClose).length).toBeGreaterThan(0);
+      // 引け後の処理は、D0 に参加した全員にちょうど1件ずつ
+      const registered = (await w.of("agent.registered")).map((e) => p(e).agentId as string).sort();
+      expect(wrote.filter(postClose).map((e) => p(e).agentId as string).sort()).toEqual(registered);
       expect(wrote.filter(submitted).map((e) => p(e).agentId).sort()).toEqual([...LLM_IDS].sort());
       expect(lastSeq(postClose)).toBeLessThan(firstSeq(submitted));
       expect(lastSeq(submitted)).toBeLessThan(firstSeq(sheet));

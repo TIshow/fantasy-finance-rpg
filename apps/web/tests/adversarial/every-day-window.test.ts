@@ -148,9 +148,12 @@ describe("夜の判断（前の日の 17:50・23:50、当日の 04:50）の入�
       const src = await w.add(w.sys("source.captured", at - 120_000, { publishedAt: at - 180_000, fetchedAt: at - 120_000 }));
       const inputs = [close, valuation, src];
       const sheet = await w.decide(at, SAT, SELL, "alpha", inputs);
-      // 確定の時点で、土曜の締めより後の記録は1件もない
+      // 確定の時点で、土曜の締めより後の記録は1件もない。
+      // 注意：この確かめと下の「土曜の始値で出し直す」確かめは、記録の時刻が減らないこと（連鎖の検査）と始値が締めのあとにしか書けないことから、
+      // いつでも成り立つ（夜の判断の入力の守りを、ここで初めて確かめているわけではない）。締めより後の情報を入れようとする本当の確かめは、
+      // 下の「並べ替え」の試験（連鎖と出典の検査）と、llm-investor-input.test.ts の「渡した記録の中の境目」、llm-investor-daily.test.ts の「入力の時刻の守り」にある
       expect(w.log.events.every((e) => e.recordedAt < cutoffOf(SAT))).toBe(true);
-      // 土曜の始値を記録してから、それを入力にした判断で同じ日の注文票を出し直しても、締めのあとで断る
+      // 土曜の始値を記録してから、それを入力にした判断で同じ日の注文票を出し直しても断る
       const open = await w.morning(SAT, 10_400, [["alpha", sheet]]);
       const late = await w.commit(jst(SAT, 9, 30), SAT, await w.run(jst(SAT, 9, 29), "alpha", [open]), SELL, "alpha", [open]);
       // 入力の検査（土曜の値段は土曜の判断に使えない）が、締めの検査より先に断る
@@ -367,7 +370,7 @@ describe("11/13（金）の落とし穴：前の暦で書いた記録は、新�
     const last = d.at(-1)!;
     const p = last.payload as Record<string, unknown>;
     const committed: Forge = { type: "order_sheet.committed", recordedAt: last.recordedAt, actor: "agent:alpha", refs: last.refs, keys: [], payload: { agentId: "alpha", tradingDate: MON, orders: BUY, runSeq: p.runSeq, inputSeqs: p.inputSeqs, holidaysSha256: SHA } };
-    expect(await admitAll(await forge([...d.slice(0, -1), committed]), w.store)).toMatch(/order_sheet\.committed/);
+    expect(await admitAll(await forge([...d.slice(0, -1), committed]), w.store)).toMatch(/\(order_sheet\.committed\): .*wrong_trading_date/);
   });
 
   it("11/9〜11/12 の夜は、新旧の暦で次の取引日が同じ（その間の記録は新しい照合を通る）", async () => {
@@ -396,7 +399,7 @@ describe("遅れて何度動いても二重に書かない", () => {
     await w.morning(SAT, 10_000, [["alpha", first]]);
     // 約定は1回だけ書ける
     const f = await w.ledger.computeFills("alpha", first, w.log.events.find((e) => e.type === "prices.open" && (e.payload as { date: string }).date === SAT)!.seq);
-    expect(await w.reason(w.sys("fills.executed", jst(SAT, 9, 30), { agentId: "alpha", tradingDate: SAT, sheetSeq: first, ...f.payload }, [first]))).not.toBe("ok");
+    expect(await w.reason(w.sys("fills.executed", jst(SAT, 9, 30), { agentId: "alpha", tradingDate: SAT, sheetSeq: first, ...f.payload }, [first]))).toBe("no committed sheet for this trading date");
     expect(w.ledger.account("alpha").holdings.AAA?.qty).toBe(200);
     expect(await admitAll(w.log.events, w.store)).toBeNull();
   });
