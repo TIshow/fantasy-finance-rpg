@@ -6,14 +6,16 @@
 //                                                        投稿を取り下げる記録（content.withdrawn）を書き、照合する（DATABASE_ADMIN_URL だけ。本文は消さない）
 // 環境変数：DATABASE_URL（アプリの役割 ffr_app の接続）、DATABASE_SCHEMA（任意）、ALLOW_OWNER_ROLE=1（手元の試験だけ。
 // 追記だけの権限の確認を飛ばす。GitHub Actions では無視して失敗にする）。接続の文字列は出力しない。
-// 終了コード：0 成功、1 失敗、2 使い方の誤り、3 判断が締めに間に合わなかった（その日の全員の判断がなくなった）
+// LLM の AI 投資家（#179）：LLM_ENABLED=true で使う。LLM_DRY_RUN=false のときだけ注文を出す（ほかは投稿だけの試運転）。
+// API キーは ANTHROPIC_API_KEY・OPENAI_API_KEY・GEMINI_API_KEY（GitHub の secrets）。キーは出力しない。
+// 終了コード：0 成功、1 失敗（LLM の段の例外を含む）、2 使い方の誤り、3 判断が締めに間に合わなかった（その日の全員の判断がなくなった）
 import { stderr, stdout } from "node:process";
 import { parseArgs } from "node:util";
 import { cutoffOf, isValidDate } from "../src/ledger/ledger";
 import { scheduleOf } from "../src/runner/day";
 import { pgDb, pgDbFromEnv } from "../src/store/pg-db";
 import { migrate } from "../src/store/sql";
-import { jstDate, missedCutoff, runDaily, verifyDatabase, withdrawPost, withdrawReasonProblem } from "./daily-lib";
+import { jstDate, llmDepsFromEnv, llmFailed, missedCutoff, runDaily, verifyDatabase, withdrawPost, withdrawReasonProblem } from "./daily-lib";
 
 const USAGE = "usage: daily run [--date YYYY-MM-DD] [--wait] | daily verify | daily migrate | daily withdraw --seq <n> --reason <text> [--erase-body] [--operator <name>]";
 
@@ -102,9 +104,11 @@ async function main(argv: string[]): Promise<number> {
     const date = values.date ?? jstDate(clock.now());
     // --wait：決まった時刻（判断・締め・引け）まで実際に待つ。GitHub Actions では使わない（待つ時間にも実行時間がかかる）
     const waitUntil = values.wait ? async (at: number) => void (at > clock.now() && (await sleep(at - clock.now()))) : undefined;
-    const results = await runDaily(date, { db, clock, waitUntil, requireAppendOnlyRole: !skipRoleCheck });
+    const llm = llmDepsFromEnv(process.env, clock);
+    if (llm) stderr.write(`daily: LLM investors are on (${llm.policy.dryRun ? "dry run: posts only, no orders" : "orders on"})\n`);
+    const results = await runDaily(date, { db, clock, waitUntil, requireAppendOnlyRole: !skipRoleCheck, ...(llm ? { llm } : {}) });
     stdout.write(`${JSON.stringify({ date, cutoff: cutoffOf(date), schedule: scheduleOf(date), results })}\n`);
-    return missedCutoff(results) ? 3 : 0;
+    return llmFailed(results) ? 1 : missedCutoff(results) ? 3 : 0;
   } finally {
     await db.close();
   }

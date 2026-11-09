@@ -1,9 +1,9 @@
 // 1日の流れ（#27 PR-1）。取引日 T について、前の日の残り（始値の約定・引け後）→ 判断（締めより前）→ 寄り付きの約定
 // → 引け後の処理と評価、の順に行う。書くのは保管（EventStore）だけ。約定・評価・引け後の中身は、runner が持つ台帳
 // （Ledger.compute*）で作る。どの段も、ログを見て済んでいる分は飛ばし、欠けている分だけを書くので、同じ日をもう一度
-// 回しても二重にならず、途中で落ちても回し直せば続きから進む。外部通信・DB・LLM なし。
+// 回しても二重にならず、途中で落ちても回し直せば続きから進む。外部通信・DB なし。LLM は渡された口（deps.llm）だけを使う。
 // 前提：保管に書くのは、1つの runner だけ（runDay の途中に別の書き手が追記すると、写しと合わずに例外になる）。
-import type { Clock, EventStore, MarketDataPort, PriceObservation } from "../contracts";
+import type { Clock, EventStore, MarketDataPort, PriceObservation, SheetInput } from "../contracts";
 import { EventLog } from "../events/append";
 import { canonicalize } from "../events/canonical";
 import { sha256Hex } from "../events/hash";
@@ -14,6 +14,8 @@ import { cutoffOf, isBusinessDay, nextBusinessDay, previousBusinessDay } from ".
 import type { Account, Deciyen, Order } from "../ledger/types";
 import type { ValuesPort } from "../store/pg-values";
 import { type SplitInput, adjustCloses } from "./adjust";
+import { llmCollect } from "./llm-collect";
+import { type Appended, type DayAccess, type LlmDeps, LocalCopyError, errorText, llmSubmit } from "./llm-stage";
 import { discloseDue } from "./world/disclosure";
 
 /** 判断の入力：その時点までに記録した終値（seq つき）。値はログの外から引き、凍結した写しを渡す */
@@ -90,6 +92,11 @@ export interface RunnerDeps {
    * 1日の最後に、時期が来た四半期の決算（company.disclosed）を書く。渡さなければ発表しない（呼ぶ側が discloseDue を呼ぶ）
    */
   seed?: number;
+  /**
+   * LLM の AI 投資家（#179）。渡せば、引けのあとにその次の営業日の分を各社のバッチに依頼し（llmSubmit）、
+   * 取引日の朝に答えを受け取って投稿と注文票を書く（llmCollect。規則の AI の判断のあと、寄り付きの前）。渡さなければ LLM を呼ばない
+   */
+  llm?: LlmDeps;
 }
 
 const HOUR = 3_600_000;
@@ -115,12 +122,26 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
   // 前の日の板寄せをここで補ったなら、その日の引けのあとに来た発表も、判断の前に書く（判断が、締めより前の発表を見るように）
   await disclose();
   out.push(await day.decide(date, prev));
+  if (deps.llm) out.push(await llmStage("llm.collect", () => llmCollect(day.access(!deps.llm!.policy.dryRun), deps.llm!, date)));
   await deps.waitUntil(s.openAt);
   out.push(await day.open(date));
   await deps.waitUntil(s.closeAt);
   out.push(...(await day.catchUp(date)));
   await disclose();
+  if (deps.llm) out.push(await llmStage("llm.submit", () => llmSubmit(day.access(), deps.llm!, date)));
   return out;
+}
+
+/**
+ * LLM の段の例外は、その段の結果（detail が "error: " で始まる）にして、ほかの段を止めない（毎日の実行は、この結果で失敗の終了コードにする）。
+ * 文は例外の文だけ（API キーは口の外に出ない）。改行・制御文字を空白にし、200文字で切る（errorText）
+ */
+async function llmStage(stage: string, f: () => Promise<StageResult>): Promise<StageResult> {
+  try {
+    return await f();
+  } catch (e) {
+    return { stage, status: "skipped", detail: `error: ${errorText(e)}` };
+  }
 }
 
 /** AIが返した判断の形を確かめ、記録する形にする（post と note を省いたものは、null と空の文字列）。形が違えば例外 */
@@ -182,6 +203,33 @@ class Day {
 
   private append(type: Parameters<EventStore["append"]>[0]["type"], actor: Parameters<EventStore["append"]>[0]["actor"], payload: Payload, refs: number[] = []) {
     return this.deps.store.append({ type, actor, refs, payload }).then((r) => this.sync(r, type));
+  }
+
+  /**
+   * LLM の段（llm-stage.ts）に渡す口。追記は断られても例外にせず、書けたら写しにも当てる。
+   * orders が false（試運転）なら、注文票を確定する口（commitSheet）を持たない凍結したオブジェクトを返す
+   */
+  access(orders = false): DayAccess {
+    // 保管に書けたのに写しに当てられなければ LocalCopyError（写しと保管がずれるので、LLM の段は段ごと止める）
+    const write = async (r: Appended, what: string): Promise<Appended> => {
+      if (!r.ok) return r;
+      try {
+        return { ok: true, event: await this.sync(r, what) };
+      } catch (e) {
+        throw new LocalCopyError(e instanceof Error ? e.message : String(e));
+      }
+    };
+    const base = {
+      events: () => this.log.events,
+      holidays: () => this.log.holidays(),
+      account: (id: string) => this.ledger.account(id),
+      clock: this.deps.clock,
+      values: this.deps.values,
+      append: async (type: Parameters<DayAccess["append"]>[0], payload: Payload, refs: number[]) => write(await this.deps.store.append({ type, actor: "system", refs, payload }), type),
+      post: async (payload: Payload, refs: number[]) => write(await this.deps.store.append({ type: "post.published", actor: `agent:${String(payload.agentId)}`, refs, payload }), "post.published"),
+    };
+    if (!orders) return Object.freeze(base);
+    return Object.freeze({ ...base, commitSheet: async (id: string, sheet: SheetInput) => write(await this.deps.store.commitSheet(id, sheet), `commitSheet ${id}`) });
   }
 
   /** 時期が来た決算の発表を書き、写しにも当てる（discloseDue が保管に追記した分を、ここで検査して取り込む） */
@@ -352,11 +400,25 @@ class Day {
       /** 記録の形（正規化した JSON）にした出力。記録した run から作り直すときは、その本文 */
       let output: string;
       if (runs.length > 0) {
-        const body = this.deps.values.body(pl(runs[0]!).outputHash as string);
-        if (!body) throw new Error(`output of run ${runs[0]!.seq} is not available`);
-        output = body.value;
+        // 判断は、注文用の run があればその出力（注文票が指すもの）。この日の run の出力がすべて同じでなければ止める
+        // （毎日の実行は1つの判断から同じ出力を書くので、違えばほかの書き手が足した記録がある。#179 の verifier の低）
+        // （出力は run ごとに別の乱数で置くので、ハッシュではなく全文で比べる）
+        const source = orderDone ?? runs[0]!;
+        const textOf = (r: LogEvent) => {
+          const body = this.deps.values.body(pl(r).outputHash as string);
+          if (!body) throw new Error(`output of run ${r.seq} is not available`);
+          return body.value;
+        };
+        output = textOf(source);
+        const other = runs.find((r) => textOf(r) !== output || canonicalize(pl(r).inputSeqs) !== canonicalize(pl(source).inputSeqs));
+        // 運営者への案内：記録は消せないので、2つの run を確かめて lead に知らせる。その日の締めを過ぎてから回し直すと、このAIは間に合わなかった扱いで飛ばされ、ほかのAIは進む
+        if (other)
+          throw new Error(
+            `run ${other.seq} does not match the decision of run ${source.seq} (output or inputs differ; another writer may have added records). ` +
+              `Do not edit the log: check both agent.run records and report to lead. After the cutoff of ${date}, a rerun skips this AI as late and the other AIs go on`,
+          );
         decision = JSON.parse(output) as Decision;
-        inputSeqs = pl(runs[0]!).inputSeqs as number[];
+        inputSeqs = pl(source).inputSeqs as number[];
       } else {
         // 口座の根拠：最後の引け後の処理（まだなければ登録）
         const basis = this.log.events.filter((e) => e.type === "corporate_actions.applied" && pl(e).agentId === id).at(-1) ?? registered;

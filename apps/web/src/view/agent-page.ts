@@ -3,9 +3,10 @@
 import type { Account, Deciyen } from "../ledger/types";
 import { dir, latestPost, MARK, settledDates, type Direction } from "./arena";
 import { characterOf, handleOf, type Character } from "./characters";
-import { formatBp, formatJstShort, formatMonthDay, formatSignedYenMark, formatYenMark, roundedRatio } from "./format";
-import { REASON, STATUS } from "./labels";
-import type { View } from "./types";
+import { formatBp, formatJst, formatJstShort, formatMonthDay, formatSignedYenMark, formatYenMark, roundedRatio } from "./format";
+import { INTENT_LABEL, REASON, STANCE_LABEL, STATUS } from "./labels";
+import { labelModel, modelsOf, runModelOf, type ModelLabel } from "./models";
+import type { RunModel, View } from "./types";
 
 export const CHART_W = 600;
 export const CHART_H = 200;
@@ -38,9 +39,38 @@ export interface HistoryRow {
   reason: string | null;
   runSeq: number | null;
 }
+/** その日の判断の1行。投稿、確定した注文票、拒否された注文票のどれか。LLM の出力の形が決まったら、ここに項目を足す */
+export interface DecisionItem {
+  key: string;
+  timeText: string;
+  kind: "post" | "orders" | "rejected" | "failed" | "dry";
+  label: string;
+  /** 投稿の本文、注文の要約（"買 TSTA 300株"）、拒否の理由 */
+  text: string;
+  /** 本文が出せない（非表示・保管にない）ときの説明。出せるときは null */
+  note: string | null;
+  /** 投稿の掲示板（銘柄または「全体」）。投稿でなければ null */
+  symbol: string | null;
+  /** 投稿の種類と見立て（"戦略"・"▲ 強気"） */
+  tags: string[];
+  runSeq: number | null;
+  /** この判断をしたときのモデル（判断の記録の runSeq から）。記録がなければ null */
+  model: ModelLabel | null;
+  /** 試運転（注文を出さない実行）の判断か。判断の記録の dryRun が true のときだけ true */
+  dryRun: boolean;
+}
+export interface DecisionDay {
+  /** "2026-11-18"（日本時間。見出しの key） */
+  date: string;
+  /** "11/18"。表示する日が年をまたぐときは "2025/12/30" */
+  dateText: string;
+  items: DecisionItem[];
+}
 export interface AgentPage {
   agentId: string;
   character: Character;
+  /** 判断の記録のモデル。記録がなければ null */
+  model: ModelLabel | null;
   loggedName: string;
   handle: string;
   rank: number | null;
@@ -55,7 +85,11 @@ export interface AgentPage {
   holdings: HoldingCard[];
   cash: { text: string; weightText: string } | null;
   history: HistoryRow[];
+  /** 新しい日から、最大 DECISION_DAYS 日分 */
+  decisions: DecisionDay[];
 }
+
+export const DECISION_DAYS = 10;
 
 const SIDE = { buy: "買", sell: "売" } as const;
 const pct = (permille: number) => `${Math.floor(permille / 10)}.${permille % 10}%`;
@@ -83,10 +117,62 @@ export function suspensionOf(view: View, agentId: string): string | null {
 /** 取引履歴の行の id（掲示板からのリンク先） */
 export const fillKey = (seq: number, fillIndex: number) => `f${seq}-${fillIndex}`;
 
+/**
+ * その日の判断：投稿と注文票を、記録された日（日本時間）ごとにまとめる。
+ * 記録にある項目（投稿の本文・種類・見立て、注文票の中身、拒否の理由）だけを出す。LLM が書く「判断の理由」は、出力の形が決まってから足す
+ */
+/** 判断に失敗した理由（エラーコード）の、見る人向けの説明。知らないコードは記録のまま添える */
+export const RUN_FAILURE: Record<string, string> = {
+  budget_exceeded: "この日はLLMの費用の上限を超えるため、依頼を送らず、判断をしませんでした",
+  timeout: "LLMの返事が時間内に届かず、判断が出ませんでした",
+  rate_limited: "LLMの提供元の利用制限にあたり、判断が出ませんでした",
+  provider_error: "LLMの提供元でエラーが起き、判断が出ませんでした",
+  invalid_output: "LLMの出力が記録の形に合わず、判断として使いませんでした",
+};
+/** 決まったコードだけを説明にする。知らないコード・コードなしは、記録の文字を出さず固定の文にする（提供元の文面やIDが漏れないように） */
+export const failureText = (code: string | null) => (code !== null && Object.hasOwn(RUN_FAILURE, code) ? RUN_FAILURE[code]! : "判断が出ませんでした（理由の分類なし）");
+
+/**
+ * runs には、このAIの判断の記録（成功・失敗とも）を渡す。失敗した判断は「判断に失敗」の行として出し、
+ * dryRun が true の判断（投稿・注文票も）には試運転の印を付ける
+ */
+export function decisionsOf(mine: View["timeline"], modelOf: (runSeq: number | null) => ModelLabel | null = () => null, runs: readonly RunModel[] = []): DecisionDay[] {
+  const dry = (runSeq: number | null) => runSeq !== null && runs.some((r) => r.seq === runSeq && r.dryRun);
+  const byDay = new Map<string, (DecisionItem & { at: number; seq: number })[]>();
+  const add = (at: number, item: DecisionItem & { at: number; seq: number }) => (byDay.get(formatJst(at).slice(0, 10)) ?? byDay.set(formatJst(at).slice(0, 10), []).get(formatJst(at).slice(0, 10))!).push(item);
+  for (const t of mine) {
+    const time = formatJstShort(t.at).slice(-5);
+    if (t.kind === "post") {
+      const tags = [...(t.intent ? [INTENT_LABEL[t.intent]] : []), ...(t.stance ? [`${STANCE_LABEL[t.stance].mark} ${STANCE_LABEL[t.stance].text}`] : [])];
+      const note = t.withdrawn ? `非表示（${t.withdrawn.reason || "理由の記載なし"}）` : t.text === null ? "本文が保管にありません" : null;
+      add(t.at, { at: t.at, seq: t.seq, key: `p${t.seq}`, timeText: time, kind: "post", label: "投稿", text: t.text ?? "", note, symbol: t.symbol, tags, runSeq: t.runSeq, model: modelOf(t.runSeq), dryRun: dry(t.runSeq) });
+    } else if (t.kind === "order_sheet") {
+      const text = t.orders.length === 0 ? "注文なし" : t.orders.map((o) => `${SIDE[o.side]} ${o.symbol} ${o.qty}株`).join("、");
+      add(t.at, { at: t.at, seq: t.seq, key: `s${t.seq}`, timeText: time, kind: "orders", label: `注文票（約定日 ${formatMonthDay(t.tradingDate)}）`, text, note: null, symbol: null, tags: [], runSeq: t.runSeq, model: modelOf(t.runSeq), dryRun: dry(t.runSeq) });
+    } else if (t.kind === "rejected") {
+      add(t.at, { at: t.at, seq: t.seq, key: `r${t.seq}`, timeText: time, kind: "rejected", label: "注文票を拒否", text: dry(t.runSeq) && t.reason === "invalid_sheet" ? "試運転の判断のため、注文にしませんでした" : (REASON[t.reason] ?? t.reason), note: null, symbol: null, tags: [], runSeq: t.runSeq, model: modelOf(t.runSeq), dryRun: dry(t.runSeq) });
+    }
+  }
+  const sheetRuns = new Set(mine.flatMap((t) => ((t.kind === "order_sheet" || t.kind === "rejected") && t.runSeq !== null ? [t.runSeq] : [])));
+  for (const r of runs) {
+    // 成功した試運転の注文の判断は注文票にならない。その日の判断が消えないよう、行を出す（注文の中身は記録の外にあるので出さない）
+    if (r.ok && r.dryRun && r.purpose === "order" && !sheetRuns.has(r.seq)) {
+      add(r.at, { at: r.at, seq: r.seq, key: `d${r.seq}`, timeText: formatJstShort(r.at).slice(-5), kind: "dry", label: "試運転", text: "試運転：注文は出していません", note: null, symbol: null, tags: [], runSeq: r.seq, model: labelModel(r.provider, r.modelId), dryRun: true });
+      continue;
+    }
+    if (r.ok) continue;
+    add(r.at, { at: r.at, seq: r.seq, key: `x${r.seq}`, timeText: formatJstShort(r.at).slice(-5), kind: "failed", label: "判断に失敗", text: failureText(r.errorCode), note: null, symbol: null, tags: [], runSeq: r.seq, model: labelModel(r.provider, r.modelId), dryRun: r.dryRun });
+  }
+  const days = [...byDay].sort((x, y) => (x[0] < y[0] ? 1 : -1)).slice(0, DECISION_DAYS);
+  const crossesYear = new Set(days.map(([day]) => day.slice(0, 4))).size > 1;
+  return days.map(([day, items]) => ({ date: day, dateText: crossesYear ? `${day.slice(0, 4)}/${formatMonthDay(day)}` : formatMonthDay(day), items: items.sort((p, q) => p.at - q.at || p.seq - q.seq).map(({ at: _a, seq: _s, ...rest }) => rest) }));
+}
+
 export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account>, agentId: string): AgentPage | null {
   const a = view.agents.find((x) => x.agentId === agentId);
   if (!a) return null;
-  const character = characterOf(agentId, a.agentName);
+  const provider = (id: string) => view.models.find((m) => m.agentId === id)?.provider;
+  const character = characterOf(agentId, a.agentName, provider(agentId));
   const last = a.days.at(-1);
   const mine = view.timeline.filter((t) => t.agentId === agentId);
   const filled = mine.filter((t) => t.kind === "fill" && t.qty > 0).length;
@@ -107,8 +193,8 @@ export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account
   // 初期資金の点は、そのAIの最初の評価の日の1つ前の位置に置く（開始が遅いAIに、実在しない線を引かない）
   const line = (o: (typeof view.agents)[number]): ChartLine => ({
     agentId: o.agentId,
-    name: characterOf(o.agentId, o.agentName).name,
-    color: characterOf(o.agentId, o.agentName).color,
+    name: characterOf(o.agentId, o.agentName, provider(o.agentId)).name,
+    color: characterOf(o.agentId, o.agentName, provider(o.agentId)).color,
     bold: o.agentId === agentId,
     points: [`${x(dates.indexOf(o.days[0]!.date))},${y(o.initialCash)}`, ...o.days.map((d) => `${x(dates.indexOf(d.date) + 1)},${y(d.total)}`)].join(" "),
   });
@@ -162,9 +248,10 @@ export function buildAgentPage(view: View, accounts: ReadonlyMap<string, Account
   const history = rows.sort((p, q) => (key(p.date) < key(q.date) ? 1 : key(p.date) > key(q.date) ? -1 : p.seq - q.seq || p.idx - q.idx)).map((r) => r.row);
 
   const suspended = suspensionOf(view, agentId);
+  const decisions = decisionsOf(mine, (n) => runModelOf(view, n, agentId), view.runs.filter((r) => r.agentId === agentId));
 
   return {
-    agentId, character, loggedName: a.agentName, handle: handleOf(agentId), rank: settledDays.at(-1)?.rank ?? null, rankAsOf: settledDays.at(-1) ? formatMonthDay(settledDays.at(-1)!.date) : null, suspended, badges, latestPost: latestPost(view, agentId), chart, holdings, cash, history,
+    agentId, character, model: modelsOf(view).get(agentId) ?? null, loggedName: a.agentName, handle: handleOf(agentId), rank: settledDays.at(-1)?.rank ?? null, rankAsOf: settledDays.at(-1) ? formatMonthDay(settledDays.at(-1)!.date) : null, suspended, badges, latestPost: latestPost(view, agentId), chart, holdings, cash, history, decisions,
     stats: last ? { totalText: formatYenMark(last.total), asOf: formatMonthDay(last.date), changeText: sign(last.change), changeDirection: dir(last.change), pnlText: `${sign(last.total - a.initialCash)}（${formatBp(roundedRatio(last.total - a.initialCash, a.initialCash, 10000), true)}）`, pnlDirection: dir(last.total - a.initialCash), fills: filled } : null,
   };
 }

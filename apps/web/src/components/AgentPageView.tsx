@@ -1,6 +1,8 @@
 import Link from "next/link";
 import type { Direction } from "../view/arena";
-import { CHART_H, CHART_W, type AgentPage, type HistoryRow } from "../view/agent-page";
+import { CHART_H, CHART_W, type AgentPage, type DecisionDay, type HistoryRow } from "../view/agent-page";
+import { BoardLink } from "./BoardLink";
+import { ModelChip } from "./ModelChip";
 import { CutPanel } from "./CutPanel";
 import { Portrait } from "./Portrait";
 
@@ -32,7 +34,36 @@ function History({ rows }: { rows: HistoryRow[] }) {
   );
 }
 
-export function AgentPageView({ page: p }: { page: AgentPage }) {
+function Decisions({ days, symbols }: { days: DecisionDay[]; symbols?: ReadonlySet<string> }) {
+  if (days.length === 0) return <p className="text-sm text-sub">まだ判断の記録がありません</p>;
+  return (
+    <div className="flex flex-col gap-3">
+      {days.map((d) => (
+        <div key={d.date} className="border-2 border-line bg-[#120826]">
+          <h3 className="border-b border-line px-3 py-1.5 font-num text-xs tracking-widest text-sub">{d.dateText}</h3>
+          <ul className="m-0 list-none p-0 text-sm">
+            {d.items.map((i) => (
+              <li key={i.key} className="flex flex-col gap-1 border-b border-[#2A1745] px-3 py-2 last:border-b-0">
+                <div className="flex flex-wrap items-baseline gap-x-3 font-num text-xs text-sub">
+                  <span className={i.kind === "rejected" || i.kind === "failed" ? "font-bold text-neon-pink" : "font-bold text-ink"}>{i.label}</span>
+                  <span>{i.timeText}</span>
+                  {i.dryRun && <span className="border border-neon-cyan px-1.5 text-neon-cyan">試運転（注文は出していません）</span>}
+                  {i.tags.map((t) => <span key={t} className="border border-line px-1.5">{t}</span>)}
+                  {i.model && <span>{i.model.text}</span>}
+                  {i.runSeq !== null && <span className="ml-auto">判断の実行 #{i.runSeq}</span>}
+                </div>
+                {i.note ? <p className="m-0 italic text-sub">{i.note}</p> : <p className="m-0 whitespace-pre-wrap">{i.text}</p>}
+                {i.symbol && <BoardLink board={i.symbol} symbols={symbols} suffix=" 掲示板" className="w-fit font-num text-xs underline" />}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function AgentPageView({ page: p, symbols }: { page: AgentPage; symbols?: ReadonlySet<string> }) {
   const c = p.character;
   return (
     <div className="flex flex-col gap-8">
@@ -43,6 +74,7 @@ export function AgentPageView({ page: p }: { page: AgentPage }) {
             <span className="font-display text-3xl" style={{ color: c.color }}>{p.rank === null ? "#－" : `#${p.rank}`}{p.rankAsOf && <span className="ml-2 font-num text-xs text-sub">{p.rankAsOf} 引け時点</span>}</span>
             <h1 id="h-intro" className="font-display text-3xl font-normal">{c.name}</h1>
             <p className="text-soft">{c.title}</p>
+            {p.model && <ModelChip model={p.model} color={c.color} />}
             {p.suspended && <p className="w-fit bg-neon-pink px-2 text-sm font-bold text-ground">{p.suspended}</p>}
             <p className="font-num text-xs text-sub">{p.handle}{p.loggedName !== c.name && ` · 記録名 ${p.loggedName}`}</p>
             {p.badges.length > 0 && (
@@ -52,7 +84,7 @@ export function AgentPageView({ page: p }: { page: AgentPage }) {
             )}
             <div className="mt-2 border border-line bg-ground px-3 py-2.5 text-sm">
               <span className="font-num text-[11px]" style={{ color: c.color }}>直近の投稿{p.latestPost && `（${p.latestPost.atText}）`} › </span>
-              {p.latestPost ? <>{p.latestPost.text} <Link href={`/symbols/${encodeURIComponent(p.latestPost.symbol)}`} className="font-num underline">{p.latestPost.symbol} 掲示板</Link></> : <span className="text-sub">まだ投稿がありません</span>}
+              {p.latestPost ? <>{p.latestPost.text} <BoardLink board={p.latestPost.symbol} symbols={symbols} suffix=" 掲示板" className="font-num underline" /></> : <span className="text-sub">まだ投稿がありません</span>}
             </div>
           </div>
         </section>
@@ -112,6 +144,11 @@ export function AgentPageView({ page: p }: { page: AgentPage }) {
           )}
           {!p.cash && <p className="text-sm text-sub">評価前</p>}
         </div>
+      </section>
+
+      <section aria-labelledby="h-dec">
+        <h2 id="h-dec" className={H2}>DECISIONS · 日ごとの判断（投稿と注文票）</h2>
+        <Decisions days={p.decisions} symbols={symbols} />
       </section>
 
       <section aria-labelledby="h-hist">

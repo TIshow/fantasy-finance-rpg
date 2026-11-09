@@ -3,6 +3,7 @@
 // 構成比は「評価した保有の評価額 ÷ 総資産」の表示用の割り算（整数の四捨五入）。
 import { characterOf, handleOf, type Character } from "./characters";
 import { formatBp, formatJstShort, formatMonthDay, formatSignedYenMark, formatYenMark, roundedRatio } from "./format";
+import { modelsOf, type ModelLabel } from "./models";
 import type { TimelineItem, View } from "./types";
 
 export type Direction = "up" | "down" | "flat";
@@ -36,7 +37,7 @@ export function sparkline(values: number[], baseline: number): Sparkline {
 /** 直近の（非表示でなく本文が保管にある）投稿 */
 export function latestPost(view: View, agentId: string) {
   const p = findLast(view.timeline, (t) => t.kind === "post" && t.agentId === agentId && t.withdrawn === null && t.text !== null);
-  return p && p.kind === "post" ? { text: p.text as string, symbol: p.symbol, atText: formatJstShort(p.at) } : null;
+  return p && p.kind === "post" ? { text: p.text as string, symbol: p.symbol, atText: formatJstShort(p.at) + (p.dryRun ? "・試運転" : "") } : null;
 }
 
 /**
@@ -54,6 +55,8 @@ export interface ArenaCard {
   /** 記録の displayName（ほかの画面と照らし合わせるため、カードにも出す） */
   loggedName: string;
   handle: string;
+  /** 判断の記録のモデル（提供元と版）。判断の記録がなければ null */
+  model: ModelLabel | null;
   /** 評価がまだないAIは null */
   rank: number | null;
   /** 総資産と損益は最後の評価の記録から。評価がまだなければ null（初期資金などで埋めない） */
@@ -97,7 +100,9 @@ const findLast = <T>(list: readonly T[], pred: (x: T) => boolean): T | undefined
 const FEED_LIMIT = 12;
 
 export function buildArena(view: View): Arena {
-  const who = (id: string, loggedName: string) => characterOf(id, loggedName).name;
+  const models = modelsOf(view);
+  const charOf = (id: string, loggedName: string) => characterOf(id, loggedName, view.models.find((m) => m.agentId === id)?.provider);
+  const who = (id: string, loggedName: string) => charOf(id, loggedName).name;
   // トップに出すのはAI投資家（view.agents）の動きだけ。マーケットメイカー・ばらばらの参加者の売買は、タイムラインにある
   const investors = new Set(view.agents.map((a) => a.agentId));
   const mine = view.timeline.filter((t) => investors.has(t.agentId));
@@ -107,7 +112,7 @@ export function buildArena(view: View): Arena {
 
   const settledDays = settledDates(view);
   const cards: ArenaCard[] = view.agents.map((a) => {
-    const character = characterOf(a.agentId, a.agentName);
+    const character = charOf(a.agentId, a.agentName);
     const lastDay = a.days.at(-1);
     const total = lastDay?.total;
     const diff = total === undefined ? 0 : total - a.initialCash;
@@ -128,6 +133,7 @@ export function buildArena(view: View): Arena {
       character,
       loggedName: a.agentName,
       handle: handleOf(a.agentId),
+      model: models.get(a.agentId) ?? null,
       rank: findLast(a.days, (d) => settledDays.has(d.date))?.rank ?? null,
       totalText: total === undefined ? null : formatYenMark(total),
       asOf: lastDay ? formatMonthDay(lastDay.date) : null,
@@ -143,12 +149,12 @@ export function buildArena(view: View): Arena {
 
   const feed: (FeedItem & { at: number; seq: number })[] = [];
   for (const f of fills) {
-    feed.push({ at: f.at, seq: f.seq, key: `fill-${f.seq}-${f.fillIndex}`, timeText: formatJstShort(f.at), kind: "fill", label: "約定", color: characterOf(f.agentId, f.agentName).color, text: `${who(f.agentId, f.agentName)}　${SIDE[f.side]} ${f.symbol} ${f.qty}株${f.price === null ? "" : ` @${formatYenMark(f.price)}`}` });
+    feed.push({ at: f.at, seq: f.seq, key: `fill-${f.seq}-${f.fillIndex}`, timeText: formatJstShort(f.at), kind: "fill", label: "約定", color: charOf(f.agentId, f.agentName).color, text: `${who(f.agentId, f.agentName)}　${SIDE[f.side]} ${f.symbol} ${f.qty}株${f.price === null ? "" : ` @${formatYenMark(f.price)}`}` });
   }
   for (const p of posts) {
-    const c = characterOf(p.agentId, p.agentName);
+    const c = charOf(p.agentId, p.agentName);
     const text = p.withdrawn ? `${c.name}の投稿（非表示：${p.withdrawn.reason || "理由の記載なし"}）` : p.text === null ? `${c.name}の投稿（本文が保管にありません）` : `${c.name}「${p.text}」`;
-    feed.push({ at: p.at, seq: p.seq, key: `post-${p.seq}`, timeText: formatJstShort(p.at), kind: "post", label: "投稿", color: "#D9C8F2", text, symbol: p.symbol });
+    feed.push({ at: p.at, seq: p.seq, key: `post-${p.seq}`, timeText: formatJstShort(p.at), kind: "post", label: p.dryRun ? "投稿（試運転）" : "投稿", color: "#D9C8F2", text, symbol: p.symbol });
   }
   // 順位：評価の記録の日ごとに、首位のAI。前の評価の日の首位と同じなら「守る」
   const byDate = new Map<string, (TimelineItem & { kind: "valuation" })[]>();

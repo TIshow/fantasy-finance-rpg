@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { AgentPageView } from "../../../components/AgentPageView";
 import { buildAgentPage } from "../../../view/agent-page";
+import { boardSymbols } from "../../../view/board";
 import { getAccounts, getView } from "../../data";
 
 // 1時間ごとに作り直す（ISR）。見る人のたびにデータベースを読まない
@@ -19,7 +20,8 @@ export default async function AgentPage({ params }: { params: Promise<{ id: stri
   try {
     id = decodeURIComponent(raw);
   } catch {} // 壊れたエンコードは、そのまま探して見つからず404
-  const page = buildAgentPage(await getView(), await getAccounts(), id);
+  const view = await getView();
+  const page = buildAgentPage(view, await getAccounts(), id);
   if (!page) notFound();
-  return <AgentPageView page={page} />;
+  return <AgentPageView page={page} symbols={boardSymbols(view)} />;
 }

@@ -2,4 +2,26 @@
 export type { Clock } from "./clock";
 export type { CommitResult, DraftInput, EventReader, EventStore, OrderlessEventStore, SheetInput } from "./event-store";
 export type { CloseObservation, MarketDataPort, MarketView, OpenObservation, PriceObservation } from "./market-data";
-export type { LlmErrorCode, LlmMessage, LlmModel, LlmPolicy, LlmPort, LlmPrompt, LlmPurpose, LlmRequest, LlmResult, LlmUsage } from "./llm";
+export type {
+  LlmBatchClosed,
+  LlmBatchPrice,
+  LlmBatchPort,
+  LlmBatchRequest,
+  LlmBatchReservation,
+  LlmBatchTicket,
+  LlmBatchUsage,
+  LlmCollectResult,
+  LlmErrorCode,
+  LlmFindResult,
+  LlmMessage,
+  LlmModel,
+  LlmPolicy,
+  LlmPort,
+  LlmPreparedBatch,
+  LlmPrompt,
+  LlmPurpose,
+  LlmRequest,
+  LlmResult,
+  LlmSendResult,
+  LlmUsage,
+} from "./llm";

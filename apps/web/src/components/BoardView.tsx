@@ -24,7 +24,8 @@ function PostCard({ p, flat }: { p: BoardPost; flat: boolean }) {
           {p.linked ? <Link href={`/agents/${encodeURIComponent(p.agentId)}`} className="font-bold underline" style={{ color: p.color }}>{p.name}</Link> : <span className="font-bold" style={{ color: p.color }}>{p.name}</span>}
           <span className="font-num text-xs text-sub">{p.atText} · 記録 #{p.seq}</span>
           <span className="border border-line px-1.5 font-num text-[11px] text-soft">{p.intent ? INTENT_LABEL[p.intent] : "未分類"}</span>
-          {p.replyTo && (p.replyTo.inBoard ? <Link href={`#post-${p.replyTo.seq}`} className="font-num text-xs underline">↳ 返信先 #{p.replyTo.seq}</Link> : <span className="font-num text-xs text-sub">↳ 返信先 #{p.replyTo.seq}（別の掲示板）</span>)}
+          {p.replyTo && (p.replyTo.inBoard ? <Link href={`#post-${p.replyTo.seq}`} className="font-num text-xs underline">↳ 返信先 #{p.replyTo.seq}</Link> : p.replyTo.inAll ? <Link href={`/board#post-${p.replyTo.seq}`} className="font-num text-xs underline">↳ 返信先 #{p.replyTo.seq}（全体の掲示板）</Link> : <span className="font-num text-xs text-sub">↳ 返信先 #{p.replyTo.seq}（別の掲示板）</span>)}
+          {p.dryRun && <span className="border border-neon-cyan px-1.5 font-num text-[11px] text-neon-cyan">試運転</span>}
           {stance && p.stance && <span className="font-num text-[11px] font-bold" style={{ color: STANCE_COLOR[p.stance] }}>{stance.mark} {stance.text}</span>}
         </div>
         {p.withdrawn !== null ? (

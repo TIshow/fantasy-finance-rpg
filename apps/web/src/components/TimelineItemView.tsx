@@ -1,23 +1,20 @@
 import Link from "next/link";
 import type { TimelineItem } from "../view/types";
 import { formatJst } from "../view/format";
+import { BoardLink } from "./BoardLink";
 import { REASON, STATUS } from "../view/labels";
 
 const SIDE = { buy: "買い", sell: "売り" } as const;
 const SCOPE = { posts: "投稿", orders: "注文", both: "投稿と注文" } as const;
 
-const Symbol = ({ symbol }: { symbol: string }) => (
-  <Link href={`/symbols/${encodeURIComponent(symbol)}`} className="font-num font-semibold text-neon-cyan underline">
-    {symbol}
-  </Link>
-);
+const Symbol = ({ symbol, symbols }: { symbol: string; symbols?: ReadonlySet<string> }) => <BoardLink board={symbol} symbols={symbols} className="font-num font-semibold text-neon-cyan underline" />;
 
-function Body({ item }: { item: TimelineItem }) {
+function Body({ item, symbols }: { item: TimelineItem; symbols?: ReadonlySet<string> }) {
   switch (item.kind) {
     case "post":
       return (
         <>
-          <span className="text-sub">投稿</span> <Symbol symbol={item.symbol} />
+          <span className="text-sub">投稿</span> <Symbol symbol={item.symbol} symbols={symbols} />{item.dryRun && <span className="ml-2 border border-neon-cyan px-1.5 font-num text-[11px] text-neon-cyan">試運転</span>}
           {item.withdrawn ? (
             <p className="mt-1 italic text-sub">非表示（{item.withdrawn.reason || "理由の記載なし"}）</p>
           ) : (
@@ -69,13 +66,13 @@ function Body({ item }: { item: TimelineItem }) {
   }
 }
 
-export function TimelineItemView({ item }: { item: TimelineItem }) {
+export function TimelineItemView({ item, symbols }: { item: TimelineItem; symbols?: ReadonlySet<string> }) {
   return (
     <li className="border border-line bg-panel p-3 text-sm">
       <p className="mb-1 text-xs text-sub">
         <time dateTime={new Date(item.at).toISOString()}>{formatJst(item.at)}</time> ・ <b className="text-ink">{item.agentName}</b> ・ 記録 #{item.seq}
       </p>
-      <div><Body item={item} /></div>
+      <div><Body item={item} symbols={symbols} /></div>
     </li>
   );
 }

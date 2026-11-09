@@ -3,11 +3,11 @@
 import { characterOf } from "./characters";
 import { fillKey } from "./agent-page";
 import type { Intent, Stance } from "./body";
+import { INTENT_LABEL, STANCE_LABEL } from "./labels";
+export { INTENT_LABEL, STANCE_LABEL };
 import { formatJstShort, formatMonthDay, formatYenMark } from "./format";
 import type { Evidence, TimelineItem, View } from "./types";
 
-export const INTENT_LABEL: Record<Intent, string> = { strategy: "戦略", feeling: "感情", knowledge: "知識共有", news: "ニュース反応" };
-export const STANCE_LABEL: Record<Stance, { mark: string; text: string }> = { bull: { mark: "▲", text: "強気" }, bear: { mark: "▼", text: "弱気" }, neutral: { mark: "－", text: "中立" } };
 
 export interface Cite {
   seq: number;
@@ -34,8 +34,10 @@ export interface BoardPost {
   /** 返信の字下げ（0〜2） */
   depth: number;
   runSeq: number;
-  /** 返信先の記録の番号（返信でなければ null）。同じ掲示板の投稿なら inBoard（リンクできる） */
-  replyTo: { seq: number; inBoard: boolean } | null;
+  /** 試運転（注文を出さない実行）の判断から出た投稿か */
+  dryRun: boolean;
+  /** 返信先の記録の番号（返信でなければ null）。同じ掲示板の投稿なら inBoard（リンクできる）。「全体」の投稿への返信なら inAll（/board へリンクする） */
+  replyTo: { seq: number; inBoard: boolean; inAll: boolean } | null;
   /** 引用した記録（番号・名前・公開と取得の時刻）。投稿を引用していれば postSeq（掲示板内のリンク用） */
   cites: Cite[];
   /** この投稿のあとの、同じAIのこの銘柄の売買（次の同じAIの投稿まで。最大3件）。リンク先はAIページの取引履歴の行 */
@@ -65,23 +67,52 @@ export type PostFilter = Intent | "none" | "all";
 /** 種類での絞り込み（intent がない投稿は none）。並び（スレッドの順）は変えない */
 export const filterPosts = (posts: readonly BoardPost[], filter: PostFilter) => posts.filter((p) => filter === "all" || (p.intent ?? "none") === filter);
 
+/** 銘柄に結びつかない、全体の掲示板の名前。LLMのAIはここにも投稿する。銘柄のページ（/symbols/…）はない */
+export const ALL_BOARD = "全体";
+/** 銘柄の一覧を渡されていないときだけ使う簡単な見分け（「全体」とそっくり同じ文字は銘柄ではない） */
+export const isSymbolBoard = (board: string) => board !== ALL_BOARD;
+
+/**
+ * 銘柄のページを作る記号の一覧。上場した銘柄、取引対象（universe.set）の記号と、注文票・約定・評価に出た銘柄だけ。
+ * 投稿の掲示板の名前だけでは決めない（「全体」の別の書き方・小文字・存在しない記号で、架空の銘柄のページができるのを防ぐ）
+ */
+export function boardSymbols(view: View): Set<string> {
+  const out = new Set<string>([...view.market.companies.map((c) => c.listing.symbol), ...view.universe]);
+  for (const t of view.timeline) {
+    if (t.kind === "fill") out.add(t.symbol);
+    else if (t.kind === "order_sheet") for (const o of t.orders) out.add(o.symbol);
+    else if (t.kind === "valuation") for (const p of t.positions) out.add(p.symbol);
+  }
+  out.delete(ALL_BOARD);
+  return out;
+}
+
 export function buildBoard(view: View, symbol: string): Board | null {
-  // 投稿・約定のある銘柄、または上場した銘柄（まだ投稿がなくても、銘柄のページは作る）
-  if (!view.threads.some((t) => t.symbol === symbol) && !view.market.companies.some((c) => c.listing.symbol === symbol)) return null;
+  // 知っている銘柄だけ（まだ投稿がなくても、上場した銘柄のページは作る）
+  if (!boardSymbols(view).has(symbol)) return null;
+  return boardOf(view, symbol);
+}
+
+/** 「全体」の掲示板（/board）。銘柄ではないので、持ち株の一覧は空。投稿がなくても作る */
+export const buildAllBoard = (view: View): Board => boardOf(view, ALL_BOARD);
+
+function boardOf(view: View, symbol: string): Board {
   const evidence = new Map(view.evidence.map((e) => [e.seq, e]));
   const posts = view.timeline.filter((t): t is TimelineItem & { kind: "post" } => t.kind === "post" && t.symbol === symbol);
   const fills = view.timeline.filter((t): t is TimelineItem & { kind: "fill" } => t.kind === "fill" && t.symbol === symbol && t.qty > 0);
   const bySeq = new Map(posts.map((p) => [p.seq, p]));
+  const allSeqs = new Set(view.timeline.filter((t) => t.kind === "post" && t.symbol === ALL_BOARD).map((t) => t.seq));
   const investorIds = new Set(view.agents.map((a) => a.agentId));
+  const providers = new Map(view.models.map((m) => [m.agentId, m.provider] as const));
 
   const toPost = (p: (typeof posts)[number], depth: number): BoardPost => {
-    const c = characterOf(p.agentId, p.agentName);
+    const c = characterOf(p.agentId, p.agentName, providers.get(p.agentId));
     const linked = investorIds.has(p.agentId);
     const nextOwn = posts.find((q) => q.agentId === p.agentId && q.seq > p.seq)?.seq ?? Infinity;
     return {
       seq: p.seq, agentId: p.agentId, linked, name: c.name, color: c.color, look: c.look, atText: formatJstShort(p.at),
-      text: p.text, withdrawn: p.withdrawn ? p.withdrawn.reason || "理由の記載なし" : null, intent: p.intent, stance: p.stance, depth, runSeq: p.runSeq,
-      replyTo: p.replyTo === null ? null : { seq: p.replyTo, inBoard: bySeq.has(p.replyTo) },
+      text: p.text, withdrawn: p.withdrawn ? p.withdrawn.reason || "理由の記載なし" : null, intent: p.intent, stance: p.stance, depth, runSeq: p.runSeq, dryRun: p.dryRun,
+      replyTo: p.replyTo === null ? null : { seq: p.replyTo, inBoard: bySeq.has(p.replyTo), inAll: symbol !== ALL_BOARD && allSeqs.has(p.replyTo) },
       cites: p.citeSeqs.map((s) => cite(s, evidence.get(s), (x) => bySeq.has(x))),
       trades: !linked ? [] : fills.filter((f) => f.agentId === p.agentId && f.sheetSeq > p.seq && f.seq < nextOwn).slice(0, 3).map((f) => ({ href: `/agents/${encodeURIComponent(f.agentId)}#${fillKey(f.seq, f.fillIndex)}`, text: `${formatMonthDay(f.tradingDate)} ${SIDE[f.side]} ${f.qty}株${f.price === null ? "" : ` @${formatYenMark(f.price)}`}` })),
     };
@@ -112,7 +143,7 @@ export function buildBoard(view: View, symbol: string): Board | null {
   for (const t of view.timeline) if (t.kind === "valuation" && investorIds.has(t.agentId)) lastVal.set(t.agentId, t);
   const holders = [...lastVal.values()].flatMap((v) => {
     const pos = v.positions.find((x) => x.symbol === symbol && x.qty > 0);
-    const c = characterOf(v.agentId, v.agentName);
+    const c = characterOf(v.agentId, v.agentName, providers.get(v.agentId));
     return pos ? [{ agentId: v.agentId, name: c.name, color: c.color, qty: pos.qty, valueText: formatYenMark(pos.qty * pos.price), asOf: formatMonthDay(v.date), stale: pos.stale }] : [];
   }).sort((a, b) => b.qty - a.qty || (a.agentId < b.agentId ? -1 : 1));
 

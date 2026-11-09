@@ -15,7 +15,7 @@ interface Base {
 
 export type TimelineItem =
   /** 非表示にした投稿は、同じ位置に残し（EVENT_LOG §6.1）、text は null、withdrawn に理由を入れる。text が null で withdrawn も null なら、本文が外の保管にない */
-  | (Base & { kind: "post"; symbol: string; text: string | null; intent: Intent | null; stance: Stance | null; withdrawn: { seq: number; reason: string } | null; citeSeqs: number[]; replyTo: number | null; runSeq: number })
+  | (Base & { kind: "post"; symbol: string; text: string | null; intent: Intent | null; stance: Stance | null; withdrawn: { seq: number; reason: string } | null; citeSeqs: number[]; replyTo: number | null; runSeq: number; dryRun: boolean })
   | (Base & { kind: "order_sheet"; tradingDate: string; runSeq: number; orders: { symbol: string; side: Side; qty: number }[] })
   | (Base & { kind: "fill"; fillIndex: number; sheetSeq: number; tradingDate: string; symbol: string; side: Side; requestedQty: number; qty: number; price: Deciyen | null; priceText: string | null; status: FillStatus; reason?: FillReason })
   | (Base & { kind: "valuation"; date: string; cash: Deciyen; positions: ValuedPosition[]; total: Deciyen; totalText: string; change: Deciyen; changeText: string })
@@ -72,6 +72,35 @@ export interface Evidence {
   fetchedAt: number | null;
 }
 
+/** 判断の記録（agent.run）に残ったモデル。AIごとに、最後に成功した判断（ok が false でないもの）のもの */
+export interface AgentModel {
+  agentId: string;
+  provider: string;
+  modelId: string;
+  /** その判断を記録した時刻（UNIXミリ秒） */
+  at: number;
+  /** 成功した判断の中で、提供元かモデルIDが途中で変わったことがあるか */
+  changed: boolean;
+}
+
+/** 判断の記録1件（成功・失敗を問わない）。投稿や注文票の runSeq から、そのときのモデルを引くのに使う */
+export interface RunModel {
+  seq: number;
+  agentId: string;
+  provider: string;
+  modelId: string;
+  /** 記録された時刻 */
+  at: number;
+  /** 判断に成功したか（ok が false のものだけ失敗。ない記録は成功扱い） */
+  ok: boolean;
+  /** 失敗したときのエラーコード（timeout・budget_exceeded など。ないか文字列でなければ null） */
+  errorCode: string | null;
+  /** 試運転（注文を出さない実行）か。dryRun が true のときだけ true、ない記録は本番 */
+  dryRun: boolean;
+  /** 目的（post・order）。ないか文字列でなければ null */
+  purpose: string | null;
+}
+
 export interface View {
   timeline: TimelineItem[];
   /** 架空の市場の記録（上場・板寄せ・決算）。記録がなければ companies は空 */
@@ -81,4 +110,10 @@ export interface View {
   evidence: Evidence[];
   threads: SymbolThread[];
   agents: AgentPerformance[];
+  /** 判断の記録のあるAIのモデル（AIのID順） */
+  models: AgentModel[];
+  /** 判断の記録の全件（seq の順）。判断ごとのモデルを引く */
+  runs: RunModel[];
+  /** 取引対象の記号（universe.set の最後のもの）。銘柄の掲示板として知っている記号 */
+  universe: string[];
 }
