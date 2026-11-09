@@ -103,7 +103,17 @@ describe("(a) 正規化できる注文は、理由が何であっても orders �
         "account_not_ready",
         async ({ log, run, src }) => {
           await log.commitSheet(at, "alpha", s(buy, run, [src]));
-          return { at: jst("2026-11-10", 9), sheet: s(buy, run, [src], "2026-11-11") }; // 11/10 の引け後処理の前に 11/11 の注文票
+          // 11/10 の引けのあと（11/11 の受け付けの中。#228）、11/10 の引け後処理の前に 11/11 の注文票。判断も引けのあとに記録する
+          const run2 = await ok(log, sys("agent.run", jst("2026-11-10", 16, 45), { agentId: "alpha", purpose: "order", inputSeqs: [src], ok: true }, [src]));
+          return { at: jst("2026-11-10", 17), sheet: s(buy, run2, [src], "2026-11-11") };
+        },
+      ],
+      [
+        // 前は account_not_ready だった。#228 で、前の取引日の締めと引けのあいだ（11/10 9:00）の 11/11 の確定は、どの日にも受け付けない
+        "wrong_trading_date",
+        async ({ log, run, src }) => {
+          await log.commitSheet(at, "alpha", s(buy, run, [src]));
+          return { at: jst("2026-11-10", 9), sheet: s(buy, run, [src], "2026-11-11") };
         },
       ],
       [
@@ -217,10 +227,20 @@ describe("(c) 読めない注文の拒否でも、偽の理由は照合で落ち
   it("約定待ちで翌日の注文票の読めない拒否は、account_not_ready なら通り、注文の中身の理由なら落ちる", async () => {
     const { log, src, run } = await setup();
     await log.commitSheet(jst("2026-11-10", 7), "alpha", { tradingDate: "2026-11-10", orders: buy, runSeq: run, inputSeqs: [src] });
-    const at = jst("2026-11-10", 9);
-    const base = { agentId: "alpha", tradingDate: "2026-11-11", runSeq: run, inputSeqs: [src], ordersUnreadable: true };
-    expect(await admitAll(await withRejected(log.events, at, { ...base, reason: "account_not_ready" }, [run, src]))).toBeNull();
-    expect(await admitAll(await withRejected(log.events, at, { ...base, reason: "invalid_qty" }, [run, src]))).toMatch(/order_sheet\.rejected/);
+    // 11/11 の受け付けは 11/10 の引け（16:30）から（#228）。判断も確定も引けのあと、11/10 の引け後処理の前
+    const run2 = await ok(log, sys("agent.run", jst("2026-11-10", 16, 45), { agentId: "alpha", purpose: "order", inputSeqs: [src], ok: true }, [src]));
+    const at = jst("2026-11-10", 17);
+    const base = { agentId: "alpha", tradingDate: "2026-11-11", runSeq: run2, inputSeqs: [src], ordersUnreadable: true };
+    expect(await admitAll(await withRejected(log.events, at, { ...base, reason: "account_not_ready" }, [run2, src]))).toBeNull();
+    expect(await admitAll(await withRejected(log.events, at, { ...base, reason: "invalid_qty" }, [run2, src]))).toMatch(/order_sheet\.rejected/);
+    // 前の取引日の日中（11/10 9:00）の 11/11 の読めない拒否は、wrong_trading_date だけが通る（前は account_not_ready）
+    const day = jst("2026-11-10", 9);
+    const old = { ...base, runSeq: run };
+    expect(await admitAll(await withRejected(log.events.slice(0, -1), day, { ...old, reason: "wrong_trading_date" }, [run, src]))).toBeNull();
+    for (const reason of ["account_not_ready", "invalid_qty"]) expect(await admitAll(await withRejected(log.events.slice(0, -1), day, { ...old, reason }, [run, src])), reason).toMatch(/order_sheet\.rejected/);
+    // 引けのあとの確定でも、元の判断が引けより前（11/9 22:00）なら invalid_sheet だけが通る
+    expect(await admitAll(await withRejected(log.events, at, { ...old, reason: "invalid_sheet" }, [run, src]))).toBeNull();
+    expect(await admitAll(await withRejected(log.events, at, { ...old, reason: "account_not_ready" }, [run, src]))).toMatch(/order_sheet\.rejected/);
   });
 
   it("停止中の読めない拒否：停止中なら suspended のほかの理由は落ちる", async () => {

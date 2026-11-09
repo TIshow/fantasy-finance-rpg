@@ -11,7 +11,7 @@ import { jstDayOf, llmCostProblems, llmCostUsed, llmTokenCost } from "../../src/
 import type { LogEvent } from "../../src/events/types";
 import type { HolidayTable } from "../../src/holidays/table";
 import { newAccount } from "../../src/ledger/ledger";
-import { tradingDateFor } from "../../src/ledger/calendar";
+import { marketClosedDays, upcomingTradingDay } from "../../src/ledger/calendar";
 import { INITIAL_CASH } from "../../src/ledger/types";
 import { batchCostDeciyen } from "../../src/llm/cost";
 import { GEMINI_PRICE_SWITCH_AT, geminiBatchCostDeciyen, geminiBatchPrice } from "../../src/llm/gemini-pricing";
@@ -23,7 +23,10 @@ const H2 = "d".repeat(64);
 const TABLE: HolidayTable = { firstYear: 2026, lastYear: 2027, sourceSha256: "0".repeat(64), contentSha256: H, dates: new Set(["2026-11-23"]) };
 // 11-10（火）を休みにした一覧（送る前の確かめと記録のあいだに採用される場合）
 const TABLE2: HolidayTable = { ...TABLE, contentSha256: H2, dates: new Set(["2026-11-10", "2026-11-23"]) };
-const CTX = { holidayTables: new Map([[H, TABLE], [H2, TABLE2]]) };
+// 11-06（金。切り替えより前）を休みにした一覧（切り替えより前の取引日で、同じ食い違いを確かめる）
+const H3 = "e".repeat(64);
+const TABLE3: HolidayTable = { ...TABLE, contentSha256: H3, dates: new Set(["2026-11-06", "2026-11-23"]) };
+const CTX = { holidayTables: new Map([[H, TABLE], [H2, TABLE2], [H3, TABLE3]]) };
 const newLog = () => new EventLog({ ...CTX, accountOf: () => newAccount() });
 
 async function ok(log: EventLog, d: Draft): Promise<LogEvent> {
@@ -101,7 +104,8 @@ const DAY = "2026-11-09";
 describe("submittedAt（依頼を決めた時刻）で、費用の日と取引日を動かす", () => {
   it("submittedAt は recordedAt 以下で、差は1時間以内（ちょうど1時間は通り、1ミリ秒でも超えれば断る）", async () => {
     const log = await setup();
-    const at = jst(DAY, 17);
+    // 記録は 17:30。ちょうど1時間前の 16:30 は、11-10 の受け付けの始まり（前の取引日の引け。#228）でもある
+    const at = jst(DAY, 17, 30);
     expect(LLM_RECORD_WINDOW_MS).toBe(3_600_000);
     expect(await reason(log, sub(at, "alpha", "2026-11-10", 100, { submittedAt: at + 1 }))).toBe("submittedAt must be within an hour before recordedAt");
     expect(await reason(log, sub(at, "alpha", "2026-11-10", 100, { submittedAt: at - 3_600_001 }))).toBe("submittedAt must be within an hour before recordedAt");
@@ -214,16 +218,35 @@ describe("送る前の予約（①）と、送ったあとの記録（③）の�
     expect(await reason(log, sub(at, "gamma", "2026-11-10", 500))).toBe("daily LLM cost limit exceeded (1400 > 1000)");
   });
 
-  it("canAppend のあとに祝日の一覧が変わると、取引日が変わって本物の記録は断られる", async () => {
+  // D-047（#228）：11/9 以後の取引日は祝日の一覧を引かないので、一覧が替わっても取引日は変わらず、記録のあとに直してもよい
+  it("11/9 以後の取引日は、canAppend のあとに祝日の一覧が変わっても取引日が変わらず、記録のあとの一覧の直しも通る（D-047）", async () => {
     const log = await setup();
     const at = jst(DAY, 16, 35);
     expect(await log.canAppend(sub(at, "alpha", "2026-11-10", 100))).toBeNull();
     await ok(log, { type: "holidays.adopted", recordedAt: at, actor: "operator:owner", refs: [], payload: { holidaysSha256: H2 } });
-    expect(await reason(log, sub(at, "alpha", "2026-11-10", 100))).toBe("tradingDate must be the next trading date");
-    // 記録が書けたあとは、その取引日を休みにする一覧には変えられない（逆向きは守られている）
+    expect(await log.canAppend(sub(at, "alpha", "2026-11-10", 100))).toBeNull();
+    await okSent(log, sub(at, "alpha", "2026-11-10", 100));
     const log2 = await setup();
     await okSent(log2, sub(at, "alpha", "2026-11-10", 100));
-    expect(await reason(log2, { type: "holidays.adopted", recordedAt: at, actor: "operator:owner", refs: [], payload: { holidaysSha256: H2 } })).toMatch(/changes 2026-11-10, which the log already used/);
+    expect(await reason(log2, { type: "holidays.adopted", recordedAt: at, actor: "operator:owner", refs: [], payload: { holidaysSha256: H2 } })).toBe("ok");
+  });
+
+  it("切り替えより前の取引日では、canAppend のあとに祝日の一覧が変わると、取引日が変わって本物の記録は断られる（前のまま）", async () => {
+    const pre = async () => {
+      const log = newLog();
+      await ok(log, { type: "holidays.adopted", recordedAt: 0, actor: "operator:owner", refs: [], payload: { holidaysSha256: H } });
+      await ok(log, { type: "agent.registered", recordedAt: jst("2026-11-05", 8), actor: "operator:owner", refs: [], payload: { agentId: "alpha", startDate: "2026-11-05", initialCash: INITIAL_CASH } });
+      return log;
+    };
+    const at = jst("2026-11-05", 16, 35);
+    const log = await pre();
+    expect(await log.canAppend(sub(at, "alpha", "2026-11-06", 100))).toBeNull();
+    await ok(log, { type: "holidays.adopted", recordedAt: at, actor: "operator:owner", refs: [], payload: { holidaysSha256: H3 } });
+    expect(await reason(log, sub(at, "alpha", "2026-11-06", 100))).toBe("tradingDate must be the next trading date");
+    // 記録が書けたあとは、その取引日を休みにする一覧には変えられない
+    const log2 = await pre();
+    await okSent(log2, sub(at, "alpha", "2026-11-06", 100));
+    expect(await reason(log2, { type: "holidays.adopted", recordedAt: at, actor: "operator:owner", refs: [], payload: { holidaysSha256: H3 } })).toMatch(/changes 2026-11-06, which the log already used/);
   });
 
   it("無作為の下書き（シード固定）で、canAppend の答えと append の結果が必ず一致する", async () => {
@@ -236,19 +259,21 @@ describe("送る前の予約（①）と、送ったあとの記録（③）の�
     };
     const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)]!;
     const log = await setup();
-    let at = jst(DAY, 16, 0);
+    // 11-10 の受け付けの始まり（11-09 の引け 16:30。#228）から
+    let at = jst(DAY, 16, 30);
     const mismatches: string[] = [];
     /** 断られた理由ごとの数（試した範囲が偏っていないかを、失敗の出力で見られるように） */
     const refused = new Map<string, number>();
     for (let i = 0; i < 2400; i++) {
-      at += pick([0, 1, 60_000, 60_000, 3_600_000]);
+      // 1時間の進みは少なめ（#228 で毎日が取引日になり、依頼から締めまでが短くなったので、実行の記録まで届くように）
+      at += pick([0, 1, 60_000, 60_000, 600_000, 3_600_000]);
       const agentId = pick(["alpha", "beta", "gamma", "delta"]);
       const subs = log.events.filter((e) => e.type === "llm.batch.submitted");
       const closes = log.events.filter((e) => e.type === "llm.batch.closed");
       let d: Draft;
       const kind = pick(["sub", "sent", "sent", "close", "run", "run"]);
       if (kind === "sub" || subs.length === 0) {
-        const next = tradingDateFor(at, TABLE.dates);
+        const next = upcomingTradingDay(at, marketClosedDays(TABLE.dates));
         const td = pick([next, next, next, "2026-11-10", "2026-11-11", "2026-11-12"]);
         d = sub(at, agentId, td, pick([1, 2, 100, 100, 1000]), {
           submittedAt: at - pick([0, 0, 1, 3_600_000, 3_600_001]),

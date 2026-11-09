@@ -9,7 +9,7 @@ import { Ledger, replay, type ValueStore } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
 import type { HolidayTable } from "../../src/holidays/table";
 import { applyCorporateActions, type CorporateEvent, type Dividend, type Split } from "../../src/ledger/corporate";
-import { executeSheet, invariantViolations, newAccount, nextBusinessDay } from "../../src/ledger/ledger";
+import { executeSheet, invariantViolations, newAccount, nextTradingDay } from "../../src/ledger/ledger";
 import { INITIAL_CASH, LOT, type Account, type Fill, type Order } from "../../src/ledger/types";
 import { mulberry32, pick, randInt } from "../fixtures/prng";
 
@@ -204,9 +204,11 @@ describe("台帳の関数と模型（純関数、200シード×60手）", () => 
 // ---- 追記の処理・台帳・replay をつないだ無作為な日々 ----
 const jst = (date: string, hh: number, mm = 0) => Date.parse(`${date}T${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:00+09:00`);
 const SHA = "d".repeat(64);
-/** 11/23 は祝日の一覧の休場日 */
-const TABLE: HolidayTable = { firstYear: 2026, lastYear: 2027, sourceSha256: "0".repeat(64), contentSha256: SHA, dates: new Set(["2026-11-23"]) };
+/** 祝日の一覧：11/3 は切り替えより前なので休み。11/23 は切り替えのあとなので取引日（D-047） */
+const TABLE: HolidayTable = { firstYear: 2026, lastYear: 2027, sourceSha256: "0".repeat(64), contentSha256: SHA, dates: new Set(["2026-11-03", "2026-11-23"]) };
 const CTX = { holidayTables: new Map([[SHA, TABLE]]) };
+/** 無作為な日々の最初の取引日（切り替えの日 2026-11-09 より前から始める） */
+const START = "2026-11-02";
 const AGENTS = ["alpha", "beta"];
 
 class Store implements ValueStore {
@@ -334,12 +336,17 @@ async function simulate(seed: number, st: Stats, days = 18, corruptions = false)
 
   await add(op("holidays.adopted", 0, { holidaysSha256: SHA }));
   await add(op("universe.set", 0, { symbols: SYMBOLS }));
-  for (const [i, id] of AGENTS.entries()) await add(op("agent.registered", jst("2026-11-06", 20, i), { agentId: id, startDate: "2026-11-09", initialCash: INITIAL_CASH }));
+  // 11/2（月）から始め、切り替えより前の祝日（11/3）と土日（11/7・11/8）を飛ばし、11/9 からは土日・祝日（11/23）も取引日として回す（D-047）。
+  // 暦の模型は架空の市場の暦（nextTradingDay と EventLog.holidays()）。実在の市場の暦（nextBusinessDay）と組み合わせない
+  for (const [i, id] of AGENTS.entries()) await add(op("agent.registered", jst("2026-10-30", 20, i), { agentId: id, startDate: START, initialCash: INITIAL_CASH }));
   const H = () => log.holidays();
   // 臨時休場にする日を先に決める（その日を権利落ち日にする公表は出さない。権利落ち日が休場になった扱いは §6.2 の訂正で、別のPR）。
   // 休場の翌営業日を権利落ち日にする公表は出し、休場のあとの追加の引け後処理（§3.3、closedSeq。#71）で反映する
   const dates: string[] = [];
-  for (let d = "2026-11-09"; dates.length < days; d = nextBusinessDay(d, H())) dates.push(d);
+  for (let d = START; dates.length < days; d = nextTradingDay(d, H())) dates.push(d);
+  // 取引日の並び：11/3 と 11/7・11/8 は休み、11/9 からは毎日
+  expect(dates.slice(0, 8), `seed ${seed}`).toEqual(["2026-11-02", "2026-11-04", "2026-11-05", "2026-11-06", "2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12"]);
+  if (days >= 22) expect(dates.slice(8, 22), `seed ${seed}`).toEqual(Array.from({ length: 14 }, (_, i) => `2026-11-${String(13 + i)}`));
   const closedPlan = new Set(dates.slice(2, -2).filter(() => r.next() < 0.12));
   const base: Record<string, number> = Object.fromEntries(SYMBOLS.map((s) => [s, r.int(100, 80_000)]));
   const pending = new Map<string, { seq: number; orders: Order[]; date: string }>();
@@ -363,7 +370,7 @@ async function simulate(seed: number, st: Stats, days = 18, corruptions = false)
     }
   };
 
-  for (let D = "2026-11-09", n = 0; n < days; n++) {
+  for (let D = START, n = 0; n < days; n++) {
     // 前の晩に確定した注文票を、始値で約定させる（臨時休場なら全件失効）
     const closedSeq = closedPlan.has(D) ? await add(op("market.closed", jst(D, 7), { date: D, reason: "test" })) : undefined;
     // 休場のあとにも、ずれた権利落ち日の公表が出ることがある（追加の処理の前なら、それも渡す）
@@ -414,7 +421,7 @@ async function simulate(seed: number, st: Stats, days = 18, corruptions = false)
       const closeSeq = await add(sys("prices.close", jst(D, 15, 30), { date: D, valuesHash: await store.put(lastClose) }));
       lastCloseSeq = closeSeq;
       // 翌営業日が権利落ち日の配当・分割を公表し、評価のあとに反映する
-      const ex = nextBusinessDay(D, H());
+      const ex = nextTradingDay(D, H());
       const divs: Dividend[] = [];
       const splits: Split[] = [];
       const ann: number[] = [];
@@ -447,25 +454,25 @@ async function simulate(seed: number, st: Stats, days = 18, corruptions = false)
       if (r.next() < 0.2) continue;
       const run = await add(sys("agent.run", jst(D, 20, 2 * i), { agentId: id, purpose: "order", inputSeqs: [], ok: true }));
       const orders = randomOrders(r, ledger.account(id));
-      const c = await log.commitSheet(jst(D, 20, 2 * i + 1), id, { tradingDate: nextBusinessDay(D, H()), orders, runSeq: run, inputSeqs: [] });
+      const c = await log.commitSheet(jst(D, 20, 2 * i + 1), id, { tradingDate: nextTradingDay(D, H()), orders, runSeq: run, inputSeqs: [] });
       if (!c.ok || c.rejected) throw new Error(`seed ${seed} ${D} ${id}: sheet rejected ${c.ok ? c.rejected : c.reason} ${JSON.stringify(orders)}`);
       await checkThenApply(ledger, c.event, `seed ${seed} ${D} ${id} sheet`);
       pending.set(id, { seq: c.event.seq, orders, date: D });
     }
-    D = nextBusinessDay(D, H());
+    D = nextTradingDay(D, H());
   }
   return { log, store, ledger };
 }
 
-describe("追記・台帳・replay をつないだ無作為な日々（20シード×18営業日、祝日と臨時休場を含む）", () => {
+describe("追記・台帳・replay をつないだ無作為な日々（20シード×22取引日、切り替えの前後・祝日・土日・臨時休場を含む）", () => {
   it("どの時点でも口座・約定・分割配当・評価が模型と一致し、保存したログを replay すると同じ口座になり、同じシードは同じログになる", async () => {
     const st: Stats = {};
     for (let seed = 1; seed <= 20; seed++) {
-      const a = await simulate(seed, st, 18, true);
+      const a = await simulate(seed, st, 22, true);
       const replayed = await replay(a.log.events, a.store, CTX);
       for (const id of AGENTS) expect(replayed.account(id), `seed ${seed} ${id}`).toEqual(a.ledger.account(id));
       // 壊したイベントの値も store に置く（store の salt は件数で決まる）ので、同じ手順で作り直して比べる
-      const b = await simulate(seed, {}, 18, true);
+      const b = await simulate(seed, {}, 22, true);
       expect(b.log.events.at(-1)!.hash, `seed ${seed}`).toBe(a.log.events.at(-1)!.hash);
     }
     for (const k of ["filled:", "reduced:insufficient_cash", "expired:no_open_price", "sheet closed by market.closed", "buy listed before a sell", "split with cash in lieu", "catch-up with actions", "catch-up without actions", "catch-up split with cash in lieu", "sheet blocked until the catch-up", ...["prices.open", "prices.close", "corporate_action.announced", "fills.executed", "corporate_actions.applied", "valuation.recorded"].map((t) => `check refused corrupted ${t}`)]) {

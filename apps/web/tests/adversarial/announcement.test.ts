@@ -217,21 +217,26 @@ describe("(2) 遅れた公表", () => {
 });
 
 describe("(3) 権利落ち日は営業日", () => {
-  it("土日・祝日・臨時休場の日・一覧の外・存在しない日は、例外にならず理由を返して拒む", async () => {
+  // D-047（#228）：11/9 からは、架空の市場は土日・祝日も取引日。権利落ち日にできる。休みは臨時休場だけ。
+  // 11/9 以後の日付は祝日の一覧を引かないので、一覧の範囲の外の年（2028年）でも「一覧の外」にならない（core の PR #230。lead の判断待ち）。
+  // 11/9 より前の日付は、前の決まり（東証の営業日、一覧の外は理由を返して拒む）のまま
+  it("臨時休場の日・11/9 より前の一覧の外・存在しない日は、例外にならず理由を返して拒む。11/9 以後の土日・祝日は権利落ち日にできる（D-047）", async () => {
     const w = await start(["alpha"]);
     await w.add(w.op("market.closed", jst(D, 15, 31), { date: "2026-11-13", reason: "test" }));
-    const cases: [string, RegExp][] = [
-      ["2026-11-14", /business day/], // 土曜
-      ["2026-11-23", /business day/], // 祝日
+    const cases: [string, RegExp | true][] = [
+      ["2026-11-14", true], // 土曜（切り替えのあと）
+      ["2026-11-23", true], // 祝日（切り替えのあと）
       ["2026-11-13", /business day/], // 臨時休場
-      ["2028-01-05", /outside the adopted holiday table/],
+      ["2026-11-07", /business day/], // 切り替えより前の土曜は、前のまま休み
+      ["2028-01-05", true], // 一覧の外の年だが、切り替えのあとなので一覧を引かない
       ["2025-12-01", /outside the adopted holiday table/],
       ["2026-02-30", /invalid exDate/],
       ["2026-13-01", /invalid exDate/],
     ];
     for (const [i, [exDate, want]] of cases.entries()) {
       const r = await w.announce(jst(D, 15, 32 + i), { kind: "dividend", exDate });
-      expect(r.ok || r.reason, exDate).toMatch(want);
+      if (want === true) expect(r.ok ? true : r.reason, exDate).toBe(true);
+      else expect(r.ok || r.reason, exDate).toMatch(want);
     }
   });
 
