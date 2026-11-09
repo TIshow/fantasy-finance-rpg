@@ -1,9 +1,23 @@
 // 模擬売買の台帳（docs/PAPER_TRADING_RULES.md）。純関数だけで、外部や時計に依存しない。
 import { priceBand, TICK } from "./auction";
-import { cutoffOf, isValidDate, previousBusinessDay, tradingDateFor } from "./calendar";
+import { cutoffOf, decisionOpensAt, isValidDate, previousTradingDay, upcomingTradingDay } from "./calendar";
 import { INITIAL_CASH, LOT, type Account, type Deciyen, type Fill, type FillReason, type Order, type OrderSheet, type RejectReason } from "./types";
 
-export { cutoffOf, isBusinessDay, isValidDate, nextBusinessDay, previousBusinessDay, tradingDateFor } from "./calendar";
+export {
+  cutoffOf,
+  decisionOpensAt,
+  EVERY_DAY_FROM,
+  isBusinessDay,
+  isTradingDay,
+  isValidDate,
+  marketClosedDays,
+  nextBusinessDay,
+  nextTradingDay,
+  previousBusinessDay,
+  previousTradingDay,
+  tradingDateFor,
+  upcomingTradingDay,
+} from "./calendar";
 
 export function newAccount(initialCash: Deciyen = INITIAL_CASH): Account {
   return { cash: initialCash, holdings: {} };
@@ -14,9 +28,12 @@ export interface CommitContext {
   /** その日、そのAIがすでに注文票を確定しているか */
   alreadyCommitted: boolean;
   account: Account;
-  /** 東証の祝日（YYYY-MM-DD）。土日と12月31日〜1月3日は含めなくてよい */
+  /**
+   * 架空の市場の休み（YYYY-MM-DD。EventLog.holidays() か marketClosedDays() で作る。D-047）。
+   * 切り替えの日より前は東証の祝日と臨時休場（土日と12月31日〜1月3日は含めなくてよい）、以後は臨時休場だけ
+   */
   holidays: ReadonlySet<string>;
-  /** account に反映済みの、最後の引け後処理（評価と分割・配当の反映）の営業日 */
+  /** account に反映済みの、最後の引け後処理（評価と分割・配当の反映）の取引日 */
   accountAsOf: string;
   /** 上場した銘柄（company.listed）。指値の値幅と、1件の株数の上限に使う。ない銘柄には指値を出せない */
   listings?: ReadonlyMap<string, Listing>;
@@ -36,10 +53,12 @@ export interface Listing {
 export function validateSheet(sheet: OrderSheet, ctx: CommitContext): { ok: true } | { ok: false; reason: RejectReason } {
   if (!Number.isSafeInteger(sheet.committedAt) || !isValidDate(sheet.tradingDate) || !Array.isArray(sheet.orders)) return { ok: false, reason: "invalid_sheet" };
   if (sheet.committedAt >= cutoffOf(sheet.tradingDate)) return { ok: false, reason: "after_cutoff" };
-  // 約定日は、確定時刻から見て締めがまだ来ていない最初の営業日だけ
-  if (sheet.tradingDate !== tradingDateFor(sheet.committedAt, ctx.holidays)) return { ok: false, reason: "wrong_trading_date" };
-  // 前営業日の引け後処理が済んだ口座でだけ確定できる。確定から約定までに保有が変わらないようにするため
-  if (ctx.accountAsOf !== previousBusinessDay(sheet.tradingDate, ctx.holidays)) return { ok: false, reason: "account_not_ready" };
+  // 約定日は、確定時刻から見て締めがまだ来ていない最初の取引日（架空の市場の暦。D-047）だけ。
+  // さらに、確定は前の取引日の引け（16:30）のあと。前の取引日の締めと引けの間の確定は、どの取引日にも受け付けない（#228）
+  if (sheet.tradingDate !== upcomingTradingDay(sheet.committedAt, ctx.holidays)) return { ok: false, reason: "wrong_trading_date" };
+  if (sheet.committedAt < decisionOpensAt(sheet.tradingDate, ctx.holidays)) return { ok: false, reason: "wrong_trading_date" };
+  // 前の取引日の引け後処理が済んだ口座でだけ確定できる。確定から約定までに保有が変わらないようにするため
+  if (ctx.accountAsOf !== previousTradingDay(sheet.tradingDate, ctx.holidays)) return { ok: false, reason: "account_not_ready" };
   if (ctx.alreadyCommitted) return { ok: false, reason: "already_committed" };
   const selling = new Map<string, number>();
   for (const o of sheet.orders) {

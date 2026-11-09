@@ -92,9 +92,12 @@ describe("企業行動の公表の一意キー（§3）", () => {
     expect(await reasonOf(w.announce(jst(D, 15, 41), T, DIV, ""))).toBe("invalid kind");
     expect(await reasonOf(w.announce(jst(D, 15, 41), T, DIV, "dividend", "aaa"))).toBe("invalid symbol");
     expect(await reasonOf(w.announce(jst(D, 15, 41), "2026-11-31", DIV))).toBe("invalid exDate");
-    expect(await reasonOf(w.announce(jst(D, 15, 41), "2026-11-14", DIV))).toBe("exDate must be a business day");
-    expect(await reasonOf(w.announce(jst(D, 15, 41), "2028-03-30", DIV))).toBe("exDate is outside the adopted holiday table");
+    // 切り替えの日（D-047）より前の土曜は休み。切り替えより前で一覧の外の日は判定できない
+    expect(await reasonOf(w.announce(jst(D, 15, 41), "2026-11-07", DIV))).toBe("exDate must be a business day");
     expect(await reasonOf(w.announce(jst(D, 15, 41), "2026-01-05", DIV))).toBe("exDate is outside the adopted holiday table");
+    // 切り替えより後は毎日が取引日で、祝日の一覧を引かない（土曜や一覧の外の年でも書ける）
+    expect(await reasonOf(w.announce(jst(D, 15, 41), "2026-11-14", DIV))).toBe("ok");
+    expect(await reasonOf(w.announce(jst(D, 15, 41), "2028-03-30", DIV))).toBe("ok");
   });
 
   it("種類がログの外の値と違う公表は、台帳が当てるときに止まる（書く前の検査にも同じ関数を使える）", async () => {

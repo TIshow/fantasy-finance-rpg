@@ -12,7 +12,7 @@ import { bodyHash, sha256Hex } from "../../src/events/hash";
 import { Ledger, type ValueStore } from "../../src/events/replay";
 import type { LogEvent } from "../../src/events/types";
 import { holidaysFor, type HolidayTable } from "../../src/holidays";
-import { nextBusinessDay } from "../../src/ledger/calendar";
+import { nextTradingDay } from "../../src/ledger/calendar";
 import { INITIAL_CASH } from "../../src/ledger/types";
 import { FakeClock, MemoryEventStore } from "../contracts/fakes";
 import { mulberry32 } from "./prng";
@@ -160,7 +160,8 @@ export async function buildGoldenLog(seed: number): Promise<GoldenLog> {
     // 引け後：終値を記録し（遅延日は翌日の未明）、AIごとに評価と引け後処理（分割・配当の公表はない）
     const close = await prices(tradingDate, "close");
     t = close.at;
-    const exDate = nextBusinessDay(tradingDate, log.holidays());
+    // 権利落ち日は架空の市場の次の取引日（D-047。最後の 11/13（金）の次は 11/14（土））
+    const exDate = nextTradingDay(tradingDate, log.holidays());
     for (const a of scenario.agents) {
       await add((t += 1000), sys("valuation.recorded", { agentId: a.id, date: tradingDate, closeSeq: close.seq, ...ledger.computeValuation(a.id, tradingDate) }, [close.seq]));
       const ca = await ledger.computeCorporate(a.id, tradingDate, exDate, []);

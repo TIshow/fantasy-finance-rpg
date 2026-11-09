@@ -73,12 +73,12 @@ describe("1日の流れ（§3.3）", () => {
     expect(await verifyChain(log.events)).toEqual([]);
   });
 
-  it("祝日をまたいで、評価と引け後処理は次の営業日へ進む", async () => {
+  it("切り替えの日（D-047）より後は、一覧で祝日の日も取引日。評価と引け後処理はその日へ進む", async () => {
     const { log } = await setup(await newLog(["2026-11-11"]));
-    await finishDay(log, "2026-11-10", "2026-11-12", null);
-    expect(await reason(log.append(sys("prices.close", jst("2026-11-11", 15, 40), { date: "2026-11-11" })))).toBe("market was closed");
-    const close = await ok(log, sys("prices.close", jst("2026-11-12", 15, 40), { date: "2026-11-12" }));
-    expect(await reason(log.append(sys("valuation.recorded", jst("2026-11-12", 15, 41), { agentId: "alpha", date: "2026-11-12", closeSeq: close }, [close])))).toBe("ok");
+    expect(await reason(log.append(sys("corporate_actions.applied", jst("2026-11-10", 15, 42), { agentId: "alpha", asOf: "2026-11-10", exDate: "2026-11-12", announcedSeqs: [] })))).not.toBe("ok");
+    await finishDay(log, "2026-11-10", "2026-11-11", null);
+    const close = await ok(log, sys("prices.close", jst("2026-11-11", 15, 40), { date: "2026-11-11" }));
+    expect(await reason(log.append(sys("valuation.recorded", jst("2026-11-11", 15, 41), { agentId: "alpha", date: "2026-11-11", closeSeq: close }, [close])))).toBe("ok");
   });
 
   it("引け後処理の前に翌日の注文票は確定できず、理由と受け取った注文票を残す", async () => {
@@ -149,7 +149,9 @@ describe("時点（§3.1・§3.2）", () => {
     const log = await newLog();
     expect(await reason(log.append(sys("prices.open", jst("2026-11-10", 8, 29), { date: "2026-11-10" })))).toBe("open prices recorded before the cutoff");
     expect(await reason(log.append(sys("prices.open", jst("2026-11-10", 8, 30), { date: "2026-11-10" })))).toBe("ok");
-    expect(await reason(log.append(sys("prices.open", jst("2026-11-14", 9), { date: "2026-11-14" })))).toBe("market was closed");
+    // 切り替えの日（D-047）より前の土曜は休み。後の土曜は取引日
+    expect(await reason(log.append(sys("prices.open", jst("2026-11-07", 9), { date: "2026-11-07" })))).toBe("market was closed");
+    expect(await reason(log.append(sys("prices.open", jst("2026-11-14", 9), { date: "2026-11-14" })))).toBe("ok");
   });
 
   it("出典は publishedAt <= fetchedAt <= recordedAt でなければ記録できない", async () => {
@@ -288,8 +290,8 @@ describe("祝日の一覧の版と取引対象（§3.5）", () => {
     expect(await adopt(B)).toBe("ok");
     const sheetSeq = await commit(log, jst("2026-11-10", 8), sheet(run, [src]));
     expect(log.events.at(-1)!.payload).toMatchObject({ holidaysSha256: B });
-    // 11/11 が休場になったので、11/10 の引け後処理の権利落ち日は 11/12
-    await finishDay(log, "2026-11-10", "2026-11-12", sheetSeq);
+    // 切り替えの日（D-047）より後なので、一覧で 11/11 が祝日でも取引日。11/10 の引け後処理の権利落ち日は 11/11
+    await finishDay(log, "2026-11-10", "2026-11-11", sheetSeq);
   });
 
   it("ログが使った日付は、営業日の判定を通した日付だけで進む（公表の権利落ち日・臨時休場の日・拒否した注文票の約定日では進まない）", async () => {
@@ -305,7 +307,7 @@ describe("祝日の一覧の版と取引対象（§3.5）", () => {
     // 11/10 の翌日から後は直せる
     expect(await adopt(G, jst("2026-11-09", 23))).toBe("ok");
     const sheetSeq = await commit(log, jst("2026-11-10", 8), sheet(run, [src]));
-    await finishDay(log, "2026-11-10", "2026-11-12", sheetSeq); // 引け後処理の権利落ち日 11/12 まで使った
+    await finishDay(log, "2026-11-10", "2026-11-11", sheetSeq); // 引け後処理の権利落ち日 11/11 まで使った
     expect(await adopt(G2, jst("2026-11-10", 16))).toBe("holiday table changes 2026-11-11, which the log already used");
   });
 
