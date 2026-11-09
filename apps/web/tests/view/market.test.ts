@@ -82,3 +82,19 @@ describe("buildView：市場の記録と参加者の種類", () => {
     expect(v.participants).toEqual([{ agentId: "ai-a", kind: "investor" }, { agentId: "ai-b", kind: "investor" }, { agentId: "mm-1", kind: "market_maker" }, { agentId: "noise", kind: "noise" }]);
   });
 });
+
+describe("buildMarket：土日の取引日（D-047）", () => {
+  it("記録された日付をそのまま並べる。11/9より前の土日は無いまま、11/14・11/15は出る", () => {
+    n = 0;
+    const m = buildMarket([
+      listed("NEO1", "アーク工業", 10_000),
+      cleared("NEO1", "2026-11-06", 10_000, 1),
+      cleared("NEO1", "2026-11-09", 10_100, 1),
+      cleared("NEO1", "2026-11-13", 10_200, 1),
+      cleared("NEO1", "2026-11-14", 10_300, 1),
+      cleared("NEO1", "2026-11-15", null, 0),
+      cleared("NEO1", "2026-11-16", 10_400, 1),
+    ]);
+    expect(m.companies[0]!.days.map((d) => d.dateText)).toEqual(["11/06", "11/09", "11/13", "11/14", "11/15", "11/16"]);
+  });
+});
