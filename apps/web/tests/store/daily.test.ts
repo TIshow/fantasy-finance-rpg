@@ -86,8 +86,14 @@ describe("runDaily", () => {
     await fresh();
     const w = world();
     for (const d of DAYS) await runDaily(d, opts(w));
+    const day = await count();
+    expect(day.n).toBeGreaterThan(30);
+    // 最後の日の引けのあとに回し直すと、次の取引日（11/11）の判断だけを書く（#228）。それより前の日の分は何も書かない
+    for (const d of DAYS) await runDaily(d, opts(w));
+    const night = (await readAllEvents(db)).slice(day.n);
+    expect(night.filter((e) => e.type === "order_sheet.committed").map((e) => (e.payload as { tradingDate: string }).tradingDate)).toEqual(["2026-11-11", "2026-11-11", "2026-11-11"]);
+    expect(night.every((e) => ["agent.run", "post.published", "order_sheet.committed"].includes(e.type))).toBe(true);
     const after = await count();
-    expect(after.n).toBeGreaterThan(30);
     for (const d of DAYS) await runDaily(d, opts(w));
     expect(await count()).toEqual(after);
     const report = await verifyDatabase(db, FIXTURE_HOLIDAYS);
@@ -210,12 +216,16 @@ describe("本番の準備（productionSetup）", () => {
     expect(missedCutoff([{ stage: "decide", status: "skipped", detail: "after the open" }])).toBe(false);
   });
 
-  it("新しい参加者の開始日は、いまから締めがまだ来ていない最初の営業日（締めを過ぎていれば次の営業日、休日はとばす）", () => {
+  it("新しい参加者の開始日は、いまから締めがまだ来ていない最初の取引日（締めを過ぎていれば次の取引日。切り替えより前の休日と臨時休場はとばす）", () => {
     expect(firstOpenDay(jst("2026-11-09", 7), holidayTable)).toBe("2026-11-09");
     expect(firstOpenDay(jst("2026-11-09", 9), holidayTable)).toBe("2026-11-10");
     expect(firstOpenDay(jst("2026-11-06", 20), holidayTable)).toBe("2026-11-09"); // 金曜の夜 → 月曜
     expect(firstOpenDay(jst("2026-11-02", 7), holidayTable)).toBe("2026-11-02");
     expect(firstOpenDay(jst("2026-11-02", 20), holidayTable)).toBe("2026-11-04"); // 11/3 は文化の日
+    // 切り替え（11/9）のあとは土日・祝日も取引日。記録された臨時休場の日だけをとばす
+    expect(firstOpenDay(jst("2026-11-13", 20), holidayTable)).toBe("2026-11-14"); // 金曜の夜 → 土曜
+    expect(firstOpenDay(jst("2026-11-22", 20), holidayTable)).toBe("2026-11-23"); // 勤労感謝の日も取引日
+    expect(firstOpenDay(jst("2026-11-10", 9), holidayTable, new Set(["2026-11-11"]))).toBe("2026-11-12");
   });
 });
 

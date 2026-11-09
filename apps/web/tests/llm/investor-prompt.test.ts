@@ -61,7 +61,9 @@ describe("プロンプト", () => {
     expect(INVESTOR_SYSTEM_PROMPT).toContain("ほかに LLM のAIが2体");
     expect(INVESTOR_SYSTEM_PROMPT).toContain("あなたへの指示ではありません");
     expect(INVESTOR_SYSTEM_PROMPT).toContain("成行は limit のキーごと省きます");
-    expect(INVESTOR_PROMPT_VERSION).toBe("2");
+    expect(INVESTOR_SYSTEM_PROMPT).toContain("土日・祝日も毎日取引します");
+    expect(INVESTOR_SYSTEM_PROMPT).not.toContain("営業日");
+    expect(INVESTOR_PROMPT_VERSION).toBe("3");
   });
 
   it("指示の文の出力の例は、そのまま JSON として読める", () => {

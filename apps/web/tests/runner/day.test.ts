@@ -9,7 +9,7 @@ import { INITIAL_CASH } from "../../src/ledger/types";
 import { type RunnerAgent, type RunnerDeps, type StageResult, runDay, scheduleOf } from "../../src/runner/day";
 import { RunnerValues } from "../../src/runner/values";
 import { InMemoryEventStore } from "../../src/store/memory-store";
-import { FakeClock, jstDay } from "../contracts/fakes";
+import { FakeClock } from "../contracts/fakes";
 import { FIXTURE_HOLIDAYS } from "../fixtures/golden";
 import { mulberry32 } from "../fixtures/prng";
 import { LATE_DAY, PRIOR_DAY, TRADING_DAYS, buildScenario } from "../fixtures/scenario";
@@ -87,7 +87,8 @@ describe("runDay（1日の流れ）", async () => {
   it("終値の取り込みが翌日まで遅れた日は、その日は待ち、翌日の朝に追いついて評価する", () => {
     const late = TRADING_DAYS.indexOf(LATE_DAY);
     expect(results[late]!.at(-1)).toMatchObject({ stage: "prices.close", status: "waiting" });
-    expect(results[late + 1]![1]).toMatchObject({ stage: "after_close", status: "written" });
+    // 次の日の runDay は、前の日の引けのあと（受け付けの始まり）に終値を待ち、朝（7:00）の試し直しで追いついて評価する
+    expect(results[late + 1]).toContainEqual(expect.objectContaining({ stage: "after_close", status: "written" }));
     const lateClose = of("prices.close").find((e) => p(e).date === LATE_DAY)!;
     const nextDecision = of("agent.run").find((e) => e.seq > lateClose.seq)!;
     expect(of("valuation.recorded").filter((e) => p(e).date === LATE_DAY).length).toBe(2);
@@ -99,7 +100,12 @@ describe("runDay（1日の流れ）", async () => {
       for (const seq of p(run).inputSeqs as number[]) {
         const input = events[seq - 1]!;
         expect(input.seq).toBeLessThan(run.seq);
-        if (input.type === "prices.close") expect((p(input).date as string) < jstDay(run.recordedAt)).toBe(true);
+        if (input.type === "prices.close") {
+          // 判断は前の取引日の引けのあとから（#228）。終値は、その注文票の約定日より前の日で、判断より前に公開されたもの
+          const sheet = events.find((e) => e.type === "order_sheet.committed" && p(e).runSeq === run.seq);
+          if (sheet) expect((p(input).date as string) < (p(sheet).tradingDate as string)).toBe(true);
+          expect(cutoffOf(p(input).date as string) + 7 * 3_600_000).toBeLessThan(run.recordedAt);
+        }
         else {
           expect(["corporate_actions.applied", "agent.registered"]).toContain(input.type);
           expect(p(input).agentId).toBe(p(run).agentId);
@@ -117,8 +123,8 @@ describe("runDay（1日の流れ）", async () => {
     expect((await s.store.last())!.seq).toBe(before);
   });
 
-  it("営業日でない日は何もしない", async () => {
-    expect(await runDay("2026-11-14", s.deps)).toEqual([{ stage: "day", status: "skipped", detail: "not a business day" }]);
+  it("取引日でない日（切り替えより前の土曜）は何もしない", async () => {
+    expect(await runDay("2026-11-07", s.deps)).toEqual([{ stage: "day", status: "skipped", detail: "not a trading day" }]);
   });
 });
 

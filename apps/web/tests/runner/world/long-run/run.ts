@@ -7,7 +7,7 @@ import { expect, it } from "vitest";
 import type { LogEvent } from "../../../../src/events/types";
 import { holidayTable, holidaysFor } from "../../../../src/holidays";
 import { IngestedMarketData } from "../../../../src/ingest/market-data";
-import { invariantViolations, isBusinessDay } from "../../../../src/ledger/ledger";
+import { invariantViolations, isTradingDay, marketClosedDays } from "../../../../src/ledger/ledger";
 import { INITIAL_CASH } from "../../../../src/ledger/types";
 import { type RunnerDeps, runDay } from "../../../../src/runner/day";
 import { ruleAgents } from "../../../../src/runner/rule-agents";
@@ -26,13 +26,13 @@ const FIRST = "2026-11-02";
 const SYMBOLS = COMPANIES.map((c) => c.symbol);
 const p = (e: LogEvent) => e.payload as Record<string, unknown>;
 
-/** FIRST から、祝日と週末をとばした n 営業日 */
+/** FIRST から n 取引日（架空の市場の暦：2026-11-09 より前は祝日と週末をとばし、以後は毎日） */
 function businessDays(n: number): string[] {
-  const H = holidaysFor(FIRST, "2027-12-31", holidayTable);
+  const H = marketClosedDays(holidaysFor(FIRST, "2027-12-31", holidayTable));
   const out: string[] = [];
   for (let t = Date.parse(`${FIRST}T00:00:00Z`); out.length < n; t += 86_400_000) {
     const d = new Date(t).toISOString().slice(0, 10);
-    if (isBusinessDay(d, H)) out.push(d);
+    if (isTradingDay(d, H)) out.push(d);
   }
   return out;
 }
