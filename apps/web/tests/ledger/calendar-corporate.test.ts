@@ -61,12 +61,21 @@ describe("約定日の確認（§3）", () => {
     }
   });
 
-  it("前営業日の引け後処理が済んでいない口座では確定できない。前営業日の日中（締めと引けの間）の確定は、受け付けの前なので拒否する（#228）", () => {
-    // 金曜（10/9）の20:00に、火曜（10/13）の注文票。口座は木曜（10/8）の引け後のまま
-    expect(check(sheet("2026-10-13", jst("2026-10-09", 20)), "2026-10-08")).toEqual({ ok: false, reason: "account_not_ready" });
-    expect(check(sheet("2026-10-13", jst("2026-10-09", 10)), "2026-10-09")).toEqual({ ok: false, reason: "wrong_trading_date" });
-    expect(check(sheet("2026-10-13", jst("2026-10-09", 16, 29)), "2026-10-09")).toEqual({ ok: false, reason: "wrong_trading_date" });
-    expect(check(sheet("2026-10-13", jst("2026-10-09", 16, 30)), "2026-10-09")).toEqual({ ok: true });
+  it("前営業日の引け後処理が済んでいない口座では確定できない（前営業日の日中の確定を含む）。切り替えより前は受け付けの時間の決まりを当てない", () => {
+    // 金曜（10/9）の10:00に、火曜（10/13）の注文票。口座は木曜（10/8）の引け後のまま
+    expect(check(sheet("2026-10-13", jst("2026-10-09", 10)), "2026-10-08")).toEqual({ ok: false, reason: "account_not_ready" });
+    expect(check(sheet("2026-10-13", jst("2026-10-09", 10)), "2026-10-09")).toEqual({ ok: true });
+    expect(check(sheet("2026-10-13", jst("2026-10-09", 20)), "2026-10-09")).toEqual({ ok: true });
+  });
+
+  it("切り替えの日より後の取引日は、前の取引日の引け（16:30）より前の確定を拒否する（#228）。11/9 の取引日には当てない", () => {
+    const at = (s: OrderSheet, accountAsOf: string) => validateSheet(s, { universe: new Set(["AAA"]), alreadyCommitted: false, account: holding("AAA", 100, 0), holidays: new Set(), accountAsOf });
+    expect(at(sheet("2026-11-10", jst("2026-11-09", 10)), "2026-11-09")).toEqual({ ok: false, reason: "wrong_trading_date" });
+    expect(at(sheet("2026-11-10", jst("2026-11-09", 16, 30) - 1), "2026-11-09")).toEqual({ ok: false, reason: "wrong_trading_date" });
+    expect(at(sheet("2026-11-10", jst("2026-11-09", 16, 30)), "2026-11-09")).toEqual({ ok: true });
+    // 口座が整っていなくても、受け付けの前なら理由は wrong_trading_date
+    expect(at(sheet("2026-11-15", jst("2026-11-14", 12)), "2026-11-13")).toEqual({ ok: false, reason: "wrong_trading_date" });
+    expect(at(sheet("2026-11-09", jst("2026-11-06", 10)), "2026-11-06")).toEqual({ ok: true });
   });
 });
 
