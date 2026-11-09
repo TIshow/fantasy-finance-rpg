@@ -79,7 +79,7 @@ const sheetOf = (events: readonly LogEvent[], agentId: string, date: string) => 
 const of = (events: readonly LogEvent[], type: LogEvent["type"]) => events.filter((e) => e.type === type);
 const runOf = (events: readonly LogEvent[], sheet: LogEvent) => events[(p(sheet).runSeq as number) - 1]!;
 
-describe("架空の市場を10営業日回す", async () => {
+describe("架空の市場を10取引日回す", async () => {
   const w = await world();
   const of = (type: LogEvent["type"]) => w.events.filter((e) => e.type === type);
 
@@ -93,7 +93,7 @@ describe("架空の市場を10営業日回す", async () => {
       const { index: _, ...q0 } = quarters(SEED, c, 1)[0]!;
       expect(p(of("company.disclosed").find((e) => p(e).symbol === c.symbol)!)).toEqual({ symbol: c.symbol, period: "2026-Q3", ...q0 });
     }
-    // 1四半期は板寄せの20日なので、10営業日では次の四半期をまだ発表しない
+    // 1四半期は板寄せの20日なので、10取引日では次の四半期をまだ発表しない
     expect(w.disclosed.flat()).toEqual([]);
   });
 
@@ -106,9 +106,10 @@ describe("架空の市場を10営業日回す", async () => {
       expect(auctions.map((e) => p(e).symbol)).toEqual(COMPANIES.map((c) => c.symbol).sort());
     }
     // 価格がつくのは、ばらばらに売買する参加者や規則のAIの注文が、マーケットメイカーの指値に届いた日だけ
-    // （#139 で売買役の数字と規則を変えたあとは、60回のうち60回。数字を変える前は22回、数字だけ変えたときは57回）
+    // （#139 で売買役の数字と規則を変えたあとは、60回のうち60回。数字を変える前は22回、数字だけ変えたときは57回。
+    // 日付を土日を含む10取引日にしたあと（#228）は、ばらばらの参加者の乱数の並びが変わり、60回のうち57回）
     const priced = of("auction.cleared").filter((e) => p(e).price !== null);
-    expect(priced.length).toBe(60);
+    expect(priced.length).toBe(57);
     expect(of("auction.cleared").filter((e) => p(e).date === DAYS[0]).every((e) => p(e).price !== null)).toBe(true);
   });
 

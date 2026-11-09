@@ -1,5 +1,5 @@
 // 通しの確認（#139）：本番と同じ入口（scripts/daily-lib.ts の productionSetup と runDaily。コマンド `daily run` が呼ぶもの）で、
-// PGlite（試験用の Postgres）の上に20営業日を回す。毎日、記録だけから台帳を作り直して照合し（`daily verify` と同じ verifyDatabase）、
+// PGlite（試験用の Postgres）の上に20取引日を回す。毎日、記録だけから台帳を作り直して照合し（`daily verify` と同じ verifyDatabase）、
 // 決算の発表の件数と時刻、架空の6社すべてに板寄せの値段がつく日があること、祝日と週末をとばすことを確かめる。
 // 回し方は2つ：待つ形（`daily run --wait` と同じ。waitUntil が試験用の時計を進める）と、待たずに1日に数回回す形（GitHub Actions の形）。
 import type { PGlite } from "@electric-sql/pglite";
@@ -28,12 +28,17 @@ const fresh = async () => {
 };
 
 const p = (e: LogEvent) => e.payload as Record<string, unknown>;
-/** 2026-11-02（月）から 2026-12-01（火）まで。11/3（文化の日）と 11/23（勤労感謝の日）と週末を除くと、ちょうど20営業日 */
+/**
+ * 2026-11-02（月）から 2026-11-24（火）まで、ちょうど20取引日。架空の市場は 11/9 から毎日が取引日（D-047）なので、
+ * 除くのは切り替えより前の 11/3（文化の日）と週末（11/7・11/8）だけ。切り替えのあとの週末（11/14・11/15・11/21・11/22）と
+ * 11/23（勤労感謝の日）は取引日として数える
+ */
 const FIRST = "2026-11-02";
-const DAY20 = "2026-12-01";
-/** 20営業日の次の営業日 */
-const DAY21 = "2026-12-02";
-const HOLIDAYS = ["2026-11-03", "2026-11-23"];
+const DAY20 = "2026-11-24";
+/** 20取引日の次の取引日 */
+const DAY21 = "2026-11-25";
+const HOLIDAYS = ["2026-11-03"];
+const SKIPPED = ["2026-11-03", "2026-11-07", "2026-11-08"];
 const SYMBOLS = COMPANIES.map((c) => c.symbol);
 
 function calendarDays(from: string, to: string): string[] {
@@ -83,23 +88,24 @@ function crashingOn(type: string, n: number): SqlDb {
   return { ...db, transaction: (fn) => db.transaction((tx) => fn({ ...tx, query: (t, q) => (t.startsWith("INSERT INTO events") && q?.[2] === type && ++seen === n ? Promise.reject(new Error("crash")) : tx.query(t, q)) })) };
 }
 
-describe("本番の入口で20営業日を回す（PGlite）", () => {
+describe("本番の入口で20取引日を回す（PGlite）", () => {
   let waitingShape: string[] = [];
 
-  it("待つ形：祝日と週末をとばして20営業日を回し、毎日の照合が一致し、決算の発表は時期どおりで、各社が16日以上・6社そろって10日以上、板寄せの値段がつき、自己約定がない", async () => {
+  it("待つ形：切り替えより前の祝日と週末だけをとばして20取引日を回し、毎日の照合が一致し、決算の発表は時期どおりで、各社が16日以上・6社そろって10日以上、板寄せの値段がつき、自己約定がない", async () => {
     await fresh();
     const w = world();
     const { business, skipped } = await runWaiting(w, FIRST, DAY20);
     expect(business).toHaveLength(20);
-    for (const h of HOLIDAYS) expect(skipped).toContain(h);
-    expect(skipped.every((d) => HOLIDAYS.includes(d) || [0, 6].includes(new Date(`${d}T00:00:00Z`).getUTCDay()))).toBe(true);
+    expect(skipped).toEqual(SKIPPED);
+    // 切り替えのあとの土日と祝日は取引日（20取引日の四半期は、土日の板寄せも数える）
+    for (const d of ["2026-11-14", "2026-11-15", "2026-11-21", "2026-11-22", "2026-11-23"]) expect(business).toContain(d);
 
     const events = await readAllEvents(db);
     const of = (t: string) => events.filter((e) => e.type === t);
-    // 祝日（11/3・11/23）の日付では、何も記録しない
+    // 切り替えより前の祝日（11/3）の日付では、何も記録しない
     for (const h of HOLIDAYS) expect(events.filter((e) => p(e).date === h || p(e).tradingDate === h || p(e).asOf === h)).toEqual([]);
 
-    // 決算の発表：上場の直後（初日の締めより前）に 2026-Q3 を6社、20日目の引け（15:30）のあと・次の営業日の締めより前に 2026-Q4 を6社
+    // 決算の発表：上場の直後（初日の締めより前）に 2026-Q3 を6社、20日目の引け（15:30）のあと・次の取引日の締めより前に 2026-Q4 を6社
     const disclosed = disclosedOf(events);
     expect(disclosed).toHaveLength(12);
     for (const e of disclosed) expect(SYMBOLS).toContain(p(e).symbol);
@@ -128,14 +134,17 @@ describe("本番の入口で20営業日を回す（PGlite）", () => {
     // 確かめる対象が空でないこと：マーケットメイカーにも約定がある
     expect(of("fills.executed").some((e) => String(p(e).agentId).startsWith("mm-") && (p(e).fills as { qty: number }[]).some((f) => f.qty > 0))).toBe(true);
 
-    // 毎営業日、AI投資家3体の評価が残る
+    // 毎取引日、AI投資家3体の評価が残る
     expect(of("valuation.recorded").filter((e) => String(p(e).agentId).startsWith("ai-")).length).toBe(3 * 20);
 
-    // 20日目をもう一度回しても、何も書かない（発表も12件のまま）
+    // 20日目の引けのあとにもう一度回すと、20日目の分は何も書かず（発表も12件のまま）、次の取引日の判断だけを書く（#228）。
+    // その夜の判断の入力にも、20日目の 15:30 のあとの Q4 が入る（朝に判断した場合と同じ）
     await runDaily(DAY20, { ...w.opts(), waitUntil: w.waitUntil });
-    expect(await readAllEvents(db)).toHaveLength(events.length);
+    const night = (await readAllEvents(db)).slice(events.length);
+    expect(night.every((e) => ["agent.run", "post.published", "order_sheet.committed"].includes(e.type))).toBe(true);
+    expect(new Set(night.filter((e) => e.type === "order_sheet.committed").map((e) => p(e).tradingDate))).toEqual(new Set([DAY21]));
 
-    // 次の営業日：マーケットメイカーの判断の入力に Q4 が入る。20日目の判断の入力には入らない
+    // 次の取引日：マーケットメイカーの判断の入力に Q4 が入る。20日目の判断の入力には入らない
     await runWaiting(w, DAY21, DAY21);
     const all = await readAllEvents(db);
     expect(disclosedOf(all)).toHaveLength(12);
@@ -175,7 +184,7 @@ describe("本番の入口で20営業日を回す（PGlite）", () => {
     w.clock.set(jst(DAY20, 7));
     await runDaily(DAY20, w.opts());
     expect(disclosedOf(await readAllEvents(db))).toHaveLength(6);
-    // 次の営業日の朝7時：20日目の板寄せと引け後を補い、発表し、判断する
+    // 次の取引日の朝7時：20日目の板寄せと引け後を補い、発表し、判断する
     w.clock.set(jst(DAY21, 7));
     const results = await runDaily(DAY21, w.opts());
     const stages = results.map((r) => r.stage);
