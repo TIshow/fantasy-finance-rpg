@@ -1,6 +1,7 @@
 // LLM の AI 投資家を、毎日の実行の段に入れる（#179）。
-// 依頼（llmSubmit）：前の営業日の引けのあと（16:35 の実行）に、3体の入力を作って各社のバッチに依頼する。
-// 受け取りと判断（llmCollect、llm-collect.ts）：翌朝（06:50・07:20 の実行）に答えを受け取り、投稿と注文票を書く。
+// 依頼（llmSubmit）：前の取引日の引けのあと（16:35 の実行）に、3体の入力を作って各社のバッチに依頼する。
+// 受け取りと判断（llmCollect、llm-collect.ts）：依頼のあと、取引日の締め（8:30）までのどの実行（17:50・23:50・04:50・06:50・07:20）
+// でも、答えが返っていれば受け取り、投稿と注文票を書く（判断の受け付けは前の取引日の引けのあとから。#228）。
 // 流れは契約（src/contracts/llm.ts の LlmBatchPort）のとおり：本文を作る → 上限を確かめる → ①予約を記録 → 送る → ③バッチのIDを記録。
 // 書くのは保管だけ。API キーはここに来ない（各社の口が環境変数から読む）。
 import type { Clock, LlmBatchPort, LlmPolicy, LlmPreparedBatch, SheetInput } from "../contracts";
@@ -8,7 +9,7 @@ import { canonicalize } from "../events/canonical";
 import { sha256Hex } from "../events/hash";
 import { jstDayOf, LLM_DAILY_COST_LIMIT, llmCostUsed } from "../events/llm-cost";
 import type { LogEvent } from "../events/types";
-import { cutoffOf, nextBusinessDay, tradingDateFor } from "../ledger/ledger";
+import { cutoffOf, nextTradingDay, upcomingTradingDay } from "../ledger/ledger";
 import type { Account } from "../ledger/types";
 import { batchReservationOf, checkDailyBatchReservations } from "../llm/batch-plan";
 import { investorPrompt, investorUserText } from "../llm/investor-prompt";
@@ -85,7 +86,7 @@ export function llmRunPayload(
 }
 
 /**
- * 依頼の段。date は引けを迎えた営業日で、依頼は次の営業日（取引日）の分。今が、date の引けの取り込み（16:30）のあとで、
+ * 依頼の段。date は引けを迎えた取引日で、依頼は次の取引日の分（架空の市場の暦。2026-11-09 からは次の暦日）。今が、date の引けの取り込み（16:30）のあとで、
  * その取引日の締めの前（取引日が今の時点の次の取引日と同じ）でなければ飛ばす（板寄せの価格だけで動く日は、引け後の処理が
  * 9:35 の実行で済むが、依頼は 16:35 の実行まで待つ）。AIごとに、前の日の引け後の処理が済むまで待つ。①があれば（送ったかどうかによらず）何もしない
  * （②と③のあいだで止まった依頼は、受け取りの段が探す）
@@ -93,10 +94,10 @@ export function llmRunPayload(
 export async function llmSubmit(day: DayAccess, llm: LlmDeps, date: string): Promise<LlmStageResult> {
   const stage = "llm.submit";
   const H = day.holidays();
-  const T = nextBusinessDay(date, H);
+  const T = nextTradingDay(date, H);
   const now = day.clock.now();
   if (now < llmSubmitAt(date)) return { stage, status: "skipped", detail: `before the close of ${date}` };
-  if (tradingDateFor(now, H) !== T) return { stage, status: "skipped", detail: `not the evening before ${T}` };
+  if (upcomingTradingDay(now, H) !== T) return { stage, status: "skipped", detail: `not the evening before ${T}` };
   const events = day.events();
   const active = llm.investors.filter((a) => {
     const r = find(events, "agent.registered", (p) => p.agentId === a.id);
