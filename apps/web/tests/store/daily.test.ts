@@ -216,12 +216,16 @@ describe("本番の準備（productionSetup）", () => {
     expect(missedCutoff([{ stage: "decide", status: "skipped", detail: "after the open" }])).toBe(false);
   });
 
-  it("新しい参加者の開始日は、いまから締めがまだ来ていない最初の営業日（締めを過ぎていれば次の営業日、休日はとばす）", () => {
+  it("新しい参加者の開始日は、いまから締めがまだ来ていない最初の取引日（締めを過ぎていれば次の取引日。切り替えより前の休日と臨時休場はとばす）", () => {
     expect(firstOpenDay(jst("2026-11-09", 7), holidayTable)).toBe("2026-11-09");
     expect(firstOpenDay(jst("2026-11-09", 9), holidayTable)).toBe("2026-11-10");
     expect(firstOpenDay(jst("2026-11-06", 20), holidayTable)).toBe("2026-11-09"); // 金曜の夜 → 月曜
     expect(firstOpenDay(jst("2026-11-02", 7), holidayTable)).toBe("2026-11-02");
     expect(firstOpenDay(jst("2026-11-02", 20), holidayTable)).toBe("2026-11-04"); // 11/3 は文化の日
+    // 切り替え（11/9）のあとは土日・祝日も取引日。記録された臨時休場の日だけをとばす
+    expect(firstOpenDay(jst("2026-11-13", 20), holidayTable)).toBe("2026-11-14"); // 金曜の夜 → 土曜
+    expect(firstOpenDay(jst("2026-11-22", 20), holidayTable)).toBe("2026-11-23"); // 勤労感謝の日も取引日
+    expect(firstOpenDay(jst("2026-11-10", 9), holidayTable, new Set(["2026-11-11"]))).toBe("2026-11-12");
   });
 });
 

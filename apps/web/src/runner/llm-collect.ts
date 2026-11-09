@@ -14,7 +14,7 @@ import { llmReservationOf, llmSentOf, llmTicketOf } from "../events/llm-cost";
 import type { LogEvent } from "../events/types";
 import { cutoffOf, previousTradingDay } from "../ledger/ledger";
 import type { BatchClosed } from "../llm/batch-port";
-import { investorPrompt, investorUserText } from "../llm/investor-prompt";
+import { PAST_INVESTOR_PROMPTS, investorPrompt, investorUserText } from "../llm/investor-prompt";
 import { type InvestorDecision, parseInvestorOutput } from "../llm/investor-output";
 import { type LlmInvestor, investorRequest } from "./llm-agents";
 import { investorInputOf } from "./llm-input";
@@ -56,6 +56,12 @@ function orderRunOf(events: readonly LogEvent[], sub: LogEvent, closed: LogEvent
     (e) => e.type === "agent.run" && pl(e).agentId === pl(sub).agentId && pl(e).purpose === "order" && (pl(e).batchSeq === closed.seq || (pl(e).ok === false && (e.refs.includes(sub.seq) || e.refs.includes(closed.seq)))),
   );
 }
+
+/**
+ * その依頼（①）を送ったときのプロンプト。今の版なら今のもの、前の版ならその版のもの（PAST_INVESTOR_PROMPTS）。
+ * 分からない版なら今のもの（失敗の記録の理由で、作り直せなかったことは分かる）
+ */
+const submittedPrompt = (sub: LogEvent, prompt: LlmPrompt): LlmPrompt => (pl(sub).promptVersion === prompt.version ? prompt : (PAST_INVESTOR_PROMPTS[pl(sub).promptVersion as string] ?? prompt));
 
 /** 試運転の印のある依頼（①）か（#179）。①に付けた印を、その依頼の agent.run にもそのまま写す */
 const isDryRun = (sub: LogEvent) => pl(sub).dryRun === true;
@@ -119,7 +125,7 @@ async function settle(day: DayAccess, llm: LlmDeps, a: LlmInvestor, sub: LogEven
   // 閉じたのに判断を使えない依頼の失敗の run。参照に①と閉じた記録の seq を持たせ、回し直しではそれで見つける（二重に書かない）
   const fail = async (closed: LogEvent, errorCode: string) => {
     if (orderRunOf(day.events(), sub, closed)) return;
-    const payload = llmRunPayload(a, { prompt, inputSeqs: [], requestHash: pl(sub).sentBodyHash as string, startedAt: now, finishedAt: day.clock.now(), ok: false, errorCode, cost: costOf(sub, closed), dryRun: isDryRun(sub) });
+    const payload = llmRunPayload(a, { prompt: submittedPrompt(sub, prompt), inputSeqs: [], requestHash: pl(sub).sentBodyHash as string, startedAt: now, finishedAt: day.clock.now(), ok: false, errorCode, cost: costOf(sub, closed), dryRun: isDryRun(sub) });
     await must(day.append("agent.run", payload, [sub.seq, closed.seq]), "agent.run");
   };
   let closed = closedOf(day.events(), sub);
@@ -174,7 +180,7 @@ async function settle(day: DayAccess, llm: LlmDeps, a: LlmInvestor, sub: LogEven
 async function timeout(day: DayAccess, a: LlmInvestor, sub: LogEvent, closed: LogEvent, prompt: LlmPrompt): Promise<boolean> {
   if (orderRunOf(day.events(), sub, closed)) return false;
   const at = day.clock.now();
-  await must(day.append("agent.run", llmRunPayload(a, { prompt, inputSeqs: [], requestHash: pl(sub).sentBodyHash as string, startedAt: at, finishedAt: at, ok: false, errorCode: "timeout", cost: costOf(sub, closed), dryRun: isDryRun(sub) }), [sub.seq, closed.seq]), "agent.run");
+  await must(day.append("agent.run", llmRunPayload(a, { prompt: submittedPrompt(sub, prompt), inputSeqs: [], requestHash: pl(sub).sentBodyHash as string, startedAt: at, finishedAt: at, ok: false, errorCode: "timeout", cost: costOf(sub, closed), dryRun: isDryRun(sub) }), [sub.seq, closed.seq]), "agent.run");
   return true;
 }
 
@@ -194,7 +200,8 @@ async function decide(day: DayAccess, llm: LlmDeps, a: LlmInvestor, sub: LogEven
     throw new Error(`${what}: ${x.reason}`);
   };
   const run = (x: { purpose: "post" | "order"; inputSeqs: number[] } & ({ ok: true; outputHash: string } | { ok: false; errorCode: string })) =>
-    write(day.append("agent.run", { ...llmRunPayload(a, { ...x, prompt, requestHash: pl(sub).sentBodyHash as string, startedAt, finishedAt: day.clock.now(), cost, dryRun }), ...linked }, [...x.inputSeqs, closed.seq]), "agent.run");
+    // 記録するプロンプトは、依頼を送ったときのもの（版が同じなら今のもの。違えば、作り直せない失敗だけを書く）
+    write(day.append("agent.run", { ...llmRunPayload(a, { ...x, prompt: submittedPrompt(sub, prompt), requestHash: pl(sub).sentBodyHash as string, startedAt, finishedAt: day.clock.now(), cost, dryRun }), ...linked }, [...x.inputSeqs, closed.seq]), "agent.run");
   // 判断の記録は締めより前だけ（記録の検査）。締めを過ぎたら、その日は判断なし
   if (startedAt >= cutoff) {
     if (runs.length > 0) throw new CutoffPassed("after the cutoff");
@@ -209,8 +216,10 @@ async function decide(day: DayAccess, llm: LlmDeps, a: LlmInvestor, sub: LogEven
   const { text, inputSeqs } = investorUserText(input);
   const again = await llm.portOf(a.model.provider, { now: () => at }).prepare(investorRequest(a, { prompt, tradingDate: date, submittedAt: at, inputSeqs, userText: text, yenPerUsd: pl(sub).yenPerUsd as number }));
   if (again.sentBodyHash !== pl(sub).sentBodyHash || pl(sub).promptVersion !== prompt.version) {
+    // 理由は provider_error のまま（版の違いを表す理由はまだない。足すなら画面の表示の一覧も変える）。版の違いは段の詳細に出す
     await run({ purpose: "order", inputSeqs: [], ok: false, errorCode: "provider_error" });
-    return { wrote: true, note: "the input could not be rebuilt" };
+    const versions = pl(sub).promptVersion !== prompt.version ? ` (prompt version ${String(pl(sub).promptVersion)} was replaced by ${prompt.version})` : "";
+    return { wrote: true, note: `the input could not be rebuilt${versions}` };
   }
   // 出力：記録した run があればその出力（記録の形の判断）、なければ受け取った答え（なければ受け取り直す）
   let decision: InvestorDecision;

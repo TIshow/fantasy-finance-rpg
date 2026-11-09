@@ -141,16 +141,33 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
     const written = await day.disclose(deps.seed);
     if (written.length > 0) out.push({ stage: "disclose", status: "written", detail: written.join(",") });
   };
+  /**
+   * 前の取引日 closeDate の引けのあとに出すはずだった LLM の依頼を、まだなければ出す（夜の実行が抜けたとき）。済んでいる・時間の外なら
+   * llmSubmit は何も書かない。書いた・待つ・失敗だけを結果に残す（ふだんは、前の日の夜に済んでいるか、時間の外で飛ばす）
+   */
+  const lateSubmit = async (closeDate: string) => {
+    if (!deps.llm) return;
+    const r = await llmStage("llm.submit", () => llmSubmit(day.access(), deps.llm!, closeDate));
+    if (r.status === "written" || r.status === "waiting" || (r.detail ?? "").startsWith("error: ")) out.push(r);
+  };
   const collect = async (d: string) => (deps.llm ? [await llmStage("llm.collect", () => llmCollect(day.access(!deps.llm!.policy.dryRun), deps.llm!, d))] : []);
   if (!isTradingDay(date, day.log.holidays())) out.push({ stage: "day", status: "skipped", detail: "not a trading day" });
   else {
     const prev = previousTradingDay(date, day.log.holidays());
     const s = scheduleOf(date, day.log.holidays());
     await deps.waitUntil(s.decideAt);
+    let submitted = false;
     const decideStage = async () => {
       out.push(...(await day.catchUp(prev)));
       // 前の日の板寄せをここで補ったなら、その日の引けのあとに来た発表も、判断の前に書く（判断が、締めより前の発表を見るように）
       await disclose();
+      // 前の日の夜の実行（16:35・17:50・23:50）がすべて抜け、日付の変わったあと（04:50 など）が最初の実行なら、
+      // この日の分の LLM の依頼をここで出す（引け後の処理 → 依頼 → 判断 → 受け取りの順。済んでいれば llmSubmit は何も書かない）。
+      // 毎日の実行（decideNext）だけ。依頼は締めの前・前の日の引けのあとだけ書け、出した依頼はもう出さない
+      if (deps.decideNext === true && !submitted) {
+        submitted = true;
+        await lateSubmit(prev);
+      }
       const r = [await day.decide(date, prev), ...(await collect(date))];
       out.push(...r);
       return r.some((x) => x.status === "waiting");
@@ -181,6 +198,8 @@ export async function runDay(date: string, deps: RunnerDeps): Promise<StageResul
     const tagged = (r: StageResult): StageResult => ({ ...r, date: next });
     out.push(...(await day.catchUp(prevOfNext)));
     await disclose();
+    // date が臨時休場の日なら、その日の段では依頼を出していない（取引日の段は llmSubmit(date) で済んでいる）
+    await lateSubmit(prevOfNext);
     out.push(tagged(await day.decide(next, prevOfNext)));
     out.push(...(await collect(next)).map(tagged));
   }

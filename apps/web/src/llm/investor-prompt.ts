@@ -43,6 +43,15 @@ export const INVESTOR_SYSTEM_PROMPT = [
   '投稿も売買もしない日の例：{"post":null,"orders":[],"note":"様子を見る"}',
 ].join("\n");
 
+/**
+ * これまでの版のプロンプト（ID・版・指示の文のハッシュ）。版を上げる前に出した依頼（①）を、上げたあとのコードで受け取って
+ * 失敗の記録を書くとき、その依頼のプロンプトを記録に残すために使う（今の版を書くと、送っていない版の判断に見えるため）。
+ * ハッシュは、その版の指示の文から investorPrompt と同じ作り方で出したもの（版 2 は ae7663d の investor-prompt.ts）
+ */
+export const PAST_INVESTOR_PROMPTS: Readonly<Record<string, LlmPrompt>> = {
+  "2": { id: INVESTOR_PROMPT_ID, version: "2", hash: "e58a1ef24263696082a7cb9eb44182f510cd9a39df0cad71ea98c4d1d38157b8" },
+};
+
 /** プロンプト（ID・版・指示の文のハッシュ）。agent.run と依頼に残す */
 export async function investorPrompt(): Promise<LlmPrompt> {
   const hash = await sha256Hex(new TextEncoder().encode(canonicalize({ id: INVESTOR_PROMPT_ID, version: INVESTOR_PROMPT_VERSION, system: INVESTOR_SYSTEM_PROMPT })));
